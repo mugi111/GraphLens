@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalyzerDescriptor } from '../../domain/analyzer.js';
 import type { Evidence, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
-import { analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, runMigrations } from './migrations.js';
+import { analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -16,7 +16,7 @@ export class GraphStore {
     this.db = new Database(file);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
-    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration]);
+    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration]);
     this.interruptResidualAnalysisRuns();
   }
   close() { this.db.close(); }
@@ -34,7 +34,6 @@ export class GraphStore {
   activateAll(snapshots: GraphSnapshot[]) {
     const now = new Date().toISOString();
     const tx = this.db.transaction(() => {
-      const install = this.db.prepare('INSERT INTO plugin_installations(analyzer_id,version,api_version,capabilities_json,installed_at) VALUES(?,?,?,?,?) ON CONFLICT(analyzer_id) DO UPDATE SET version=excluded.version,api_version=excluded.api_version,capabilities_json=excluded.capabilities_json');
       const start = this.db.prepare('INSERT INTO analysis_runs(id,workspace_id,analyzer_id,analyzer_version,status,source_revision,config_json,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)');
       const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count) VALUES(?,?,?,?,?,?)');
       const insertNode = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
@@ -44,7 +43,6 @@ export class GraphStore {
       for (const snapshot of snapshots) {
         this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name').run(snapshot.workspace.id, snapshot.workspace.path, snapshot.workspace.name, now);
         const analyzerId = snapshot.source === 'demo' ? 'builtin.demo' : 'builtin.codegraph';
-        install.run(analyzerId, '1.0.0', '1', '["graph","evidence"]', now);
         const runId = randomUUID();
         start.run(runId, snapshot.workspace.id, analyzerId, '1.0.0', 'succeeded', null, '{}', now, now);
         const result = generation.run(runId, snapshot.workspace.id, analyzerId, now, snapshot.nodes.length, snapshot.edges.length);
@@ -92,7 +90,6 @@ export class GraphStore {
   analysisRun(id: string): AnalysisRun | undefined { const row = this.db.prepare('SELECT * FROM analysis_runs WHERE id=?').get(id) as any; return row ? this.parseAnalysisRun(row) : undefined; }
   analysisDiagnostics(runId: string): StoredAnalysisDiagnostic[] { return (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(runId) as any[]).map((row) => ({ sequence: row.sequence, generationId: row.generation_id ?? undefined, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined })); }
   startAnalysisRun(id: string, workspaceId: string, descriptor: AnalyzerDescriptor, sourceRevision: string | undefined, config: Record<string, unknown>): AnalysisRun {
-    this.installAnalyzer(descriptor);
     this.db.prepare('INSERT INTO analysis_runs(id,workspace_id,analyzer_id,analyzer_version,api_version,status,source_revision,config_json,started_at) VALUES(?,?,?,?,?,?,?,?,?)').run(id, workspaceId, descriptor.id, descriptor.version, descriptor.apiVersion, 'running', sourceRevision ?? null, JSON.stringify(config), new Date().toISOString());
     return this.analysisRun(id)!;
   }
@@ -126,7 +123,6 @@ export class GraphStore {
   failAnalysisRun(id: string, code: string, message: string, diagnostics: AnalysisDiagnostic[] = []): void {
     const tx = this.db.transaction(() => { const now = new Date().toISOString(); const diagnostic = this.db.prepare('INSERT INTO diagnostics(run_id,generation_id,sequence,code,severity,message,uri,line,detail_json) VALUES(?,NULL,?,?,?,?,?,?,?)'); diagnostics.forEach((value, sequence) => diagnostic.run(id, sequence, value.code ?? code, value.severity, value.message, value.uri ?? null, value.line ?? null, value.detail ? JSON.stringify(value.detail) : null)); this.db.prepare("UPDATE analysis_runs SET status='failed',completed_at=?,error_code=?,error_message=?,diagnostic_count=? WHERE id=? AND status='running'").run(now, code, message, diagnostics.length, id); }); tx();
   }
-  private installAnalyzer(descriptor: AnalyzerDescriptor) { this.db.prepare('INSERT INTO plugin_installations(analyzer_id,version,api_version,capabilities_json,installed_at) VALUES(?,?,?,?,?) ON CONFLICT(analyzer_id) DO UPDATE SET version=excluded.version,api_version=excluded.api_version,capabilities_json=excluded.capabilities_json').run(descriptor.id, descriptor.version, descriptor.apiVersion, JSON.stringify(descriptor.capabilities), new Date().toISOString()); }
   private interruptResidualAnalysisRuns() { const now = new Date().toISOString(); this.db.prepare("UPDATE analysis_runs SET status='failed',completed_at=?,error_code='PROCESS_INTERRUPTED',error_message='The GraphLens process stopped before this analysis run completed.' WHERE status='running'").run(now); }
   private parseAnalysisRun(row: any): AnalysisRun { return { id: row.id, workspaceId: row.workspace_id, analyzerId: row.analyzer_id, analyzerVersion: row.analyzer_version, apiVersion: row.api_version, status: row.status, sourceRevision: row.source_revision ?? undefined, config: JSON.parse(row.config_json), startedAt: row.started_at, completedAt: row.completed_at ?? undefined, errorCode: row.error_code ?? undefined, errorMessage: row.error_message ?? undefined, diagnosticCount: row.diagnostic_count }; }
   private parseContributionNode(row: any): GraphNode {

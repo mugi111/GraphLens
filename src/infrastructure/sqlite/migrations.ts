@@ -198,3 +198,30 @@ export const analyzerRunLifecycleMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Records plugin packages and their analyzer ownership independently of analysis runs. */
+export const pluginPackageOwnershipMigration: SchemaMigration = {
+  version: 4,
+  name: 'plugin-package-ownership',
+  up(db) {
+    db.exec(`
+      CREATE TABLE plugins (
+        id TEXT PRIMARY KEY,
+        version TEXT NOT NULL,
+        api_version TEXT NOT NULL,
+        package_name TEXT NOT NULL UNIQUE,
+        package_path TEXT NOT NULL,
+        manifest_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        installed_at TEXT NOT NULL
+      );
+      CREATE TABLE plugin_analyzers (
+        plugin_id TEXT NOT NULL,
+        analyzer_id TEXT NOT NULL UNIQUE,
+        PRIMARY KEY(plugin_id, analyzer_id),
+        FOREIGN KEY(plugin_id) REFERENCES plugins(id) ON DELETE CASCADE
+      );
+      DROP TABLE plugin_installations;
+    `);
+  },
+};
