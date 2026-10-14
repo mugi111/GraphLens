@@ -36,6 +36,26 @@ Each successful sync writes a new immutable generation and switches the active g
 - `GET /api/v1/graph?workspace=<id>&limit=<n>`
 - `GET /api/v1/nodes/:nodeId`
 
+## Analyzer runtime
+
+GraphLens composes built-in analyzers in memory at startup. Phase 2 does not discover, import, or install analyzer plugins. Every analyzer declares an exact host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created.
+
+The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
+
+Use the additive analyzer endpoints to run and poll an analyzer:
+
+```sh
+curl http://127.0.0.1:4174/api/v1/analyzers
+curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
+  -H 'content-type: application/json' \
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.demo"}'
+curl http://127.0.0.1:4174/api/v1/analysis-runs/<run-id>
+```
+
+`POST /api/v1/analysis-runs` returns a `running` run immediately. SQLite allows one running `(workspaceId, analyzerId)` pair, including across host instances. Successful results are fully validated and persisted with the generation, evidence, diagnostics, active pointer, and terminal run status in one transaction. This includes an empty successful result, which activates an empty generation.
+
+Failed analyzers keep the prior active generation. Their machine-readable error code, message, and diagnostics remain on the failed run. On startup, runs still marked `running` are converted to `failed` with `PROCESS_INTERRUPTED`.
+
 ## CodeGraph MCP capability
 
 GraphLens does not infer a complete graph from CodeGraph search or traversal results. Publicly described MCP behavior alone does not establish that a full graph enumeration/export operation exists. On startup GraphLens sends the standard MCP stdio `initialize` and `tools/list` requests to the configured server, so it can distinguish a reachable MCP server from an unavailable one:
