@@ -18,9 +18,10 @@ export async function validateInstalledPackage(prefix: string, expectedName?: st
   const canonicalPrefix = await realpath(prefix);
   const canonicalModules = await realpath(resolve(prefix, 'node_modules'));
   const packageRoot = await realpath(resolve(packageFile, '..'));
+  const canonicalPackageFile = await realpath(packageFile);
   const isWithin = (root: string, candidate: string) => { const rel = relative(root, candidate); return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)); };
-  if (!isWithin(canonicalPrefix, canonicalModules) || !isWithin(canonicalModules, packageRoot)) throw new Error('Installed package resolves outside its isolated npm prefix.');
-  const raw = JSON.parse(await readFile(packageFile, 'utf8')) as Record<string, unknown>;
+  if (!isWithin(canonicalPrefix, canonicalModules) || !isWithin(canonicalModules, packageRoot) || !isWithin(packageRoot, canonicalPackageFile)) throw new Error('Installed package resolves outside its isolated npm prefix.');
+  const raw = JSON.parse(await readFile(canonicalPackageFile, 'utf8')) as Record<string, unknown>;
   if (typeof raw.name !== 'string' || typeof raw.version !== 'string' || (expectedName && raw.name !== expectedName) || (expectedVersion && raw.version !== expectedVersion)) {
     throw new Error('Installed package name or exact version does not match the requested package.');
   }

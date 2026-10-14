@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { pluginInstallPrefix } from './package-paths.js';
 
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
-const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const IDENTIFIER = '(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)';
+const EXACT_VERSION = new RegExp(`^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-${IDENTIFIER}(?:\\.${IDENTIFIER})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`);
 const OUTPUT_LIMIT = 64 * 1024;
 const INSTALL_TIMEOUT_MS = 120_000;
 
@@ -46,13 +47,13 @@ function runNpm(args: string[]): Promise<void> {
     const append = (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes <= OUTPUT_LIMIT) output += chunk.toString('utf8');
-      else if (!settled) { settled = true; child.kill('SIGTERM'); reject(new Error('npm output exceeded the 64 KiB limit.')); }
+      else if (!settled) { settled = true; stopChild(child); reject(new Error('npm output exceeded the 64 KiB limit.')); }
     };
     child.stdout.on('data', append);
     child.stderr.on('data', append);
     child.once('error', (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`Unable to start npm: ${error.message}`)); } });
     const timer = setTimeout(() => {
-      if (!settled) { settled = true; child.kill('SIGTERM'); reject(new Error('npm installation timed out after 120 seconds.')); }
+      if (!settled) { settled = true; stopChild(child); reject(new Error('npm installation timed out after 120 seconds.')); }
     }, INSTALL_TIMEOUT_MS);
     child.once('close', (code) => {
       clearTimeout(timer);
@@ -62,4 +63,10 @@ function runNpm(args: string[]): Promise<void> {
       else reject(new Error(`npm installation failed with exit code ${code ?? 'unknown'}: ${output.slice(-4000)}`));
     });
   });
+}
+
+function stopChild(child: ReturnType<typeof spawn>) {
+  child.kill('SIGTERM');
+  const forceKill = setTimeout(() => child.kill('SIGKILL'), 2000);
+  forceKill.unref();
 }
