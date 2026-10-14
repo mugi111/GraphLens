@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
-import { legacySchemaMigration, runMigrations } from './migrations.js';
+import { analyzerOwnedGenerationsMigration, legacySchemaMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 
 export class GraphStore {
@@ -11,7 +11,7 @@ export class GraphStore {
     mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file);
     this.db.pragma('journal_mode = WAL');
-    runMigrations(this.db, [legacySchemaMigration]);
+    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration]);
   }
   close() { this.db.close(); }
   private workspace(row: any): Workspace { return { id: row.id, path: row.path, name: row.name }; }
