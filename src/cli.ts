@@ -47,6 +47,12 @@ export function parseCommand(argv: string[]): CliCommand {
 
 function help() { return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
+async function removePlugin(manager: PluginManager, id: string): Promise<void> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new Error('Plugin id is invalid.');
+  if (!await manager.remove(id)) throw new Error(`Plugin '${id}' is not installed.`);
+  console.log(`Removed plugin '${id}'.`);
+}
+
 async function addPlugin(manager: PluginManager, rawSpec: string): Promise<void> {
   const spec = parsePluginSpec(rawSpec);
   console.log(JSON.stringify(await manager.install(spec.name, spec.version), null, 2));
@@ -65,9 +71,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const registry = new AnalyzerRegistry();
     const manager = new PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') return addPlugin(manager, command.spec);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(command.id)) throw new Error('Plugin id is invalid.');
-    if (!await manager.remove(command.id)) throw new Error(`Plugin '${command.id}' is not installed.`);
-    console.log(`Removed plugin '${command.id}'.`);
+    await removePlugin(manager, command.id);
   } finally { store.close(); }
 }
 
