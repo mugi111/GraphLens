@@ -106,7 +106,7 @@ export const analyzerOwnedGenerationsMigration: SchemaMigration = {
         FOREIGN KEY(generation_id) REFERENCES analysis_generations(id)
       );
       CREATE TABLE evidence (
-        id INTEGER PRIMARY KEY,
+        id TEXT PRIMARY KEY,
         generation_id INTEGER NOT NULL,
         subject_kind TEXT NOT NULL,
         subject_id TEXT NOT NULL,
@@ -147,8 +147,17 @@ export const analyzerOwnedGenerationsMigration: SchemaMigration = {
       SELECT generation_id,id,workspace_id,kind,label,properties_json FROM nodes;
       INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json)
       SELECT generation_id,id,workspace_id,source_id,target_id,kind,properties_json FROM edges;
-      INSERT INTO evidence(generation_id,subject_kind,subject_id,level,payload_json)
-      SELECT generation_id, 'node', id, 'DIRECT', evidence_json FROM nodes WHERE evidence_json <> '[]';
+      INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json)
+      SELECT
+        'legacy:' || n.generation_id || ':' || n.id || ':' || item.key,
+        n.generation_id,
+        'node',
+        n.id,
+        COALESCE(json_extract(item.value, '$.level'), 'DIRECT'),
+        item.value
+      FROM nodes n
+      JOIN json_each(n.evidence_json) AS item
+      WHERE json_type(n.evidence_json) = 'array';
     `);
   },
 };
