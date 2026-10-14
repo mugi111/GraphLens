@@ -5,6 +5,8 @@ export { GraphIdentityFactory, canonicalUri } from './core/graph-identity.js';
 export { AnalyzerRegistry } from './application/analyzer-registry.js';
 export { AnalyzerRunner } from './application/analyzer-runner.js';
 export { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
+export { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 export { AnalysisError } from './domain/analyzer.js';
 export type { Analyzer, AnalyzerCapability, AnalyzerDescriptor, AnalysisContext, AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalysisErrorCode, EvidenceLevel, EvidenceSubjectKind, JsonValue } from './domain/analyzer.js';
+export type { GraphLensPluginManifest, PluginInventoryItem } from './domain/plugin.js';
 export type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from './domain/graph.js';

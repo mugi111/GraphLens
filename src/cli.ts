@@ -12,6 +12,8 @@ import { AnalyzerRegistry } from './application/analyzer-registry.js';
 import { AnalyzerRunner } from './application/analyzer-runner.js';
 import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { workspaceFor } from './infrastructure/codegraph/adapter.js';
+import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.js';
+import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
 
 type Options = { workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 function parse(argv: string[]): Options {
@@ -33,11 +35,13 @@ function help() { return `GraphLens\n\nUsage: graphlens --workspace <path> [opti
 async function main() {
   const options = parse(process.argv.slice(2));
   const base = process.cwd();
-  const store = new GraphStore(resolve(base, '.graphlens/graphlens.sqlite'));
+  const databaseFile = resolve(base, '.graphlens/graphlens.sqlite');
+  const store = new GraphStore(databaseFile);
   const adapter = new CodeGraphAdapter({ command: options.codegraphCommand, args: options.codegraphArgs });
   const graph = new GraphService(store, adapter);
   const registry = new AnalyzerRegistry();
   registry.register(demoAnalyzer);
+  await loadEnabledPlugins(resolvePluginStorePath(databaseFile), store, registry);
   const analyzerRunner = new AnalyzerRunner(store, registry);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
   if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
