@@ -13,12 +13,10 @@ export function runMigrations(db: Database.Database, migrations: SchemaMigration
     throw new Error('Schema migration versions must be unique.');
   }
 
-  db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)');
-  const applied = new Set((db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map((row) => row.version));
-  const pending = ordered.filter((migration) => !applied.has(migration.version));
-  if (!pending.length) return;
-
   const apply = db.transaction(() => {
+    db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)');
+    const applied = new Set((db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map((row) => row.version));
+    const pending = ordered.filter((migration) => !applied.has(migration.version));
     const record = db.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)');
     for (const migration of pending) {
       migration.up(db);
