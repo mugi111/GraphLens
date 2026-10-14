@@ -16,7 +16,16 @@ export type GraphEdge = {
   properties: Record<string, unknown>;
 };
 
-export type Evidence = { type: string; uri?: string; line?: number; detail?: string };
+export type Evidence = {
+  type: string;
+  uri?: string;
+  line?: number;
+  detail?: string;
+  level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
+  provenance?: Record<string, unknown>;
+  inputGenerations?: string[];
+  confidence?: number;
+};
 
 export type GraphSnapshot = {
   workspace: Workspace;
