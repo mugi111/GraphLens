@@ -35,11 +35,13 @@ export function parseCommand(argv: string[]): CliCommand {
       if (args.length === 2 && args[1] === '--json') return { command: 'plugin-list', json: true };
     }
     if (args[0] === 'add') {
-      if (args.length === 1 || (args.length === 2 && (args[1] === '--help' || args[1] === '-h'))) return { command: 'help', topic: 'plugin' };
+      if (args.length === 2 && (args[1] === '--help' || args[1] === '-h')) return { command: 'help', topic: 'plugin' };
+      if (args.length === 1) throw new CliUsageError('Usage: graphlens plugin add <package>@<exact-version>');
       if (args.length === 2) { const spec = parsePluginSpec(args[1]!); return { command: 'plugin-add', packageName: spec.name, version: spec.version }; }
     }
     if (args[0] === 'remove') {
-      if (args.length === 1 || (args.length === 2 && (args[1] === '--help' || args[1] === '-h'))) return { command: 'help', topic: 'plugin' };
+      if (args.length === 2 && (args[1] === '--help' || args[1] === '-h')) return { command: 'help', topic: 'plugin' };
+      if (args.length === 1) throw new CliUsageError('Usage: graphlens plugin remove <plugin-id>');
       if (args.length === 2) return { command: 'plugin-remove', id: args[1]! };
     }
     throw new CliUsageError('Usage: graphlens plugin <list [--json] | add <package>@<exact-version> | remove <plugin-id>>');
