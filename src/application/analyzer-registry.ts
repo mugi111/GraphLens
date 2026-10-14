@@ -10,10 +10,18 @@ export class AnalyzerRegistry {
 
   register(analyzer: Analyzer): void {
     validateDescriptor(analyzer.descriptor);
-    if (this.analyzers.has(analyzer.descriptor.id)) {
-      throw new AnalysisError('DUPLICATE_ANALYZER', `Analyzer '${analyzer.descriptor.id}' is already registered.`);
-    }
+    this.assertCanRegister([analyzer]);
     this.analyzers.set(analyzer.descriptor.id, analyzer);
+  }
+
+  assertCanRegister(analyzers: Analyzer[]): void {
+    const seen = new Set<string>();
+    for (const analyzer of analyzers) {
+      validateDescriptor(analyzer.descriptor);
+      const id = analyzer.descriptor.id;
+      if (seen.has(id) || this.analyzers.has(id)) throw new AnalysisError('DUPLICATE_ANALYZER', `Analyzer '${id}' is already registered.`);
+      seen.add(id);
+    }
   }
 
   get(id: string): Analyzer | undefined { return this.analyzers.get(id); }

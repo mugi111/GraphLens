@@ -1,4 +1,4 @@
-import type { Analyzer } from './analyzer.js';
+import type { Analyzer, AnalyzerDescriptor } from './analyzer.js';
 
 /** Metadata in the installed npm package's package.json. */
 export type GraphLensPluginManifest = {
@@ -9,6 +9,8 @@ export type GraphLensPluginManifest = {
   entry: string;
   /** Named export containing one or more analyzer factories. */
   export?: string;
+  /** Expected analyzer descriptors, compared exactly with the factory output. */
+  analyzers: AnalyzerDescriptor[];
 };
 
 export type LoadedPlugin = {
