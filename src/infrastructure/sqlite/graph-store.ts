@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
+import type { Evidence, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import { analyzerOwnedGenerationsMigration, legacySchemaMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 
@@ -50,7 +50,13 @@ export class GraphStore {
             insertEvidence.run(evidenceId(snapshot.workspace.id, analyzerId, 'node', n.id, evidence, index), generationId, 'node', n.id, evidence.level ?? 'DIRECT', JSON.stringify(evidence));
           }
         }
-        for (const e of snapshot.edges) insertEdge.run(generationId, e.id, e.workspaceId, e.sourceId, e.targetId, e.kind, JSON.stringify(e.properties));
+        for (const e of snapshot.edges) {
+          insertEdge.run(generationId, e.id, e.workspaceId, e.sourceId, e.targetId, e.kind, JSON.stringify(e.properties));
+          for (const [index, evidence] of (e.evidence ?? []).entries()) {
+            assertEvidence(evidence);
+            insertEvidence.run(evidenceId(snapshot.workspace.id, analyzerId, 'edge', e.id, evidence, index), generationId, 'edge', e.id, evidence.level ?? 'DIRECT', JSON.stringify(evidence));
+          }
+        }
         activate.run(snapshot.workspace.id, analyzerId, generationId);
       }
     });
@@ -90,13 +96,13 @@ export class GraphStore {
 function parseNode(r: any): GraphNode { return { id:r.id, workspaceId:r.workspace_id, kind:r.kind, label:r.label, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
 function parseEdge(r: any) { return { id:r.id, workspaceId:r.workspace_id, sourceId:r.source_id, targetId:r.target_id, kind:r.kind, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
 
-function assertEvidence(evidence: NonNullable<GraphNode['evidence']>[number]) {
+function assertEvidence(evidence: Evidence) {
   if (evidence.confidence !== undefined && evidence.level !== 'INFERRED') {
     throw new Error('Evidence confidence is only valid for INFERRED evidence.');
   }
 }
 
-function evidenceId(workspaceId: string, analyzerId: string, subjectKind: 'node' | 'edge', subjectId: string, evidence: NonNullable<GraphNode['evidence']>[number], index: number) {
+function evidenceId(workspaceId: string, analyzerId: string, subjectKind: 'node' | 'edge', subjectId: string, evidence: Evidence, index: number) {
   return evidence.id ?? createHash('sha256').update(JSON.stringify([workspaceId, analyzerId, subjectKind, subjectId, evidence, index])).digest('hex').slice(0, 32);
 }
 
