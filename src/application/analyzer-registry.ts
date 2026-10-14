@@ -17,6 +17,7 @@ export class AnalyzerRegistry {
   }
 
   get(id: string): Analyzer | undefined { return this.analyzers.get(id); }
+  unregister(id: string): void { this.analyzers.delete(id); }
   list(): AnalyzerDescriptor[] { return [...this.analyzers.values()].map(({ descriptor }) => ({ ...descriptor, capabilities: [...descriptor.capabilities] })); }
 }
 
