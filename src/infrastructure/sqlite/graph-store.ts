@@ -4,10 +4,12 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalyzerDescriptor } from '../../domain/analyzer.js';
 import type { Evidence, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
+import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import { analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
+export type StoredPlugin = GraphLensPluginManifest & { packageName: string; packagePath: string; enabled: boolean; analyzerIds: string[]; installedAt: string };
 
 export class GraphStore {
   private db: Database.Database;
@@ -88,6 +90,37 @@ export class GraphStore {
   }
   analysisRuns(workspaceId?: string, limit = 50): AnalysisRun[] { const sql = `SELECT * FROM analysis_runs ${workspaceId ? 'WHERE workspace_id=?' : ''} ORDER BY started_at DESC LIMIT ?`; const params = workspaceId ? [workspaceId, limit] : [limit]; return (this.db.prepare(sql).all(...params) as any[]).map((row) => this.parseAnalysisRun(row)); }
   analysisRun(id: string): AnalysisRun | undefined { const row = this.db.prepare('SELECT * FROM analysis_runs WHERE id=?').get(id) as any; return row ? this.parseAnalysisRun(row) : undefined; }
+  plugins(): PluginInventoryItem[] {
+    return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, version: plugin.version, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt }));
+  }
+  enabledPlugins(includeDisabled = false): StoredPlugin[] {
+    const rows = this.db.prepare(`SELECT * FROM plugins ${includeDisabled ? '' : 'WHERE enabled=1'} ORDER BY id`).all() as any[];
+    return rows.map((row) => ({ ...JSON.parse(row.manifest_json), packageName: row.package_name, packagePath: row.package_path, enabled: row.enabled === 1, analyzerIds: (this.db.prepare('SELECT analyzer_id FROM plugin_analyzers WHERE plugin_id=? ORDER BY analyzer_id').all(row.id) as Array<{ analyzer_id: string }>).map((item) => item.analyzer_id), installedAt: row.installed_at }));
+  }
+  registerPlugin(manifest: GraphLensPluginManifest, packageName: string, packagePath: string, analyzerIds: string[]): void {
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      if (this.db.prepare('SELECT 1 FROM plugins WHERE id=?').get(manifest.id)) throw new Error(`Plugin '${manifest.id}' is already installed.`);
+      const insert = this.db.prepare('INSERT INTO plugins(id,version,api_version,package_name,package_path,manifest_json,enabled,installed_at) VALUES(?,?,?,?,?,?,1,?)');
+      insert.run(manifest.id, manifest.version, manifest.apiVersion, packageName, packagePath, JSON.stringify(manifest), now);
+      const addAnalyzer = this.db.prepare('INSERT INTO plugin_analyzers(plugin_id,analyzer_id) VALUES(?,?)');
+      for (const id of analyzerIds) addAnalyzer.run(manifest.id, id);
+    });
+    tx();
+  }
+  disablePlugin(pluginId: string): StoredPlugin | undefined {
+    const plugin = this.enabledPlugins(true).find((item) => item.id === pluginId);
+    if (!plugin) return undefined;
+    const tx = this.db.transaction(() => {
+      this.db.prepare('UPDATE plugins SET enabled=0 WHERE id=?').run(pluginId);
+      this.db.prepare('DELETE FROM active_analysis_generations WHERE analyzer_id IN (SELECT analyzer_id FROM plugin_analyzers WHERE plugin_id=?)').run(pluginId);
+    });
+    tx();
+    return { ...plugin, enabled: false };
+  }
+  forgetDisabledPlugin(pluginId: string): void {
+    this.db.prepare('DELETE FROM plugins WHERE id=? AND enabled=0').run(pluginId);
+  }
   analysisDiagnostics(runId: string): StoredAnalysisDiagnostic[] { return (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(runId) as any[]).map((row) => ({ sequence: row.sequence, generationId: row.generation_id ?? undefined, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined })); }
   startAnalysisRun(id: string, workspaceId: string, descriptor: AnalyzerDescriptor, sourceRevision: string | undefined, config: Record<string, unknown>): AnalysisRun {
     const tx = this.db.transaction(() => {
