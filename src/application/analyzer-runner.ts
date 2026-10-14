@@ -29,7 +29,7 @@ export class AnalyzerRunner {
   private async execute(runId: string, descriptor: AnalyzerDescriptor, analyzer: Analyzer, workspace: Workspace, sourceRevision: string | undefined, config: Record<string, JsonValue>) {
     try {
       const result = await analyzer.analyze({ workspace, sourceRevision, config });
-      validateAnalysisResult(result, descriptor, workspace.id, this.store.activeGraphIds(workspace.id));
+      validateAnalysisResult(result, descriptor, workspace.id, this.store.activeGraphIds(workspace.id, descriptor.id));
       this.store.completeAnalysisRun(runId, descriptor, result);
     } catch (error) {
       const known = error instanceof AnalysisError ? error : new AnalysisError('ANALYZER_FAILED', message(error));
