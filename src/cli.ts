@@ -68,7 +68,8 @@ async function removePlugin(manager: PluginManager, id: string): Promise<void> {
 }
 
 async function addPlugin(manager: PluginManager, packageName: string, version: string): Promise<void> {
-  console.log(JSON.stringify(await manager.install(packageName, version), null, 2));
+  const installed = await manager.install(packageName, version);
+  console.log(`Installed ${installed.id}@${installed.version} (${installed.analyzerIds.join(', ')}).`);
 }
 
 function listPlugins(store: GraphStore, json: boolean): void {
@@ -85,6 +86,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') return listPlugins(store, command.json);
     const registry = new AnalyzerRegistry();
+    if (command.command === 'plugin-add') registry.register(demoAnalyzer);
     const manager = new PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') return addPlugin(manager, command.packageName, command.version);
     await removePlugin(manager, command.id);
@@ -119,6 +121,7 @@ async function main() {
   try { command = parseCommand(process.argv.slice(2)); }
   catch (error) { throw error instanceof CliUsageError ? error : new CliUsageError(error instanceof Error ? error.message : String(error)); }
   if (command.command === 'help') { console.log(help(command.topic)); return; }
+  if (command.command === 'plugin-add') console.error('Warning: installed plugin code runs with GraphLens permissions. Only install packages you trust.');
   if (command.command !== 'server') return runPlugin(command);
   return runServer(command);
 }
