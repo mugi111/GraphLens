@@ -91,10 +91,10 @@ async function runServer(options: ServerOptions) {
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
-  serve({ fetch: createApp(store, adapter, graph, analyzerRunner, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
+  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
-  const shutdown = () => { store.close(); process.exitCode = 0; };
+  const shutdown = () => { server.close(() => store.close()); }; 
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 }
 
