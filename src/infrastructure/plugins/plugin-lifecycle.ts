@@ -20,6 +20,11 @@ export async function removePlugin(pluginId: string, store: GraphStore, registry
   const disabled = store.disablePlugin(pluginId);
   if (!disabled) return false;
   for (const analyzerId of disabled.analyzerIds) registry.unregister(analyzerId);
-  await rm(expectedPrefix, { recursive: true, force: true });
+  try {
+    await rm(expectedPrefix, { recursive: true, force: true });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Plugin '${pluginId}' is disabled and its graph contributions are cleared, but package cleanup failed: ${detail}. Retry with 'graphlens plugin remove ${pluginId}'.`);
+  }
   return true;
 }

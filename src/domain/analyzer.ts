@@ -1,5 +1,8 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
 
+/** IDs owned by GraphLens itself and unavailable to installed packages. */
+export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph'] as const;
+
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export type AnalyzerCapability =
