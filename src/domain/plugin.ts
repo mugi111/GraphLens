@@ -23,7 +23,9 @@ export type LoadedPlugin = {
 
 export type PluginInventoryItem = {
   id: string;
+  packageName: string;
   version: string;
+  apiVersion: string;
   enabled: boolean;
   analyzers: string[];
   installedAt: string;
