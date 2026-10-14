@@ -52,7 +52,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
   try {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') {
-      console.log(JSON.stringify({ plugins: store.plugins() }, null, 2));
+      console.log(JSON.stringify({ plugins: store.pluginInventory() }, null, 2));
       return;
     }
     const registry = new AnalyzerRegistry();
