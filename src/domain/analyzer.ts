@@ -24,8 +24,13 @@ export type AnalysisContext = {
 };
 
 export type EvidenceLevel = 'DIRECT' | 'DERIVED' | 'INFERRED';
+export type EvidenceSubjectKind = 'node' | 'edge';
 
 export type AnalysisEvidence = {
+  /** Stable analyzer-provided identity, preserved across generations. */
+  id: string;
+  subjectKind: EvidenceSubjectKind;
+  subjectId: string;
   level: EvidenceLevel;
   type: string;
   uri?: string;
