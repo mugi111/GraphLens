@@ -1,0 +1,42 @@
+import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisResult, type AnalyzerDescriptor, type JsonValue } from '../domain/analyzer.js';
+import type { GraphEdge, GraphNode } from '../domain/graph.js';
+
+const MAX_ITEMS = 10_000;
+const MAX_TEXT = 10_000;
+const ID = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$/;
+
+/** Validates untrusted analyzer output before it is allowed into an immutable generation. */
+export function validateAnalysisResult(result: AnalysisResult, descriptor: AnalyzerDescriptor, workspaceId: string, activeIds: { nodes: ReadonlySet<string>; edges: ReadonlySet<string> }): void {
+  const errors: AnalysisDiagnostic[] = [];
+  if (!result || !Array.isArray(result.nodes) || !Array.isArray(result.edges) || !Array.isArray(result.evidence) || !Array.isArray(result.diagnostics)) {
+    fail(['Analysis result must contain nodes, edges, evidence, and diagnostics arrays.']);
+  }
+  if (result.nodes.length > MAX_ITEMS || result.edges.length > MAX_ITEMS || result.evidence.length > MAX_ITEMS || result.diagnostics.length > MAX_ITEMS) fail(['Analysis result exceeds the item limit.']);
+  if ((result.nodes.length || result.edges.length) && !descriptor.capabilities.includes('graph')) errors.push(diagnostic('CAPABILITY_GRAPH_REQUIRED', 'Analyzer emitted graph contributions without the graph capability.'));
+  if (result.evidence.length && !descriptor.capabilities.includes('evidence')) errors.push(diagnostic('CAPABILITY_EVIDENCE_REQUIRED', 'Analyzer emitted evidence without the evidence capability.'));
+  if (result.diagnostics.length && !descriptor.capabilities.includes('diagnostics')) errors.push(diagnostic('CAPABILITY_DIAGNOSTICS_REQUIRED', 'Analyzer emitted diagnostics without the diagnostics capability.'));
+  const nodes = unique(result.nodes, 'node', errors, (node) => validateNode(node, workspaceId, errors));
+  const edges = unique(result.edges, 'edge', errors, (edge) => validateEdge(edge, workspaceId, errors));
+  for (const edge of result.edges) if (!nodes.has(edge.sourceId) && !activeIds.nodes.has(edge.sourceId)) errors.push(diagnostic('EDGE_SOURCE_MISSING', `Edge '${edge.id}' source '${edge.sourceId}' is unavailable.`));
+  for (const edge of result.edges) if (!nodes.has(edge.targetId) && !activeIds.nodes.has(edge.targetId)) errors.push(diagnostic('EDGE_TARGET_MISSING', `Edge '${edge.id}' target '${edge.targetId}' is unavailable.`));
+  const evidenceIds = new Set<string>();
+  const attached = new Set<string>();
+  for (const evidence of result.evidence) validateEvidence(evidence, nodes, edges, evidenceIds, attached, errors);
+  for (const node of result.nodes) if (!attached.has(`node:${node.id}`)) errors.push(diagnostic('NODE_EVIDENCE_REQUIRED', `Node '${node.id}' has no evidence.`));
+  for (const edge of result.edges) if (!attached.has(`edge:${edge.id}`)) errors.push(diagnostic('EDGE_EVIDENCE_REQUIRED', `Edge '${edge.id}' has no evidence.`));
+  for (const item of result.diagnostics) {
+    if (!validDiagnostic(item)) errors.push(diagnostic('INVALID_DIAGNOSTIC', 'Analyzer emitted an invalid diagnostic.'));
+    else if (item.severity === 'error') errors.push(diagnostic(item.code ?? 'ANALYZER_ERROR_DIAGNOSTIC', item.message));
+  }
+  if (errors.length) throw new AnalysisError('INVALID_RESULT', errors[0].message, errors);
+}
+
+function unique<T extends { id: string }>(items: T[], kind: string, errors: AnalysisDiagnostic[], validate: (item: T) => void) { const ids = new Set<string>(); for (const item of items) { if (!ID.test(item.id)) errors.push(diagnostic('INVALID_ID', `${kind} has an invalid stable id.`)); else if (ids.has(item.id)) errors.push(diagnostic('DUPLICATE_ID', `Duplicate ${kind} id '${item.id}'.`)); ids.add(item.id); validate(item); } return ids; }
+function validateNode(node: GraphNode, workspaceId: string, errors: AnalysisDiagnostic[]) { if (node.workspaceId !== workspaceId) errors.push(diagnostic('WORKSPACE_MISMATCH', `Node '${node.id}' belongs to another workspace.`)); if (!text(node.kind) || !text(node.label) || !json(node.properties)) errors.push(diagnostic('INVALID_NODE', `Node '${node.id}' is not JSON-shaped.`)); }
+function validateEdge(edge: GraphEdge, workspaceId: string, errors: AnalysisDiagnostic[]) { if (edge.workspaceId !== workspaceId) errors.push(diagnostic('WORKSPACE_MISMATCH', `Edge '${edge.id}' belongs to another workspace.`)); if (!ID.test(edge.sourceId) || !ID.test(edge.targetId) || !text(edge.kind) || !json(edge.properties)) errors.push(diagnostic('INVALID_EDGE', `Edge '${edge.id}' is not JSON-shaped.`)); }
+function validateEvidence(e: AnalysisEvidence, nodes: Set<string>, edges: Set<string>, ids: Set<string>, attached: Set<string>, errors: AnalysisDiagnostic[]) { const exists = e.subjectKind === 'node' ? nodes.has(e.subjectId) : e.subjectKind === 'edge' ? edges.has(e.subjectId) : false; if (!ID.test(e.id) || ids.has(e.id)) errors.push(diagnostic('DUPLICATE_EVIDENCE_ID', `Evidence '${e.id}' lacks a unique stable id.`)); ids.add(e.id); if (!exists) errors.push(diagnostic('EVIDENCE_SUBJECT_MISSING', `Evidence '${e.id}' refers to a missing subject.`)); else attached.add(`${e.subjectKind}:${e.subjectId}`); if (!['DIRECT', 'DERIVED', 'INFERRED'].includes(e.level) || !text(e.type) || !json(e.provenance) || !json(e.inputGenerations)) errors.push(diagnostic('INVALID_EVIDENCE', `Evidence '${e.id}' is invalid.`)); if (e.confidence !== undefined && (e.level !== 'INFERRED' || typeof e.confidence !== 'number' || e.confidence < 0 || e.confidence > 1)) errors.push(diagnostic('INVALID_CONFIDENCE', `Evidence '${e.id}' has an invalid confidence.`)); if ((e.uri !== undefined && !text(e.uri)) || (e.line !== undefined && (!Number.isInteger(e.line) || e.line < 1)) || (e.detail !== undefined && !text(e.detail))) errors.push(diagnostic('INVALID_EVIDENCE_LOCATION', `Evidence '${e.id}' has an invalid location.`)); }
+function validDiagnostic(value: AnalysisDiagnostic) { return ['info', 'warning', 'error'].includes(value.severity) && text(value.message) && (value.code === undefined || text(value.code)) && (value.uri === undefined || text(value.uri)) && (value.line === undefined || (Number.isInteger(value.line) && value.line > 0)) && (value.detail === undefined || json(value.detail)); }
+function json(value: unknown, depth = 0): value is JsonValue { if (depth > 16) return false; if (value === null || typeof value === 'boolean' || typeof value === 'number') return Number.isFinite(value as number); if (typeof value === 'string') return value.length <= MAX_TEXT; if (Array.isArray(value)) return value.length <= MAX_ITEMS && value.every((item) => json(item, depth + 1)); return typeof value === 'object' && value !== null && Object.keys(value).length <= MAX_ITEMS && Object.values(value as Record<string, unknown>).every((item) => json(item, depth + 1)); }
+function text(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && value.length <= MAX_TEXT; }
+function diagnostic(code: string, message: string): AnalysisDiagnostic { return { code, severity: 'error', message }; }
+function fail(messages: string[]): never { throw new AnalysisError('INVALID_RESULT', messages[0], messages.map((message) => diagnostic('INVALID_RESULT_SHAPE', message))); }
