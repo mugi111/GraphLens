@@ -45,16 +45,14 @@ function runNpm(args: string[]): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn('npm', args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let outputBytes = 0;
-    let output = '';
     let settled = false;
     const append = (chunk: Buffer) => {
       outputBytes += chunk.length;
-      if (outputBytes <= OUTPUT_LIMIT) output += chunk.toString('utf8');
-      else if (!settled) { settled = true; stopChild(child); reject(new Error('npm output exceeded the 64 KiB limit.')); }
+      if (outputBytes > OUTPUT_LIMIT && !settled) { settled = true; stopChild(child); reject(new Error('npm output exceeded the 64 KiB limit.')); }
     };
     child.stdout.on('data', append);
     child.stderr.on('data', append);
-    child.once('error', (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error(`Unable to start npm: ${error.message}`)); } });
+    child.once('error', (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(new Error('Unable to start npm. Verify npm is installed and available on PATH.')); } });
     const timer = setTimeout(() => {
       if (!settled) { settled = true; stopChild(child); reject(new Error('npm installation timed out after 120 seconds.')); }
     }, INSTALL_TIMEOUT_MS);
@@ -63,7 +61,7 @@ function runNpm(args: string[]): Promise<void> {
       if (settled) return;
       settled = true;
       if (code === 0) resolvePromise();
-      else reject(new Error(`npm installation failed with exit code ${code ?? 'unknown'}: ${output.slice(-4000)}`));
+      else reject(new Error(`npm installation failed with exit code ${code ?? 'unknown'}. Check npm logs for details.`));
     });
   });
 }
