@@ -25,7 +25,7 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     catch (error) { if (error instanceof AnalysisError) return c.json({ error: error.message, code: error.code, diagnostics: error.diagnostics }, error.code === 'RUN_ALREADY_ACTIVE' ? 409 : error.code === 'WORKSPACE_NOT_FOUND' || error.code === 'ANALYZER_NOT_FOUND' ? 404 : 400); throw error; }
   });
   app.get('/api/v1/analysis-runs', (c) => c.json({ runs: store.analysisRuns(c.req.query('workspace'), runLimit(c.req.query('limit'))) }));
-  app.get('/api/v1/analysis-runs/:runId', (c) => { const run = store.analysisRun(c.req.param('runId')); return run ? c.json(run) : c.json({ error: 'Analysis run not found' }, 404); });
+  app.get('/api/v1/analysis-runs/:runId', (c) => { const run = store.analysisRun(c.req.param('runId')); return run ? c.json({ ...run, diagnostics: store.analysisDiagnostics(run.id) }) : c.json({ error: 'Analysis run not found' }, 404); });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
   app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
   app.use('/*', serveStatic({ root: webRoot }));
