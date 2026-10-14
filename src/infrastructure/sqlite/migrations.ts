@@ -162,3 +162,39 @@ export const analyzerOwnedGenerationsMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Adds durable analyzer-run failure diagnostics and enforces one live run per analyzer/workspace. */
+export const analyzerRunLifecycleMigration: SchemaMigration = {
+  version: 3,
+  name: 'analysis-run-lifecycle-diagnostics',
+  up(db) {
+    db.exec(`
+      ALTER TABLE analysis_runs ADD COLUMN api_version TEXT NOT NULL DEFAULT '1';
+      ALTER TABLE analysis_runs ADD COLUMN error_code TEXT;
+      ALTER TABLE analysis_runs ADD COLUMN error_message TEXT;
+      ALTER TABLE analysis_runs ADD COLUMN diagnostic_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE diagnostics RENAME TO diagnostics_legacy;
+      CREATE TABLE diagnostics (
+        id INTEGER PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        generation_id INTEGER,
+        sequence INTEGER NOT NULL,
+        code TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        message TEXT NOT NULL,
+        uri TEXT,
+        line INTEGER,
+        detail_json TEXT,
+        FOREIGN KEY(run_id) REFERENCES analysis_runs(id),
+        FOREIGN KEY(generation_id) REFERENCES analysis_generations(id),
+        UNIQUE(run_id, sequence)
+      );
+      INSERT INTO diagnostics(run_id,generation_id,sequence,code,severity,message,detail_json)
+      SELECT g.run_id, d.generation_id, d.id, 'LEGACY_DIAGNOSTIC', d.severity, d.message, d.payload_json
+      FROM diagnostics_legacy d JOIN analysis_generations g ON g.id=d.generation_id;
+      DROP TABLE diagnostics_legacy;
+      CREATE UNIQUE INDEX analysis_runs_one_running_per_analyzer
+        ON analysis_runs(workspace_id, analyzer_id) WHERE status='running';
+    `);
+  },
+};
