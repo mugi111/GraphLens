@@ -32,14 +32,25 @@ export async function loadInstalledPlugin(prefix: string, expectedName?: string,
 /** Startup loader: only packages already marked enabled in the selected database are loaded. */
 export async function loadEnabledPlugins(pluginStorePath: string, store: GraphStore, registry: AnalyzerRegistry): Promise<void> {
   for (const saved of store.enabledPlugins()) {
-    const expectedPrefix = pluginInstallPrefix(pluginStorePath, saved.id);
-    if (saved.packagePath !== expectedPrefix) throw new Error(`Plugin '${saved.id}' has an invalid isolated package path.`);
-    const loaded = await loadInstalledPlugin(expectedPrefix, saved.packageName, saved.version, saved.lockHash);
-    if (loaded.manifest.id !== saved.id || loaded.manifest.version !== saved.version || loaded.manifest.apiVersion !== saved.apiVersion || loaded.manifest.entry !== saved.entry || loaded.manifest.export !== saved.export || !descriptorsEqual(loaded.manifest.analyzers, saved.analyzers)) throw new Error(`Installed package metadata for plugin '${saved.id}' differs from the saved registration.`);
-    const actualIds = loaded.analyzers.map((analyzer) => analyzer.descriptor.id).sort();
-    if (JSON.stringify(actualIds) !== JSON.stringify([...saved.analyzerIds].sort())) throw new Error(`Analyzer exports for plugin '${saved.id}' differ from the saved registration.`);
-    registry.assertCanRegister(loaded.analyzers);
-    for (const analyzer of loaded.analyzers) registry.register(analyzer);
+    const registeredIds: string[] = [];
+    try {
+      const expectedPrefix = pluginInstallPrefix(pluginStorePath, saved.id);
+      if (saved.packagePath !== expectedPrefix || !saved.lockHash || !saved.installationId) throw new Error('INVALID_SAVED_INSTALLATION');
+      const loaded = await loadInstalledPlugin(expectedPrefix, saved.packageName, saved.version, saved.lockHash);
+      if (loaded.manifest.id !== saved.id || loaded.manifest.version !== saved.version || loaded.manifest.apiVersion !== saved.apiVersion || loaded.manifest.entry !== saved.entry || loaded.manifest.export !== saved.export || !descriptorsEqual(loaded.manifest.analyzers, saved.analyzers)) throw new Error('MANIFEST_MISMATCH');
+      const actualIds = loaded.analyzers.map((analyzer) => analyzer.descriptor.id).sort();
+      if (JSON.stringify(actualIds) !== JSON.stringify([...saved.analyzerIds].sort())) throw new Error('ANALYZER_IDS_MISMATCH');
+      registry.assertCanRegister(loaded.analyzers);
+      for (const analyzer of loaded.analyzers) {
+        registry.register(analyzer);
+        registeredIds.push(analyzer.descriptor.id);
+      }
+    } catch {
+      try { store.disablePlugin(saved.id, 'PLUGIN_LOAD_FAILED'); }
+      catch { process.stderr.write('GraphLens: a failed plugin could not be disabled in storage.\n'); }
+      for (const id of registeredIds) registry.unregister(id);
+      process.stderr.write('GraphLens: an enabled plugin failed startup validation and was disabled.\n');
+    }
   }
 }
 
