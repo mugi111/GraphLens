@@ -46,15 +46,16 @@ export function parseCommand(argv: string[]): CliCommand {
 
 function help() { return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
+function listPlugins(store: GraphStore): void {
+  console.log(JSON.stringify({ plugins: store.pluginInventory() }, null, 2));
+}
+
 async function runPlugin(command: PluginCommand): Promise<void> {
   const databaseFile = resolve(process.cwd(), '.graphlens/graphlens.sqlite');
   const store = new GraphStore(databaseFile, { recoverInterruptedRuns: false });
   try {
     const plugins = resolvePluginStorePath(databaseFile);
-    if (command.command === 'plugin-list') {
-      console.log(JSON.stringify({ plugins: store.pluginInventory() }, null, 2));
-      return;
-    }
+    if (command.command === 'plugin-list') return listPlugins(store);
     const registry = new AnalyzerRegistry();
     const manager = new (await import('./infrastructure/plugins/plugin-manager.js')).PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') {
