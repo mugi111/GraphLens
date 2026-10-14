@@ -52,10 +52,10 @@ export function parseCommand(argv: string[]): CliCommand {
   const out: ServerOptions = { command: 'server', workspaces: [], codegraphArgs: [], port: 4174, noOpen: false, demo: false };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i]!;
-    const next = () => { const value = argv[++i]; if (!value || value.startsWith('--')) throw new Error(`${v} requires a value`); return value; };
+    const next = (allowOption = false) => { const value = argv[++i]; if (!value || (!allowOption && value.startsWith('--'))) throw new Error(`${v} requires a value`); return value; };
     if (v === '--workspace' || v === '-w') out.workspaces.push(resolve(next()));
     else if (v === '--codegraph-command') out.codegraphCommand = next();
-    else if (v === '--codegraph-arg') out.codegraphArgs.push(next());
+    else if (v === '--codegraph-arg') out.codegraphArgs.push(next(true));
     else if (v === '--port') { out.port = Number(next()); if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error('Port must be between 1 and 65535.'); }
     else if (v === '--no-open') out.noOpen = true;
     else if (v === '--demo') out.demo = true;
