@@ -42,6 +42,7 @@ export type AnalysisEvidence = {
 };
 
 export type AnalysisDiagnostic = {
+  code?: string;
   severity: 'info' | 'warning' | 'error';
   message: string;
   uri?: string;
@@ -60,3 +61,23 @@ export type Analyzer = {
   descriptor: AnalyzerDescriptor;
   analyze(context: AnalysisContext): Promise<AnalysisResult>;
 };
+
+/** Machine-readable failures returned by the analyzer host. */
+export type AnalysisErrorCode =
+  | 'ANALYZER_NOT_FOUND'
+  | 'API_VERSION_UNSUPPORTED'
+  | 'DUPLICATE_ANALYZER'
+  | 'INVALID_DESCRIPTOR'
+  | 'WORKSPACE_NOT_FOUND'
+  | 'RUN_ALREADY_ACTIVE'
+  | 'PROCESS_INTERRUPTED'
+  | 'ANALYZER_FAILED'
+  | 'INVALID_RESULT'
+  | 'PERSISTENCE_FAILED';
+
+export class AnalysisError extends Error {
+  constructor(public readonly code: AnalysisErrorCode, message: string, public readonly diagnostics: AnalysisDiagnostic[] = []) {
+    super(message);
+    this.name = 'AnalysisError';
+  }
+}
