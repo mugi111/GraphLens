@@ -38,7 +38,11 @@ Each successful sync writes a new immutable generation and switches the active g
 
 ## Analyzer runtime
 
-GraphLens composes built-in analyzers in memory at startup. Phase 2 does not discover, import, or install analyzer plugins. Every analyzer declares an exact host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created.
+GraphLens composes built-in analyzers and previously enabled package plugins at startup. Every analyzer declares a host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created. `GET /api/v1/analyzers` lists loaded analyzers; `GET /api/v1/plugins` lists package plugins recorded in the selected database. Plugin installation and removal commands are not exposed yet.
+
+Plugins are exact-version npm packages stored under `.graphlens/plugins/<plugin-id>` beside the selected SQLite database. Installation is staged with `--save-exact --ignore-scripts --omit=dev --no-audit --no-fund`; it does not invoke package lifecycle scripts. Packages declare a `graphlens` object in `package.json` with `id`, `apiVersion`, and a package-relative `entry` module. That module exports `createAnalyzer()`, which returns an analyzer or an array of analyzers. GraphLens validates package identity, manifest compatibility, analyzer descriptors, and canonical entry-path containment before importing the module.
+
+**Security boundary:** package authors' analyzer code runs in-process with GraphLens permissions. This is not a sandbox. `--ignore-scripts` prevents npm lifecycle scripts, but it does not make imported plugin code safe; only install packages from sources you trust. GraphLens loads only packages already marked enabled in the selected database and never installs or updates packages automatically. Disabling/removing a plugin first clears its active graph contributions so they cannot remain visible after package removal.
 
 The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
 
