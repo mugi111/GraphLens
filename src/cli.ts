@@ -44,7 +44,7 @@ export function parseCommand(argv: string[]): CliCommand {
       if (args.length === 1) throw new CliUsageError('Usage: graphlens plugin remove <plugin-id>');
       if (args.length === 2) {
         const id = args[1]!;
-              return { command: 'plugin-remove', id };
+        return { command: 'plugin-remove', id };
       }
     }
     throw new CliUsageError('Usage: graphlens plugin <list [--json] | add <package>@<exact-version> | remove <plugin-id>>');
