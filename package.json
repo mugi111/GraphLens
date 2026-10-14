@@ -1,0 +1,35 @@
+{
+  "name": "graphlens",
+  "version": "0.1.0",
+  "description": "Local-first architecture graph explorer",
+  "type": "module",
+  "bin": { "graphlens": "./dist/cli.js" },
+  "exports": "./dist/index.js",
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20.11.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "better-sqlite3": "^12.4.1",
+    "hono": "^4.9.6",
+    "open": "^10.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.30",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.4",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "cytoscape": "^3.33.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7"
+  }
+}
