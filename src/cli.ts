@@ -15,6 +15,7 @@ import { workspaceFor } from './infrastructure/codegraph/adapter.js';
 import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.js';
 import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
 import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
+import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 
 type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 type PluginCommand = { command: 'plugin-list' } | { command: 'plugin-add'; spec: string } | { command: 'plugin-remove'; id: string };
@@ -46,6 +47,11 @@ export function parseCommand(argv: string[]): CliCommand {
 
 function help() { return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
+async function addPlugin(manager: PluginManager, rawSpec: string): Promise<void> {
+  const spec = parsePluginSpec(rawSpec);
+  console.log(JSON.stringify(await manager.install(spec.name, spec.version), null, 2));
+}
+
 function listPlugins(store: GraphStore): void {
   console.log(JSON.stringify({ plugins: store.pluginInventory() }, null, 2));
 }
@@ -57,12 +63,8 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') return listPlugins(store);
     const registry = new AnalyzerRegistry();
-    const manager = new (await import('./infrastructure/plugins/plugin-manager.js')).PluginManager(plugins, store, registry);
-    if (command.command === 'plugin-add') {
-      const spec = parsePluginSpec(command.spec);
-      console.log(JSON.stringify(await manager.install(spec.name, spec.version), null, 2));
-      return;
-    }
+    const manager = new PluginManager(plugins, store, registry);
+    if (command.command === 'plugin-add') return addPlugin(manager, command.spec);
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(command.id)) throw new Error('Plugin id is invalid.');
     if (!await manager.remove(command.id)) throw new Error(`Plugin '${command.id}' is not installed.`);
     console.log(`Removed plugin '${command.id}'.`);
