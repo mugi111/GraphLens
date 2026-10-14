@@ -106,12 +106,13 @@ export const analyzerOwnedGenerationsMigration: SchemaMigration = {
         FOREIGN KEY(generation_id) REFERENCES analysis_generations(id)
       );
       CREATE TABLE evidence (
-        id TEXT PRIMARY KEY,
         generation_id INTEGER NOT NULL,
+        id TEXT NOT NULL,
         subject_kind TEXT NOT NULL,
         subject_id TEXT NOT NULL,
         level TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        PRIMARY KEY(generation_id, id),
         FOREIGN KEY(generation_id) REFERENCES analysis_generations(id)
       );
       CREATE TABLE diagnostics (
