@@ -1,10 +1,10 @@
 import { parser } from '@lezer/python';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import type { GraphEdge, GraphNode, Workspace } from '../../domain/graph.js';
-import type { AnalysisEvidence } from '../../domain/analyzer.js';
+import type { AnalysisEvidence, JsonValue } from '../../domain/analyzer.js';
 import type { PythonImportFact, PythonSourceFile } from './python-source-types.js';
 
-export type ParsedPythonFile = { nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; imports: PythonImportFact[]; diagnostics: Array<{ code: string; severity: 'warning'; message: string; uri: string; line: number; detail: Record<string, unknown> }> };
+export type ParsedPythonFile = { nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; imports: PythonImportFact[]; diagnostics: Array<{ code: string; severity: 'warning'; message: string; uri: string; line: number; detail: Record<string, JsonValue> }> };
 type Range = { from: number; to: number };
 const identity = new GraphIdentityFactory();
 
@@ -15,17 +15,24 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
+  const nodesById = new Map<string, GraphNode>();
+  const edgesById = new Set<string>();
   const imports: PythonImportFact[] = [];
   const diagnostics: ParsedPythonFile['diagnostics'] = [];
   const addNode = (uri: string, kind: string, label: string, range: Range, properties: Record<string, unknown> = {}) => {
     const id = identity.node(workspace.id, `python://${file.path}#${uri}`, kind);
+    const existing = nodesById.get(id);
+    if (existing) return existing;
     const node = { id, workspaceId: workspace.id, kind, label, properties: { path: file.path, ...properties } };
+    nodesById.set(id, node);
     nodes.push(node);
     evidence.push(sourceEvidence('node', id, file.path, 'python.source', range, offsets));
     return node;
   };
   const addEdge = (source: GraphNode, target: GraphNode, kind: string, range: Range, properties: Record<string, unknown> = {}) => {
     const id = identity.edge(workspace.id, source.id, target.id, kind);
+    if (edgesById.has(id)) return;
+    edgesById.add(id);
     edges.push({ id, workspaceId: workspace.id, sourceId: source.id, targetId: target.id, kind, properties: { path: file.path, ...properties } });
     evidence.push(sourceEvidence('edge', id, file.path, 'python.source', range, offsets));
   };
