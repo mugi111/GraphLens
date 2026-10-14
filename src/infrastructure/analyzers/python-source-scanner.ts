@@ -2,6 +2,7 @@ import { lstat, readdir, realpath, stat, readFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import type { PythonSourceConfig, PythonSourceFile } from './python-source-types.js';
 import { DEFAULT_PYTHON_SOURCE_CONFIG, PYTHON_SOURCE_LIMITS } from './python-source-types.js';
+import { decodePythonSource, sha256 } from './python-source-content.js';
 
 const FIXED_EXCLUDES = new Set(['.git', '.hg', '.svn', '__pycache__', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox', '.venv', 'venv', 'node_modules', 'build', 'dist']);
 type InventoryEntry = { path: string; absolute: string; size: number; mtimeMs: number; ino: number };
@@ -62,9 +63,8 @@ export async function readStablePythonSources(root: string, config: PythonSource
       const after = await stat(item.absolute);
       stable = sameStat(before, after) && bytes.length === after.size && after.size === item.size && after.mtimeMs === item.mtimeMs && after.ino === item.ino;
       if (stable) {
-        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-        const source = decoded.charCodeAt(0) === 0xfeff ? decoded.slice(1) : decoded;
-        files.push({ path: item.path, bytes, source, hash: await sha256(bytes) });
+        const source = decodePythonSource(bytes, item.path);
+        files.push({ path: item.path, bytes, source, hash: sha256(bytes) });
       }
     }
     if (!stable) throw new Error(`Python source '${item.path}' changed while being read.`);
@@ -77,4 +77,3 @@ export async function readStablePythonSources(root: string, config: PythonSource
 function sameStat(a: Awaited<ReturnType<typeof stat>>, b: Awaited<ReturnType<typeof stat>>) { return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs; }
 function sameInventory(a: InventoryEntry, b: InventoryEntry | undefined) { return !!b && a.path === b.path && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ino === b.ino; }
 function globRegex(pattern: string) { const escaped = pattern.split('*').map((s) => s.replace(/[|\\{}()[\]^$+?.]/g, '\\$&')).join('.*'); return new RegExp(`^${escaped}$`); }
-async function sha256(bytes: Buffer) { const { createHash } = await import('node:crypto'); return createHash('sha256').update(bytes).digest('hex'); }
