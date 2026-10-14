@@ -18,16 +18,30 @@ import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
 import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 
 type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
-type PluginCommand = { command: 'plugin-list' } | { command: 'plugin-add'; spec: string } | { command: 'plugin-remove'; id: string };
-export type CliCommand = ServerOptions | PluginCommand | { command: 'help' };
+type PluginCommand = { command: 'plugin-list'; json: boolean } | { command: 'plugin-add'; packageName: string; version: string } | { command: 'plugin-remove'; id: string };
+export type CliCommand = ServerOptions | PluginCommand | { command: 'help'; topic?: 'plugin' };
 
 /** Parses argv without starting the database, registry, listener, or browser. */
+class CliUsageError extends Error {}
+
 export function parseCommand(argv: string[]): CliCommand {
   if (argv[0] === 'plugin') {
-    if (argv.length === 2 && argv[1] === 'list') return { command: 'plugin-list' };
-    if (argv.length === 3 && argv[1] === 'add') return { command: 'plugin-add', spec: argv[2]! };
-    if (argv.length === 3 && argv[1] === 'remove') return { command: 'plugin-remove', id: argv[2]! };
-    throw new Error('Usage: graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>');
+    const args = argv.slice(1);
+    if (args.length === 0 || args[0] === '--help' || args[0] === '-h') return { command: 'help', topic: 'plugin' };
+    if (args[0] === 'list') {
+      if (args.length === 2 && (args[1] === '--help' || args[1] === '-h')) return { command: 'help', topic: 'plugin' };
+      if (args.length === 1) return { command: 'plugin-list', json: false };
+      if (args.length === 2 && args[1] === '--json') return { command: 'plugin-list', json: true };
+    }
+    if (args[0] === 'add') {
+      if (args.length === 1 || (args.length === 2 && (args[1] === '--help' || args[1] === '-h'))) return { command: 'help', topic: 'plugin' };
+      if (args.length === 2) { const spec = parsePluginSpec(args[1]!); return { command: 'plugin-add', packageName: spec.name, version: spec.version }; }
+    }
+    if (args[0] === 'remove') {
+      if (args.length === 1 || (args.length === 2 && (args[1] === '--help' || args[1] === '-h'))) return { command: 'help', topic: 'plugin' };
+      if (args.length === 2) return { command: 'plugin-remove', id: args[1]! };
+    }
+    throw new CliUsageError('Usage: graphlens plugin <list [--json] | add <package>@<exact-version> | remove <plugin-id>>');
   }
   const out: ServerOptions = { command: 'server', workspaces: [], codegraphArgs: [], port: 4174, noOpen: false, demo: false };
   for (let i = 0; i < argv.length; i++) {
@@ -45,7 +59,7 @@ export function parseCommand(argv: string[]): CliCommand {
   return out;
 }
 
-function help() { return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+function help(topic?: 'plugin') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
 async function removePlugin(manager: PluginManager, id: string): Promise<void> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new Error('Plugin id is invalid.');
@@ -53,13 +67,15 @@ async function removePlugin(manager: PluginManager, id: string): Promise<void> {
   console.log(`Removed plugin '${id}'.`);
 }
 
-async function addPlugin(manager: PluginManager, rawSpec: string): Promise<void> {
-  const spec = parsePluginSpec(rawSpec);
-  console.log(JSON.stringify(await manager.install(spec.name, spec.version), null, 2));
+async function addPlugin(manager: PluginManager, packageName: string, version: string): Promise<void> {
+  console.log(JSON.stringify(await manager.install(packageName, version), null, 2));
 }
 
-function listPlugins(store: GraphStore): void {
-  console.log(JSON.stringify({ plugins: store.pluginInventory() }, null, 2));
+function listPlugins(store: GraphStore, json: boolean): void {
+  const plugins = store.pluginInventory();
+  if (json) { console.log(JSON.stringify({ plugins }, null, 2)); return; }
+  if (plugins.length === 0) { console.log('No plugins installed.'); return; }
+  for (const plugin of plugins) console.log(`${plugin.enabled ? 'enabled' : 'disabled'}\t${plugin.id}\t${plugin.version}\t${plugin.analyzers.join(', ') || '(no analyzers)'}`);
 }
 
 async function runPlugin(command: PluginCommand): Promise<void> {
@@ -67,10 +83,10 @@ async function runPlugin(command: PluginCommand): Promise<void> {
   const store = new GraphStore(databaseFile, { recoverInterruptedRuns: false });
   try {
     const plugins = resolvePluginStorePath(databaseFile);
-    if (command.command === 'plugin-list') return listPlugins(store);
+    if (command.command === 'plugin-list') return listPlugins(store, command.json);
     const registry = new AnalyzerRegistry();
     const manager = new PluginManager(plugins, store, registry);
-    if (command.command === 'plugin-add') return addPlugin(manager, command.spec);
+    if (command.command === 'plugin-add') return addPlugin(manager, command.packageName, command.version);
     await removePlugin(manager, command.id);
   } finally { store.close(); }
 }
@@ -99,9 +115,11 @@ async function runServer(options: ServerOptions) {
 }
 
 async function main() {
-  const command = parseCommand(process.argv.slice(2));
-  if (command.command === 'help') { console.log(help()); return; }
+  let command: CliCommand;
+  try { command = parseCommand(process.argv.slice(2)); }
+  catch (error) { throw error instanceof CliUsageError ? error : new CliUsageError(error instanceof Error ? error.message : String(error)); }
+  if (command.command === 'help') { console.log(help(command.topic)); return; }
   if (command.command !== 'server') return runPlugin(command);
   return runServer(command);
 }
-main().catch((error) => { console.error(`GraphLens: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
+main().catch((error) => { console.error(`GraphLens: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = error instanceof CliUsageError ? 2 : 1; });
