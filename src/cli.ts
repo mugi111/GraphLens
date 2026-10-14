@@ -19,7 +19,7 @@ import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 
 type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 type PluginCommand = { command: 'plugin-list' } | { command: 'plugin-add'; spec: string } | { command: 'plugin-remove'; id: string };
-export type CliCommand = ServerOptions | PluginCommand;
+export type CliCommand = ServerOptions | PluginCommand | { command: 'help' };
 
 /** Parses argv without starting the database, registry, listener, or browser. */
 export function parseCommand(argv: string[]): CliCommand {
@@ -39,7 +39,7 @@ export function parseCommand(argv: string[]): CliCommand {
     else if (v === '--port') { out.port = Number(next()); if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error('Port must be between 1 and 65535.'); }
     else if (v === '--no-open') out.noOpen = true;
     else if (v === '--demo') out.demo = true;
-    else if (v === '--help' || v === '-h') return { ...out, command: 'server', workspaces: [] };
+    else if (v === '--help' || v === '-h') return { command: 'help' };
     else throw new Error(`Unknown option: ${v}`);
   }
   return out;
@@ -76,7 +76,6 @@ async function runPlugin(command: PluginCommand): Promise<void> {
 }
 
 async function runServer(options: ServerOptions) {
-  if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(help()); return; }
   const base = process.cwd();
   const databaseFile = resolve(base, '.graphlens/graphlens.sqlite');
   const store = new GraphStore(databaseFile);
@@ -101,6 +100,7 @@ async function runServer(options: ServerOptions) {
 
 async function main() {
   const command = parseCommand(process.argv.slice(2));
+  if (command.command === 'help') { console.log(help()); return; }
   if (command.command !== 'server') return runPlugin(command);
   return runServer(command);
 }
