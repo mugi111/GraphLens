@@ -54,6 +54,8 @@ export type AnalysisDiagnostic = {
 };
 
 export type AnalysisResult = {
+  /** Content-derived revision computed by source analyzers. */
+  sourceRevision?: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];

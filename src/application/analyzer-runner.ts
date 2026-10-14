@@ -29,6 +29,7 @@ export class AnalyzerRunner {
   private async execute(runId: string, descriptor: AnalyzerDescriptor, analyzer: Analyzer, workspace: Workspace, sourceRevision: string | undefined, config: Record<string, JsonValue>) {
     try {
       const result = await analyzer.analyze({ workspace, sourceRevision, config });
+      if (sourceRevision !== undefined && result.sourceRevision !== undefined && sourceRevision !== result.sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed source revision does not match the requested revision.' }]);
       validateAnalysisResult(result, descriptor, workspace.id, this.store.activeGraphIds(workspace.id, descriptor.id));
       this.store.completeAnalysisRun(runId, descriptor, result);
     } catch (error) {

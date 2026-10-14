@@ -11,6 +11,7 @@ export function validateAnalysisResult(result: AnalysisResult, descriptor: Analy
   if (!result || !Array.isArray(result.nodes) || !Array.isArray(result.edges) || !Array.isArray(result.evidence) || !Array.isArray(result.diagnostics)) {
     fail(['Analysis result must contain nodes, edges, evidence, and diagnostics arrays.']);
   }
+  if (result.sourceRevision !== undefined && (typeof result.sourceRevision !== 'string' || result.sourceRevision.length < 1 || result.sourceRevision.length > 255)) errors.push(diagnostic('INVALID_SOURCE_REVISION', 'Analysis source revision must contain 1 to 255 characters.'));
   if (result.nodes.length > MAX_ITEMS || result.edges.length > MAX_ITEMS || result.evidence.length > MAX_ITEMS || result.diagnostics.length > MAX_ITEMS) fail(['Analysis result exceeds the item limit.']);
   if ((result.nodes.length || result.edges.length) && !descriptor.capabilities.includes('graph')) errors.push(diagnostic('CAPABILITY_GRAPH_REQUIRED', 'Analyzer emitted graph contributions without the graph capability.'));
   if (result.evidence.length && !descriptor.capabilities.includes('evidence')) errors.push(diagnostic('CAPABILITY_EVIDENCE_REQUIRED', 'Analyzer emitted evidence without the evidence capability.'));
