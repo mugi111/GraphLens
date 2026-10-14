@@ -18,7 +18,7 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
   });
   app.get('/api/v1/sync/:runId', (c) => { const run = store.run(c.req.param('runId')); return run ? c.json(run) : c.json({ error: 'Sync run not found' }, 404); });
   app.get('/api/v1/analyzers', (c) => c.json({ analyzers: analyzerRunner.list() }));
-  app.get('/api/v1/plugins', (c) => c.json({ plugins: store.plugins() }));
+  app.get('/api/v1/plugins', (c) => c.json({ plugins: store.pluginInventory() }));
   app.post('/api/v1/analysis-runs', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaceId?: string; analyzerId?: string; sourceRevision?: string; config?: Record<string, never> };
     if (typeof body.workspaceId !== 'string' || typeof body.analyzerId !== 'string' || (body.sourceRevision !== undefined && typeof body.sourceRevision !== 'string') || (body.config !== undefined && (!body.config || Array.isArray(body.config)))) return c.json({ error: 'workspaceId and analyzerId are required; config must be an object.' }, 400);

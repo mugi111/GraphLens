@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { GraphLensPluginManifest } from '../../domain/plugin.js';
 import { PLUGIN_API_VERSION } from '../../domain/plugin.js';
 import { validateDescriptor } from '../../application/analyzer-registry.js';
+import { BUILTIN_ANALYZER_IDS } from '../../domain/analyzer.js';
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -37,6 +38,7 @@ export async function validateInstalledPackage(prefix: string, expectedName?: st
   const analyzerIds = new Set<string>();
   for (const descriptor of candidate.analyzers) {
     validateDescriptor(descriptor as any);
+    if ((BUILTIN_ANALYZER_IDS as readonly string[]).includes(descriptor.id)) throw new Error(`Plugin manifest cannot claim built-in analyzer id '${descriptor.id}'.`);
     if (analyzerIds.has(descriptor.id)) throw new Error(`Plugin manifest for '${raw.name}' contains duplicate analyzer '${descriptor.id}'.`);
     analyzerIds.add(descriptor.id);
   }

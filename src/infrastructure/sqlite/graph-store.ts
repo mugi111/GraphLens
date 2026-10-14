@@ -13,13 +13,13 @@ export type StoredPlugin = GraphLensPluginManifest & { packageName: string; pack
 
 export class GraphStore {
   private db: Database.Database;
-  constructor(file: string) {
+  constructor(file: string, options: { recoverInterruptedRuns?: boolean } = {}) {
     mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
     runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration]);
-    this.interruptResidualAnalysisRuns();
+    if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
   }
   close() { this.db.close(); }
   private workspace(row: any): Workspace { return { id: row.id, path: row.path, name: row.name }; }
@@ -90,8 +90,8 @@ export class GraphStore {
   }
   analysisRuns(workspaceId?: string, limit = 50): AnalysisRun[] { const sql = `SELECT * FROM analysis_runs ${workspaceId ? 'WHERE workspace_id=?' : ''} ORDER BY started_at DESC LIMIT ?`; const params = workspaceId ? [workspaceId, limit] : [limit]; return (this.db.prepare(sql).all(...params) as any[]).map((row) => this.parseAnalysisRun(row)); }
   analysisRun(id: string): AnalysisRun | undefined { const row = this.db.prepare('SELECT * FROM analysis_runs WHERE id=?').get(id) as any; return row ? this.parseAnalysisRun(row) : undefined; }
-  plugins(): PluginInventoryItem[] {
-    return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, version: plugin.version, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt, errorCode: plugin.errorCode }));
+  pluginInventory(): PluginInventoryItem[] {
+    return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, packageName: plugin.packageName, version: plugin.version, apiVersion: plugin.apiVersion, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt, errorCode: plugin.errorCode })).sort((a, b) => a.id.localeCompare(b.id));
   }
   enabledPlugins(includeDisabled = false): StoredPlugin[] {
     const rows = this.db.prepare(`SELECT * FROM plugins ${includeDisabled ? '' : 'WHERE enabled=1'} ORDER BY id`).all() as any[];
