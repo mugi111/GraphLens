@@ -13,13 +13,13 @@ export type StoredPlugin = GraphLensPluginManifest & { packageName: string; pack
 
 export class GraphStore {
   private db: Database.Database;
-  constructor(file: string) {
+  constructor(file: string, options: { recoverInterruptedRuns?: boolean } = {}) {
     mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
     runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration]);
-    this.interruptResidualAnalysisRuns();
+    if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
   }
   close() { this.db.close(); }
   private workspace(row: any): Workspace { return { id: row.id, path: row.path, name: row.name }; }
