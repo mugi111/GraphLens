@@ -5,6 +5,9 @@ export type GraphNode = {
   label: string;
   properties: Record<string, unknown>;
   evidence?: Evidence[];
+  analyzerId?: string;
+  generationId?: number;
+  level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
 };
 
 export type GraphEdge = {
@@ -14,9 +17,16 @@ export type GraphEdge = {
   targetId: string;
   kind: string;
   properties: Record<string, unknown>;
+  evidence?: Evidence[];
+  analyzerId?: string;
+  generationId?: number;
+  level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
 };
 
 export type Evidence = {
+  id?: string;
+  subjectKind?: 'node' | 'edge';
+  subjectId?: string;
   type: string;
   uri?: string;
   line?: number;
@@ -25,6 +35,8 @@ export type Evidence = {
   provenance?: Record<string, unknown>;
   inputGenerations?: string[];
   confidence?: number;
+  analyzerId?: string;
+  generationId?: number;
 };
 
 export type GraphSnapshot = {
