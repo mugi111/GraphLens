@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
@@ -33,7 +33,7 @@ export class GraphStore {
       const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count) VALUES(?,?,?,?,?,?)');
       const insertNode = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
       const insertEdge = this.db.prepare('INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json) VALUES(?,?,?,?,?,?,?)');
-      const insertEvidence = this.db.prepare('INSERT INTO evidence(generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?)');
+      const insertEvidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
       const activate = this.db.prepare('INSERT INTO active_analysis_generations(workspace_id,analyzer_id,generation_id) VALUES(?,?,?) ON CONFLICT(workspace_id,analyzer_id) DO UPDATE SET generation_id=excluded.generation_id');
       for (const snapshot of snapshots) {
         this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name').run(snapshot.workspace.id, snapshot.workspace.path, snapshot.workspace.name, now);
@@ -45,9 +45,9 @@ export class GraphStore {
         const generationId = Number(result.lastInsertRowid);
         for (const n of snapshot.nodes) {
           insertNode.run(generationId, n.id, n.workspaceId, n.kind, n.label, JSON.stringify(n.properties));
-          for (const evidence of n.evidence ?? []) {
+          for (const [index, evidence] of (n.evidence ?? []).entries()) {
             assertEvidence(evidence);
-            insertEvidence.run(generationId, 'node', n.id, evidence.level ?? 'DIRECT', JSON.stringify(evidence));
+            insertEvidence.run(evidenceId(snapshot.workspace.id, analyzerId, 'node', n.id, evidence, index), generationId, 'node', n.id, evidence.level ?? 'DIRECT', JSON.stringify(evidence));
           }
         }
         for (const e of snapshot.edges) insertEdge.run(generationId, e.id, e.workspaceId, e.sourceId, e.targetId, e.kind, JSON.stringify(e.properties));
@@ -63,7 +63,7 @@ export class GraphStore {
     const allowed = new Set(nodes.map((n) => n.id));
     const edgeParams = workspaceId ? [workspaceId] : [];
     const edges = (this.db.prepare(`${projectedEdgesSql(where)}`).all(...edgeParams) as any[]).filter((e) => allowed.has(e.source_id) && allowed.has(e.target_id));
-    return { nodes: nodes.map((node) => this.parseContributionNode(node)), edges: edges.map(parseEdge) };
+    return { nodes: nodes.map((node) => this.parseContributionNode(node)), edges: edges.map((edge) => this.parseContributionEdge(edge)) };
   }
   node(nodeId: string): GraphNode | undefined {
     const row = this.db.prepare(`${projectedNodesSql('')} AND id=? ORDER BY analyzer_id LIMIT 1`).get(nodeId) as any;
@@ -77,12 +77,18 @@ export class GraphStore {
     `).get();
   }
   private parseContributionNode(row: any): GraphNode {
-    const evidence = this.db.prepare('SELECT payload_json FROM evidence WHERE generation_id=? AND subject_kind=\'node\' AND subject_id=? ORDER BY id').all(row.generation_id, row.id) as Array<{ payload_json: string }>;
-    return { ...parseNode(row), evidence: evidence.map((item) => JSON.parse(item.payload_json)) };
+    return { ...parseNode(row), evidence: this.evidenceFor(row, 'node') };
+  }
+  private parseContributionEdge(row: any) {
+    return { ...parseEdge(row), evidence: this.evidenceFor(row, 'edge') };
+  }
+  private evidenceFor(row: any, subjectKind: 'node' | 'edge') {
+    const evidence = this.db.prepare('SELECT id,generation_id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? AND subject_kind=? AND subject_id=? ORDER BY id').all(row.generation_id, subjectKind, row.id) as Array<{ id: string; generation_id: number; subject_kind: 'node' | 'edge'; subject_id: string; level: 'DIRECT' | 'DERIVED' | 'INFERRED'; payload_json: string }>;
+    return evidence.map((item) => ({ ...JSON.parse(item.payload_json), id: item.id, subjectKind: item.subject_kind, subjectId: item.subject_id, level: item.level, analyzerId: row.analyzer_id, generationId: item.generation_id }));
   }
 }
-function parseNode(r: any): GraphNode { return { id:r.id, workspaceId:r.workspace_id, kind:r.kind, label:r.label, properties:JSON.parse(r.properties_json) }; }
-function parseEdge(r: any) { return { id:r.id, workspaceId:r.workspace_id, sourceId:r.source_id, targetId:r.target_id, kind:r.kind, properties:JSON.parse(r.properties_json) }; }
+function parseNode(r: any): GraphNode { return { id:r.id, workspaceId:r.workspace_id, kind:r.kind, label:r.label, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
+function parseEdge(r: any) { return { id:r.id, workspaceId:r.workspace_id, sourceId:r.source_id, targetId:r.target_id, kind:r.kind, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
 
 function assertEvidence(evidence: NonNullable<GraphNode['evidence']>[number]) {
   if (evidence.confidence !== undefined && evidence.level !== 'INFERRED') {
@@ -90,26 +96,32 @@ function assertEvidence(evidence: NonNullable<GraphNode['evidence']>[number]) {
   }
 }
 
+function evidenceId(workspaceId: string, analyzerId: string, subjectKind: 'node' | 'edge', subjectId: string, evidence: NonNullable<GraphNode['evidence']>[number], index: number) {
+  return evidence.id ?? createHash('sha256').update(JSON.stringify([workspaceId, analyzerId, subjectKind, subjectId, evidence, index])).digest('hex').slice(0, 32);
+}
+
 function projectedNodesSql(where: string) {
-  return `WITH ranked_nodes AS (
+  return `WITH contribution_levels AS (
     SELECT n.*, a.analyzer_id,
-      ROW_NUMBER() OVER (PARTITION BY n.workspace_id,n.id ORDER BY
-        CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DIRECT') THEN 0
-             WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DERIVED') THEN 1
-             ELSE 2 END,
-        a.analyzer_id) AS contribution_rank
+      CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DIRECT') THEN 'DIRECT'
+           WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DERIVED') THEN 'DERIVED'
+           ELSE 'INFERRED' END AS effective_level
     FROM active_analysis_generations a JOIN node_contributions n ON n.generation_id=a.generation_id ${where}
+  ), ranked_nodes AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id,id ORDER BY CASE effective_level WHEN 'DIRECT' THEN 0 WHEN 'DERIVED' THEN 1 ELSE 2 END, analyzer_id) AS contribution_rank
+    FROM contribution_levels
   ) SELECT * FROM ranked_nodes WHERE contribution_rank=1`;
 }
 
 function projectedEdgesSql(where: string) {
-  return `WITH ranked_edges AS (
+  return `WITH contribution_levels AS (
     SELECT e.*, a.analyzer_id,
-      ROW_NUMBER() OVER (PARTITION BY e.workspace_id,e.id ORDER BY
-        CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DIRECT') THEN 0
-             WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DERIVED') THEN 1
-             ELSE 2 END,
-        a.analyzer_id) AS contribution_rank
+      CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DIRECT') THEN 'DIRECT'
+           WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DERIVED') THEN 'DERIVED'
+           ELSE 'INFERRED' END AS effective_level
     FROM active_analysis_generations a JOIN edge_contributions e ON e.generation_id=a.generation_id ${where}
+  ), ranked_edges AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY workspace_id,id ORDER BY CASE effective_level WHEN 'DIRECT' THEN 0 WHEN 'DERIVED' THEN 1 ELSE 2 END, analyzer_id) AS contribution_rank
+    FROM contribution_levels
   ) SELECT * FROM ranked_edges WHERE contribution_rank=1`;
 }
