@@ -38,6 +38,11 @@ export type AnalysisEvidence = {
   type: string;
   uri?: string;
   line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  startOffset?: number;
+  endOffset?: number;
   detail?: string;
   provenance?: Record<string, JsonValue>;
   inputGenerations?: string[];
