@@ -64,24 +64,33 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
 
 function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: PythonImportFact[]) {
   const tokens = children(node);
-  const names = tokens.filter((child) => child.name === 'VariableName');
   const points = range(node.from, node.to, offsets);
   if (tokens.some((child) => child.name === 'from')) {
     const importIndex = tokens.findIndex((child) => child.name === 'import');
     const moduleTokens = tokens.slice(0, importIndex).filter((child) => child.name === 'VariableName');
     const relativeLevel = tokens.slice(0, importIndex).filter((child) => child.name === '.').length;
     const module = moduleTokens.map((child) => file.source.slice(child.from, child.to)).join('.');
-    for (let i = importIndex + 1; i < tokens.length; i++) if (tokens[i].name === 'VariableName') {
+    let i = importIndex + 1;
+    while (i < tokens.length) {
+      if (tokens[i].name !== 'VariableName') { i++; continue; }
       const imported = file.source.slice(tokens[i].from, tokens[i].to);
       const alias = tokens[i + 1]?.name === 'as' && tokens[i + 2]?.name === 'VariableName' ? file.source.slice(tokens[i + 2].from, tokens[i + 2].to) : undefined;
       out.push({ file: file.path, module, imported, alias, relativeLevel, ...points });
+      i += alias ? 3 : 1;
     }
   } else {
-    for (let i = 0; i < names.length; i++) {
-      const imported = file.source.slice(names[i].from, names[i].to);
-      const alias = tokens[tokens.indexOf(names[i]) + 1]?.name === 'as' && tokens[tokens.indexOf(names[i]) + 2]?.name === 'VariableName' ? file.source.slice(tokens[tokens.indexOf(names[i]) + 2].from, tokens[tokens.indexOf(names[i]) + 2].to) : undefined;
+    const segments: any[][] = [[]];
+    for (const token of tokens) {
+      if (token.name === ',') segments.push([]);
+      else segments[segments.length - 1].push(token);
+    }
+    for (const segment of segments) {
+      const nameTokens = segment.filter((child) => child.name === 'VariableName');
+      if (!nameTokens.length) continue;
+      const imported = nameTokens.map((child) => file.source.slice(child.from, child.to)).join('.');
+      const aliasIndex = segment.findIndex((child) => child.name === 'as');
+      const alias = aliasIndex >= 0 && segment[aliasIndex + 1]?.name === 'VariableName' ? file.source.slice(segment[aliasIndex + 1].from, segment[aliasIndex + 1].to) : undefined;
       out.push({ file: file.path, module: imported, alias, relativeLevel: 0, ...points });
-      if (alias) i++;
     }
   }
 }
