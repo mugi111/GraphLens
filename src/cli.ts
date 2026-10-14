@@ -44,6 +44,7 @@ export function parseCommand(argv: string[]): CliCommand {
       if (args.length === 1) throw new CliUsageError('Usage: graphlens plugin remove <plugin-id>');
       if (args.length === 2) {
         const id = args[1]!;
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new CliUsageError('Plugin id is invalid.');
         return { command: 'plugin-remove', id };
       }
     }
@@ -68,6 +69,7 @@ export function parseCommand(argv: string[]): CliCommand {
 function help(topic?: 'plugin') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
 async function removePlugin(manager: PluginManager, store: GraphStore, id: string): Promise<void> {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new CliUsageError('Plugin id is invalid.');
   const installed = store.enabledPlugins(true).find((plugin) => plugin.id === id);
   if (!installed) throw new PluginNotFoundError(`Plugin '${id}' is not installed.`);
   if (!await manager.remove(id)) throw new PluginNotFoundError(`Plugin '${id}' is not installed.`);
