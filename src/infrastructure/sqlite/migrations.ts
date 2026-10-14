@@ -225,3 +225,17 @@ export const pluginPackageOwnershipMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Binds analyzer runs to a durable plugin installation identity across removal/reinstall cycles. */
+export const pluginInstallationIdentityMigration: SchemaMigration = {
+  version: 5,
+  name: 'plugin-installation-identities',
+  up(db) {
+    db.exec(`
+      ALTER TABLE plugins ADD COLUMN installation_id TEXT;
+      ALTER TABLE plugins ADD COLUMN lock_hash TEXT;
+      ALTER TABLE plugins ADD COLUMN error_code TEXT;
+      ALTER TABLE analysis_runs ADD COLUMN plugin_installation_id TEXT;
+    `);
+  },
+};

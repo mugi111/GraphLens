@@ -21,6 +21,5 @@ export async function removePlugin(pluginId: string, store: GraphStore, registry
   if (!disabled) return false;
   for (const analyzerId of disabled.analyzerIds) registry.unregister(analyzerId);
   await rm(expectedPrefix, { recursive: true, force: true });
-  store.forgetDisabledPlugin(pluginId);
   return true;
 }

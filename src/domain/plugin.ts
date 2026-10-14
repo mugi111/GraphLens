@@ -22,6 +22,7 @@ export type PluginInventoryItem = {
   enabled: boolean;
   analyzers: string[];
   installedAt: string;
+  errorCode?: string;
 };
 
 export const PLUGIN_API_VERSION = '1';
