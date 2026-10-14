@@ -82,7 +82,8 @@ function listPlugins(store: GraphStore, json: boolean): void {
   const plugins = store.pluginInventory();
   if (json) { console.log(JSON.stringify({ plugins }, null, 2)); return; }
   if (plugins.length === 0) { console.log('No plugins installed.'); return; }
-  for (const plugin of plugins) console.log(`${plugin.enabled ? 'enabled' : 'disabled'}\t${plugin.id}\t${plugin.version}\t${plugin.analyzers.join(', ') || '(no analyzers)'}`);
+  console.log('STATUS\tID\tVERSION\tPACKAGE\tAPI\tANALYZERS\tERROR');
+  for (const plugin of plugins) console.log(`${plugin.enabled ? 'enabled' : 'disabled'}\t${plugin.id}\t${plugin.version}\t${plugin.packageName}\t${plugin.apiVersion}\t${plugin.analyzers.join(', ') || '(no analyzers)'}\t${plugin.errorCode ?? ''}`);
 }
 
 async function runPlugin(command: PluginCommand): Promise<void> {
