@@ -13,6 +13,9 @@ export type GraphLensPluginManifest = {
   analyzers: AnalyzerDescriptor[];
 };
 
+/** Factory contract exported by an installed package entry module. */
+export type GraphLensPluginFactory = () => Analyzer | Analyzer[] | Promise<Analyzer | Analyzer[]>;
+
 export type LoadedPlugin = {
   manifest: GraphLensPluginManifest;
   analyzers: Analyzer[];

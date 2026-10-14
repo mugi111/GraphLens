@@ -8,5 +8,6 @@ export { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 export { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 export { AnalysisError } from './domain/analyzer.js';
 export type { Analyzer, AnalyzerCapability, AnalyzerDescriptor, AnalysisContext, AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalysisErrorCode, EvidenceLevel, EvidenceSubjectKind, JsonValue } from './domain/analyzer.js';
-export type { GraphLensPluginManifest, PluginInventoryItem } from './domain/plugin.js';
+export { PLUGIN_API_VERSION } from './domain/plugin.js';
+export type { GraphLensPluginFactory, GraphLensPluginManifest, PluginInventoryItem } from './domain/plugin.js';
 export type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from './domain/graph.js';
