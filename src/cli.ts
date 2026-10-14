@@ -14,6 +14,7 @@ import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { workspaceFor } from './infrastructure/codegraph/adapter.js';
 import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.js';
 import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
+import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
 
 type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 type PluginCommand = { command: 'plugin-list' } | { command: 'plugin-add'; spec: string } | { command: 'plugin-remove'; id: string };
@@ -65,16 +66,6 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     if (!await manager.remove(command.id)) throw new Error(`Plugin '${command.id}' is not installed.`);
     console.log(`Removed plugin '${command.id}'.`);
   } finally { store.close(); }
-}
-
-export function parsePluginSpec(spec: string): { name: string; version: string } {
-  const separator = spec.lastIndexOf('@');
-  if (separator <= 0 || separator === spec.length - 1) throw new Error('Plugin spec must be an exact package@version, for example @scope/package@1.2.3.');
-  const name = spec.slice(0, separator);
-  const version = spec.slice(separator + 1);
-  if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/.test(name) || name.includes('..')) throw new Error('Plugin package name is invalid.');
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) throw new Error('Plugin version must be an exact semantic version.');
-  return { name, version };
 }
 
 async function runServer(options: ServerOptions) {

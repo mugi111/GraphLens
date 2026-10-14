@@ -4,10 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pluginInstallPrefix } from './package-paths.js';
+import { parsePluginSpec } from './package-spec.js';
 
-const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
-const IDENTIFIER = '(?:0|[1-9]\\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)';
-const EXACT_VERSION = new RegExp(`^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-${IDENTIFIER}(?:\\.${IDENTIFIER})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`);
 const OUTPUT_LIMIT = 64 * 1024;
 const INSTALL_TIMEOUT_MS = 120_000;
 
@@ -15,8 +13,8 @@ export type StagedPackage = { packageName: string; version: string; prefix: stri
 
 /** Installs an exact public registry package without invoking shell commands or lifecycle scripts. */
 export async function stageNpmPackage(pluginStorePath: string, packageName: string, version: string): Promise<StagedPackage> {
-  if (!PACKAGE_NAME.test(packageName) || packageName.includes('..')) throw new Error('Plugin package name is invalid.');
-  if (!EXACT_VERSION.test(version)) throw new Error('Plugin version must be an exact semantic version.');
+  const parsed = parsePluginSpec(`${packageName}@${version}`);
+  if (parsed.name !== packageName || parsed.version !== version) throw new Error('Plugin package spec is invalid.');
   await mkdir(resolve(pluginStorePath), { recursive: true });
   const stagingRoot = await mkdtemp(join(resolve(pluginStorePath), '.staging-'));
   const stagedPrefix = join(stagingRoot, 'package');
