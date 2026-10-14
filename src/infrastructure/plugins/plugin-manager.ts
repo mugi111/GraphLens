@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import type { AnalyzerRegistry } from '../../application/analyzer-registry.js';
+import { BUILTIN_ANALYZER_IDS } from '../../domain/analyzer.js';
 import type { GraphStore } from '../sqlite/graph-store.js';
 import { commitStagedPackage, cleanupStagedPackage, stageNpmPackage } from './npm-installer.js';
 import { loadInstalledPlugin } from './plugin-loader.js';
@@ -33,6 +34,8 @@ export class PluginManager {
         if (owner && owner !== loaded.manifest.id) throw new Error(`Analyzer '${analyzer.descriptor.id}' is reserved by plugin '${owner}'.`);
       }
       const analyzerIds = loaded.analyzers.map((analyzer) => analyzer.descriptor.id);
+      const reservedId = analyzerIds.find((id) => (BUILTIN_ANALYZER_IDS as readonly string[]).includes(id));
+      if (reservedId) throw new Error(`Analyzer id '${reservedId}' is reserved by GraphLens.`);
       const installationId = randomUUID();
 
       installedPrefix = await commitStagedPackage(staged, loaded.manifest.id);
