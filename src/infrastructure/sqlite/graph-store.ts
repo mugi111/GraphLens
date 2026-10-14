@@ -94,7 +94,14 @@ export class GraphStore {
     this.db.prepare('INSERT INTO analysis_runs(id,workspace_id,analyzer_id,analyzer_version,api_version,status,source_revision,config_json,started_at) VALUES(?,?,?,?,?,?,?,?,?)').run(id, workspaceId, descriptor.id, descriptor.version, descriptor.apiVersion, 'running', sourceRevision ?? null, JSON.stringify(config), new Date().toISOString());
     return this.analysisRun(id)!;
   }
-  activeGraphIds(workspaceId: string) { return { nodes: new Set((this.db.prepare('SELECT n.id FROM active_analysis_generations a JOIN node_contributions n ON n.generation_id=a.generation_id WHERE a.workspace_id=?').all(workspaceId) as Array<{ id: string }>).map((row) => row.id)), edges: new Set((this.db.prepare('SELECT e.id FROM active_analysis_generations a JOIN edge_contributions e ON e.generation_id=a.generation_id WHERE a.workspace_id=?').all(workspaceId) as Array<{ id: string }>).map((row) => row.id)) }; }
+  activeGraphIds(workspaceId: string, excludingAnalyzerId?: string) {
+    const excluded = excludingAnalyzerId ? ' AND a.analyzer_id<>?' : '';
+    const params = excludingAnalyzerId ? [workspaceId, excludingAnalyzerId] : [workspaceId];
+    return {
+      nodes: new Set((this.db.prepare(`SELECT n.id FROM active_analysis_generations a JOIN node_contributions n ON n.generation_id=a.generation_id WHERE a.workspace_id=?${excluded}`).all(...params) as Array<{ id: string }>).map((row) => row.id)),
+      edges: new Set((this.db.prepare(`SELECT e.id FROM active_analysis_generations a JOIN edge_contributions e ON e.generation_id=a.generation_id WHERE a.workspace_id=?${excluded}`).all(...params) as Array<{ id: string }>).map((row) => row.id)),
+    };
+  }
   completeAnalysisRun(id: string, descriptor: AnalyzerDescriptor, result: AnalysisResult): void {
     const run = this.analysisRun(id); if (!run || run.status !== 'running') throw new Error(`Analysis run '${id}' is not running.`);
     const now = new Date().toISOString();
