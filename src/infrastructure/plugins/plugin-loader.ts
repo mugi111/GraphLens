@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import type { Analyzer } from '../../domain/analyzer.js';
-import type { LoadedPlugin } from '../../domain/plugin.js';
+import type { GraphLensPluginManifest, LoadedPlugin } from '../../domain/plugin.js';
 import { validateDescriptor } from '../../application/analyzer-registry.js';
 import { validateInstalledPackage } from './package-validator.js';
 import type { AnalyzerRegistry } from '../../application/analyzer-registry.js';
@@ -8,8 +8,9 @@ import type { GraphStore } from '../sqlite/graph-store.js';
 import { pluginInstallPrefix } from './package-paths.js';
 
 /** Loads a trusted in-process analyzer factory after package and realpath validation. */
-export async function loadInstalledPlugin(prefix: string, expectedName?: string, expectedVersion?: string, expectedLockHash?: string): Promise<LoadedPlugin> {
+export async function loadInstalledPlugin(prefix: string, expectedName?: string, expectedVersion?: string, expectedLockHash?: string, expectedManifest?: GraphLensPluginManifest): Promise<LoadedPlugin> {
   const installed = await validateInstalledPackage(prefix, expectedName, expectedVersion, expectedLockHash);
+  if (expectedManifest && !manifestEqual(installed.manifest, expectedManifest)) throw new Error(`Installed package metadata for plugin '${installed.manifest.id}' differs from its saved registration.`);
   const module = await import(pathToFileURL(installed.entryPath).href) as Record<string, unknown>;
   const factoryName = installed.manifest.export ?? 'createAnalyzer';
   const factory = module[factoryName];
@@ -36,7 +37,9 @@ export async function loadEnabledPlugins(pluginStorePath: string, store: GraphSt
     try {
       const expectedPrefix = pluginInstallPrefix(pluginStorePath, saved.id);
       if (saved.packagePath !== expectedPrefix || !saved.lockHash || !saved.installationId) throw new Error('INVALID_SAVED_INSTALLATION');
-      const loaded = await loadInstalledPlugin(expectedPrefix, saved.packageName, saved.version, saved.lockHash);
+      const manifestIds = saved.analyzers.map((analyzer) => analyzer.id).sort();
+      if (JSON.stringify(manifestIds) !== JSON.stringify([...saved.analyzerIds].sort())) throw new Error('SAVED_ANALYZER_IDS_MISMATCH');
+      const loaded = await loadInstalledPlugin(expectedPrefix, saved.packageName, saved.version, saved.lockHash, saved);
       if (loaded.manifest.id !== saved.id || loaded.manifest.version !== saved.version || loaded.manifest.apiVersion !== saved.apiVersion || loaded.manifest.entry !== saved.entry || loaded.manifest.export !== saved.export || !descriptorsEqual(loaded.manifest.analyzers, saved.analyzers)) throw new Error('MANIFEST_MISMATCH');
       const actualIds = loaded.analyzers.map((analyzer) => analyzer.descriptor.id).sort();
       if (JSON.stringify(actualIds) !== JSON.stringify([...saved.analyzerIds].sort())) throw new Error('ANALYZER_IDS_MISMATCH');
@@ -57,4 +60,8 @@ export async function loadEnabledPlugins(pluginStorePath: string, store: GraphSt
 function descriptorsEqual(left: import('../../domain/analyzer.js').AnalyzerDescriptor[], right: import('../../domain/analyzer.js').AnalyzerDescriptor[]) {
   const normalize = (items: import('../../domain/analyzer.js').AnalyzerDescriptor[]) => items.map((item) => ({ id: item.id, version: item.version, apiVersion: item.apiVersion, capabilities: [...item.capabilities].sort() })).sort((a, b) => a.id.localeCompare(b.id));
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
+}
+
+function manifestEqual(left: GraphLensPluginManifest, right: GraphLensPluginManifest) {
+  return left.id === right.id && left.version === right.version && left.apiVersion === right.apiVersion && left.entry === right.entry && left.export === right.export && descriptorsEqual(left.analyzers, right.analyzers);
 }
