@@ -8,6 +8,10 @@ import { createApp } from './http/app.js';
 import { GraphStore } from './infrastructure/sqlite/graph-store.js';
 import { CodeGraphAdapter } from './infrastructure/codegraph/adapter.js';
 import { GraphService } from './application/graph-service.js';
+import { AnalyzerRegistry } from './application/analyzer-registry.js';
+import { AnalyzerRunner } from './application/analyzer-runner.js';
+import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
+import { workspaceFor } from './infrastructure/codegraph/adapter.js';
 
 type Options = { workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 function parse(argv: string[]): Options {
@@ -32,12 +36,16 @@ async function main() {
   const store = new GraphStore(resolve(base, '.graphlens/graphlens.sqlite'));
   const adapter = new CodeGraphAdapter({ command: options.codegraphCommand, args: options.codegraphArgs });
   const graph = new GraphService(store, adapter);
+  const registry = new AnalyzerRegistry();
+  registry.register(demoAnalyzer);
+  const analyzerRunner = new AnalyzerRunner(store, registry);
+  store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
   if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
-  serve({ fetch: createApp(store, adapter, graph, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
+  serve({ fetch: createApp(store, adapter, graph, analyzerRunner, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
   const shutdown = () => { store.close(); process.exit(0); };
