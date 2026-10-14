@@ -94,7 +94,7 @@ async function runServer(options: ServerOptions) {
   const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
-  const shutdown = () => { server.close(() => store.close()); }; 
+  const shutdown = () => { server.close(() => store.close()); };
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 }
 
