@@ -361,7 +361,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
     if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope, responseFact.offset);
   }
-  for (const fact of dependencies) for (const [depIndex, dep] of dependencyExpressions(fact.expression).entries()) {
+  for (const fact of dependencies) for (const [depIndex, dep] of dependencyExpressions(fact.expression, fact.file, fact.scope, fact.offset).entries()) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
     if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
     const targetExpr = dependencyTarget(dep);
@@ -459,7 +459,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     if (depth > config.maxDependencyDepth) throw fatalLimit('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source);
     const currentEvidence = currentFile.evidenceBySubject.get(current.id) ?? source;
     const parameters = Array.isArray(current.properties.parameters) ? current.properties.parameters as PythonParameterFact[] : [];
-    for (const parameter of inspectCurrentParameters ? parameters : []) for (const [dependencyIndex, dependency] of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation)).entries()) {
+    for (const parameter of inspectCurrentParameters ? parameters : []) for (const [dependencyIndex, dependency] of dependencyExpressions(parameter.default, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0).concat(dependencyExpressions(parameter.annotation, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0)).entries()) {
       const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
       const target = dependencyTarget(dependency);
@@ -551,7 +551,7 @@ function routeDependencies(route: RouteSpec): DependencyFact[] {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id);
   const offset = source?.startOffset ?? 0;
   for (const parameter of parameters) {
-    for (const [index, expression] of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `${parameter.name}:${index}`, source });
+    for (const [index, expression] of dependencyExpressions(parameter.default, route.handlerFile, scope, offset).concat(dependencyExpressions(parameter.annotation, route.handlerFile, scope, offset)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `${parameter.name}:${index}`, source });
   }
   return result;
 }
@@ -611,16 +611,15 @@ function parameterRequired(marker: PythonExpressionFact | undefined, hasDefault:
   if (['string', 'number', 'boolean', 'none'].includes(explicit.literalKind ?? '')) return false;
   return null;
 }
-function dependencyExpressions(expression: PythonExpressionFact | undefined): PythonExpressionFact[] {
-  const result: PythonExpressionFact[] = [];
-  const visit = (item?: PythonExpressionFact) => {
-    if (!item) return;
-    if (item.kind === 'call') result.push(item);
-    for (const child of item.children ?? []) visit(child);
-    for (const argument of argsOf(item)) visit(argument.expression);
-  };
-  visit(expression);
-  return result;
+function dependencyExpressions(expression: PythonExpressionFact | undefined, file?: FastApiFile, scope = '', offset = Number.MAX_SAFE_INTEGER): PythonExpressionFact[] {
+  if (!expression) return [];
+  if (expression.kind === 'call') return [expression];
+  if (['ListExpression', 'TupleExpression', 'ArrayExpression'].includes(expression.kind)) return (expression.children ?? []).flatMap((child) => dependencyExpressions(child, file, scope, offset));
+  if (expression.kind === 'subscript' && file && expression.children?.length) {
+    const base = canonicalFastApiName(expressionName(expression.children[0]!) ?? '', file, scope, offset);
+    if (['typing.Annotated', 'typing_extensions.Annotated', 'Annotated'].includes(base)) return expression.children.slice(2).flatMap((child) => dependencyExpressions(child, file, scope, offset));
+  }
+  return [];
 }
 function staticValue(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number): JsonValue | undefined {
   const direct = expressionValue(expression);
