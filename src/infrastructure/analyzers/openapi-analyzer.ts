@@ -32,6 +32,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
   const snapshot = await readOpenApiSnapshot(context.workspace.path, config, context.sourceRevision);
   const nodes: GraphNode[] = [], edges: GraphEdge[] = [], evidence: AnalysisEvidence[] = [], diagnostics: AnalysisDiagnostic[] = [];
   const nodeMap = new Map<string, GraphNode>(), edgeSet = new Set<string>(), evidenceSet = new Set<string>(), diagnosticSet = new Set<string>();
+  const endpointDocumentFacts = new Map<string, Map<string, Map<string, unknown>>>();
   const addDiag = (code: string, message: string, uri?: string, line?: number) => {
     const key = `${code}\0${uri ?? ''}\0${line ?? ''}\0${message}`;
     if (diagnosticSet.has(key)) return;
@@ -125,11 +126,15 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       }
     }
     const schemes = new Map<string, GraphNode>();
+    const schemeAliases: Array<[string, string]> = [];
     for (const [name, scheme] of mapPairs(get(components, 'securitySchemes'))) {
-      const properties = safeProperties(scheme);
+      const resolvedLayers = resolveObjectLayers(scheme, root, `components/securitySchemes/${escapePointer(name)}`, 'Security scheme');
+      const layers = resolvedLayers ?? [scheme];
+      const properties = (key: string) => { const value = scalar(firstProperty(layers, key)); return safeValue(value) ? value : undefined; };
       const safe: Record<string, unknown> = {};
-      for (const key of ['type', 'description', 'name', 'in', 'scheme', 'bearerFormat', 'openIdConnectUrl']) if (safeValue(properties[key])) safe[key] = properties[key];
-      const flows = get(scheme, 'flows');
+      for (const key of ['type', 'description', 'name', 'in', 'scheme', 'bearerFormat', 'openIdConnectUrl']) { const value = properties(key); if (value !== undefined) safe[key] = value; }
+      safe.resolved = resolvedLayers !== undefined;
+      const flows = firstProperty(layers, 'flows');
       if (flows) {
         const safeFlows: Record<string, unknown> = {};
         for (const [flowName, flow] of mapPairs(flows)) {
@@ -145,6 +150,17 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       safe.sourcePath = doc.file.path; safe.componentType = 'securitySchemes'; safe.componentName = name;
       const schemeNode = node(doc, 'api_security_scheme', `components/securitySchemes/${escapePointer(name)}`, name, safe, doc.evidence(scheme, 'security-scheme'));
       schemes.set(name, schemeNode); edge(doc, root, schemeNode, 'contains', `security-scheme:${name}`, doc.evidence(scheme, 'security-scheme'));
+      if (resolvedLayers && layers.length > 1) {
+        const finalRef = valueAt(layers[layers.length - 2]!, '$ref');
+        if (typeof finalRef === 'string') {
+          const match = /^#\/components\/securitySchemes\/(.+)$/.exec(finalRef);
+          if (match) { try { schemeAliases.push([name, decodePointer(match[1]!)]); } catch { /* already diagnosed by ref resolver */ } }
+        }
+      }
+    }
+    for (const [alias, targetName] of schemeAliases) {
+      const source = schemes.get(alias), target = schemes.get(targetName);
+      if (source && target) edge(doc, source, target, 'references', `security-scheme-alias:${alias}:${targetName}`, doc.evidence(get(components, 'securitySchemes'), 'security-scheme-reference'), {}, 'DERIVED');
     }
     for (const componentType of ['parameters', 'requestBodies', 'responses', 'pathItems']) for (const [name, component] of mapPairs(get(components, componentType))) {
       const kind = componentType === 'parameters' ? 'api_parameter' : componentType === 'requestBodies' ? 'api_request_body' : componentType === 'responses' ? 'api_response' : 'openapi_component';
@@ -159,9 +175,9 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       if (!path.startsWith('/')) { diag('OPENAPI_INVALID_PATH', `Path '${path}' must begin with '/'.`, doc.file.path); continue; }
       const resolvedPathItem = dereferencePathItem(pathItem, path);
       if (!resolvedPathItem) continue;
-      const pathServers = pairValue(resolvedPathItem, 'servers');
-      const pathServerNodes = pathServers ? projectServers(pathServers, root, `paths/${escapePointer(path)}/servers`) : documentServers;
-      for (const [method, operation] of resolvedPathItem) {
+      const pathServers = pairValue(resolvedPathItem.items, 'servers');
+      const pathServerNodes = pathServers ? projectServers(pathServers, root, `paths/${escapePointer(path)}/servers`, resolvedPathItem.derived) : documentServers;
+      for (const [method, operation] of resolvedPathItem.items) {
         if (!methods.has(method.toLowerCase())) continue;
         const upperMethod = method.toUpperCase();
         const uri = apiEndpointUri(namespace, upperMethod, path);
@@ -171,35 +187,58 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         const documentSecurity = get(doc.root, 'security');
         const securityMode = operationSecurity ? isSeq(operationSecurity) ? getSeq(operationSecurity).length === 0 ? 'disabled' : 'declared' : 'invalid' : documentSecurity ? isSeq(documentSecurity) ? getSeq(documentSecurity).length === 0 ? 'disabled' : 'document' : 'invalid' : 'none';
         const sourceOperation = node(doc, 'openapi_operation', operationKey, `${upperMethod} ${path}`, { documentPath: doc.file.path, method: upperMethod, path, operationId: valueAt(operation, 'operationId'), summary: valueAt(operation, 'summary'), description: valueAt(operation, 'description'), deprecated: valueAt(operation, 'deprecated'), tags: arrayAt(operation, 'tags'), securityMode }, doc.evidence(operation, 'operation'));
-        edge(doc, root, sourceOperation, 'contains', `operation:${upperMethod}:${path}`, doc.evidence(operation, 'operation'));
-        edge(doc, sourceOperation, endpoint, 'exposes', `endpoint:${upperMethod}:${path}`, doc.evidence(operation, 'operation'));
+        recordEndpointFacts(endpoint, {
+          operationId: valueAt(operation, 'operationId') ?? null, summary: valueAt(operation, 'summary') ?? null, tags: arrayAt(operation, 'tags') ?? [],
+          security: jsonValueAt(operation, 'security') ?? jsonValueAt(doc.root, 'security') ?? null,
+        }, doc);
+        edge(doc, root, sourceOperation, 'contains', `operation:${upperMethod}:${path}`, doc.evidence(operation, 'operation'), {}, resolvedPathItem.derived ? 'DERIVED' : 'DIRECT');
+        edge(doc, sourceOperation, endpoint, 'exposes', `endpoint:${upperMethod}:${path}`, doc.evidence(operation, 'operation'), {}, resolvedPathItem.derived ? 'DERIVED' : 'DIRECT');
         const operationServers = get(operation, 'servers');
         const applicableServers = operationServers ? projectServers(operationServers, sourceOperation, `paths/${escapePointer(path)}/${upperMethod}/servers`) : pathServerNodes;
         if (!operationServers) for (const server of applicableServers) edge(doc, sourceOperation, server, 'uses_server', `operation-server:${path}:${upperMethod}:${server.id}`, serverSources.get(server.id), {}, 'DERIVED');
         for (const tagName of arrayAt(operation, 'tags') ?? []) {
           let tagNode = tagNodes.get(tagName);
           if (!tagNode) { tagNode = node(doc, 'openapi_tag', `tags/${escapePointer(tagName)}`, tagName, { name: tagName }, doc.evidence(operation, 'operation-tag')); tagNodes.set(tagName, tagNode); }
-          edge(doc, sourceOperation, tagNode, 'tagged_as', `tagged:${path}:${upperMethod}:${tagName}`, doc.evidence(operation, 'operation-tag'));
+          edge(doc, sourceOperation, tagNode, 'tagged_as', `tagged:${path}:${upperMethod}:${tagName}`, doc.evidence(operation, 'operation-tag'), {}, resolvedPathItem.derived ? 'DERIVED' : 'DIRECT');
         }
-        projectSecurity(operationSecurity ?? documentSecurity, sourceOperation, `${path}/${upperMethod}/security`, !operationSecurity && !!documentSecurity);
-        const pathParameters = getSeq(pairValue(resolvedPathItem, 'parameters'));
+        projectSecurity(operationSecurity ?? documentSecurity, sourceOperation, `${path}/${upperMethod}/security`, resolvedPathItem.derived || !operationSecurity && !!documentSecurity);
+        const pathParameters = getSeq(pairValue(resolvedPathItem.items, 'parameters'));
         const operationParameters = getSeq(get(operation, 'parameters'));
         const mergedParameters = new Map<string, { node: YamlNode; inherited: boolean }>();
         for (const parameter of pathParameters) mergedParameters.set(parameterKey(parameter), { node: parameter, inherited: true });
         for (const parameter of operationParameters) mergedParameters.set(parameterKey(parameter), { node: parameter, inherited: false });
-        for (const [index, parameter] of [...mergedParameters.values()].entries()) projectParameter(parameter.node, `${path}/${upperMethod}/parameters/${index}`, sourceOperation, parameter.inherited);
+        for (const [index, parameter] of [...mergedParameters.values()].entries()) projectParameter(parameter.node, `${path}/${upperMethod}/parameters/${index}`, sourceOperation, parameter.inherited || resolvedPathItem.derived);
         const requestBody = get(operation, 'requestBody');
-        if (requestBody) projectBody(requestBody, `${path}/${upperMethod}/requestBody`, sourceOperation, 'api_request_body', 'accepts');
-        for (const [status, response] of mapPairs(get(operation, 'responses'))) projectBody(response, `${path}/${upperMethod}/responses/${escapePointer(status)}`, sourceOperation, 'api_response', 'returns', status);
+        if (requestBody) projectBody(requestBody, `${path}/${upperMethod}/requestBody`, sourceOperation, 'api_request_body', 'accepts', undefined, resolvedPathItem.derived);
+        for (const [status, response] of mapPairs(get(operation, 'responses'))) projectBody(response, `${path}/${upperMethod}/responses/${escapePointer(status)}`, sourceOperation, 'api_response', 'returns', status, resolvedPathItem.derived);
       }
     }
     function parameterKey(parameter: YamlNode) {
+      const layers = referenceLayers(doc.root, parameter);
+      const location = firstProperty(layers, 'in'), name = firstProperty(layers, 'name');
       const ref = valueAt(parameter, '$ref');
-      const target = typeof ref === 'string' ? resolveJsonPointer(doc.root, ref) : undefined;
-      const source = target ?? parameter;
-      return `${valueAt(source, 'in') ?? ''}\0${valueAt(source, 'name') ?? (typeof ref === 'string' ? ref : '')}`;
+      return `${scalar(location) ?? ''}\0${scalar(name) ?? (typeof ref === 'string' ? ref : '')}`;
     }
-    function dereferencePathItem(input: YamlNode, path: string): Array<[string, YamlNode]> | undefined {
+    function recordEndpointFacts(endpoint: GraphNode, facts: Record<string, unknown>, document: OpenApiDocument) {
+      let byDocument = endpointDocumentFacts.get(endpoint.id);
+      if (!byDocument) { byDocument = new Map(); endpointDocumentFacts.set(endpoint.id, byDocument); }
+      const previous: Array<[string, unknown]> = [...byDocument.entries()].filter(([path]) => path !== document.file.path).flatMap(([, values]) => [...values.entries()]);
+      const current = new Map(Object.entries(facts).filter(([, value]) => value !== undefined));
+      if (previous.length && !byDocument.has(document.file.path)) diag('OPENAPI_ENDPOINT_DUPLICATE', `Endpoint '${endpoint.properties.method} ${endpoint.properties.path}' is declared in multiple OpenAPI documents.`, document.file.path);
+      byDocument.set(document.file.path, current);
+      for (const [fact, value] of current) {
+        const conflicting = previous.filter(([otherFact]) => otherFact === fact).map(([, other]) => other).filter((other) => other !== undefined && JSON.stringify(other) !== JSON.stringify(value));
+        if (!conflicting.length) continue;
+        const conflicts = (endpoint.properties.conflicts && typeof endpoint.properties.conflicts === 'object' ? endpoint.properties.conflicts : {}) as Record<string, unknown>;
+        const values = new Map<string, unknown>();
+        for (const other of conflicting) values.set(JSON.stringify(other), other);
+        values.set(JSON.stringify(value), value);
+        conflicts[fact] = [...values.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, item]) => item);
+        endpoint.properties.conflicts = conflicts;
+        diag('OPENAPI_ENDPOINT_CONFLICT', `Documents disagree about '${fact}' for endpoint '${endpoint.properties.method} ${endpoint.properties.path}'.`, document.file.path);
+      }
+    }
+    function dereferencePathItem(input: YamlNode, path: string): { items: Array<[string, YamlNode]>; derived: boolean } | undefined {
       const layers: YamlNode[] = [input];
       const seen = new Set<string>();
       let current = input;
@@ -216,22 +255,21 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       if (valueAt(current, '$ref') !== undefined) { diag('OPENAPI_REF_DEPTH_LIMIT', `Path item reference depth exceeds ${MAX_REF_DEPTH} at '${path}'.`, doc.file.path); return undefined; }
       const merged = new Map<string, YamlNode>();
       for (const layer of [...layers].reverse()) for (const [key, value] of pairs(layer)) if (key !== '$ref') merged.set(key, value);
-      return [...merged.entries()];
+      return { items: [...merged.entries()], derived: layers.length > 1 };
     }
     function projectParameter(parameter: YamlNode, key: string, endpoint: GraphNode, inherited = false) {
-      const reference = valueAt(parameter, '$ref');
-      if (typeof reference === 'string') {
-        const referenceNode = addOwnerReference(reference, parameter, endpoint, key);
-        const resolved = resolveJsonPointer(doc.root, reference);
-        if (!resolved || !isMap(resolved)) { diag('OPENAPI_LOCAL_REF_UNRESOLVED', `Parameter reference '${reference}' is unresolved or does not identify an object.`, doc.file.path); return; }
-        parameter = resolved;
-      }
-      const name = valueAt(parameter, 'name'), location = valueAt(parameter, 'in');
-      const contentTypes = mapPairs(get(parameter, 'content')).map(([contentType]) => contentType);
-      const p = node(doc, 'api_parameter', key, typeof name === 'string' ? name : 'parameter', { ...(typeof name === 'string' ? { name } : {}), ...(typeof location === 'string' ? { in: location } : {}), required: location === 'path' ? true : valueAt(parameter, 'required'), description: valueAt(parameter, 'description'), style: valueAt(parameter, 'style'), explode: valueAt(parameter, 'explode'), ...(contentTypes.length ? { contentTypes } : {}) }, doc.evidence(parameter, 'parameter'));
-      edge(doc, endpoint, p, 'accepts', key, doc.evidence(parameter, 'parameter'), {}, inherited ? 'DERIVED' : 'DIRECT');
-      const schema = get(parameter, 'schema'); if (schema) addSchemaReference(schema, p, key);
-      for (const [contentType, media] of mapPairs(get(parameter, 'content'))) { const bodySchema = get(media, 'schema'); if (bodySchema) addSchemaReference(bodySchema, p, `${key}/${contentType}`, contentType); }
+      const layers = resolveObjectLayers(parameter, endpoint, key, 'Parameter'); if (!layers) return;
+      const field = (name: string) => firstProperty(layers, name);
+      const value = (name: string) => scalar(field(name));
+      const resolved = layers.length > 1;
+      const name = value('name'), location = value('in');
+      const content = field('content');
+      const contentTypes = mapPairs(content).map(([contentType]) => contentType);
+      const declaration = layers[layers.length - 1]!;
+      const p = node(doc, 'api_parameter', key, typeof name === 'string' ? name : 'parameter', { ...(typeof name === 'string' ? { name } : {}), ...(typeof location === 'string' ? { in: location } : {}), required: location === 'path' ? true : value('required'), description: value('description'), style: value('style'), explode: value('explode'), ...(contentTypes.length ? { contentTypes } : {}) }, doc.evidence(declaration, 'parameter'));
+      edge(doc, endpoint, p, 'accepts', key, doc.evidence(declaration, 'parameter'), {}, inherited || resolved ? 'DERIVED' : 'DIRECT');
+      const schema = field('schema'); if (schema) addSchemaReference(schema, p, key);
+      for (const [contentType, media] of mapPairs(content)) { const bodySchema = get(media, 'schema'); if (bodySchema) addSchemaReference(bodySchema, p, `${key}/${contentType}`, contentType); }
     }
     function projectSecurity(security: YamlNode | undefined, owner: GraphNode, key: string, inherited = false) {
       if (!security) return;
@@ -242,7 +280,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         edge(doc, owner, reqNode, 'secured_by', `${key}/${index}`, doc.evidence(requirement, 'security-requirement'), {}, inherited ? 'DERIVED' : 'DIRECT');
         for (const [schemeName, scopesNode] of mapPairs(requirement)) {
           const target = schemes.get(schemeName);
-          const unresolved = !target;
+          const unresolved = !target || target.properties.resolved === false;
           const actual = target ?? node(doc, 'api_security_scheme', `unresolved-security/${hash(schemeName)}`, schemeName, { name: schemeName, resolved: false }, doc.evidence(requirement, 'unresolved-security-scheme'));
           if (unresolved) diag('OPENAPI_SECURITY_SCHEME_UNRESOLVED', `Security requirement references unknown scheme '${schemeName}'.`, doc.file.path);
           const validScopes = isSeq(scopesNode);
@@ -254,7 +292,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         }
       }
     }
-    function projectServers(servers: YamlNode | undefined, owner: GraphNode, key: string): GraphNode[] {
+    function projectServers(servers: YamlNode | undefined, owner: GraphNode, key: string, inherited = false): GraphNode[] {
       if (!servers) return [];
       if (!isSeq(servers)) { diag('OPENAPI_INVALID_SERVERS', `Servers at '${key}' must be an array.`, doc.file.path); return []; }
       const result: GraphNode[] = [];
@@ -263,24 +301,37 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         if (typeof url !== 'string') { diag('OPENAPI_INVALID_SERVER', `Server at '${key}/${index}' has no literal URL.`, doc.file.path); continue; }
         const serverNode = node(doc, 'openapi_server', `${key}/${index}`, url, { url, description: valueAt(server, 'description') }, doc.evidence(server, 'server'));
         serverSources.set(serverNode.id, doc.evidence(server, 'server')!);
-        edge(doc, owner, serverNode, 'uses_server', `${key}/${index}`, doc.evidence(server, 'server'));
+        edge(doc, owner, serverNode, 'uses_server', `${key}/${index}`, doc.evidence(server, 'server'), {}, inherited ? 'DERIVED' : 'DIRECT');
         result.push(serverNode);
       }
       return result;
     }
-    function projectBody(body: YamlNode, key: string, endpoint: GraphNode, kind: string, edgeKind: string, status?: string) {
-      const reference = valueAt(body, '$ref');
-      if (typeof reference === 'string') {
-        addOwnerReference(reference, body, endpoint, key);
-        const resolved = resolveJsonPointer(doc.root, reference);
-        if (!resolved || !isMap(resolved)) { diag('OPENAPI_LOCAL_REF_UNRESOLVED', `${kind} reference '${reference}' is unresolved or does not identify an object.`, doc.file.path); return; }
-        body = resolved;
-      }
-      const content = get(body, 'content');
+    function projectBody(body: YamlNode, key: string, endpoint: GraphNode, kind: string, edgeKind: string, status?: string, inherited = false) {
+      const layers = resolveObjectLayers(body, endpoint, key, kind); if (!layers) return;
+      const field = (name: string) => firstProperty(layers, name);
+      const value = (name: string) => scalar(field(name));
+      const resolved = layers.length > 1;
+      const declaration = layers[layers.length - 1]!;
+      const content = field('content');
       const contentTypes = mapPairs(content).map(([contentType]) => contentType);
-      const target = node(doc, kind, key, status ?? (kind === 'api_request_body' ? 'request body' : 'response'), { ...(status ? { status } : {}), description: valueAt(body, 'description'), required: valueAt(body, 'required'), ...(contentTypes.length ? { contentTypes } : {}) }, doc.evidence(body, kind));
-      edge(doc, endpoint, target, edgeKind, key, doc.evidence(body, kind));
+      const target = node(doc, kind, key, status ?? (kind === 'api_request_body' ? 'request body' : 'response'), { ...(status ? { status } : {}), description: value('description'), required: value('required'), ...(contentTypes.length ? { contentTypes } : {}) }, doc.evidence(declaration, kind));
+      edge(doc, endpoint, target, edgeKind, key, doc.evidence(declaration, kind), {}, resolved || inherited ? 'DERIVED' : 'DIRECT');
       for (const [contentType, media] of mapPairs(content)) { const schema = get(media, 'schema'); if (schema) addSchemaReference(schema, target, `${key}/${contentType}`, contentType); }
+    }
+    function resolveObjectLayers(input: YamlNode, owner: GraphNode, key: string, label: string): YamlNode[] | undefined {
+      const layers = [input], seen = new Set<string>();
+      let current = input;
+      for (let depth = 0; depth < MAX_REF_DEPTH; depth++) {
+        const ref = valueAt(current, '$ref'); if (typeof ref !== 'string') return layers;
+        addOwnerReference(ref, current, owner, `${key}/ref/${depth}`);
+        if (!ref.startsWith('#/')) { diag('OPENAPI_EXTERNAL_REF_UNRESOLVED', `${label} reference '${ref}' was not followed.`, doc.file.path); return undefined; }
+        if (seen.has(ref)) { diag('OPENAPI_REF_CYCLE', `${label} reference cycle at '${ref}' was not expanded.`, doc.file.path); return undefined; }
+        seen.add(ref);
+        const target = resolveJsonPointer(doc.root, ref);
+        if (!target || !isMap(target)) { diag('OPENAPI_LOCAL_REF_UNRESOLVED', `${label} reference '${ref}' is unresolved or does not identify an object.`, doc.file.path); return undefined; }
+        layers.push(target); current = target;
+      }
+      diag('OPENAPI_REF_DEPTH_LIMIT', `${label} reference depth exceeds ${MAX_REF_DEPTH}.`, doc.file.path); return undefined;
     }
     function addSchemaReference(schema: YamlNode, owner: GraphNode, key: string, mediaType?: string, createInline = true) {
       const seen = new Set<YamlNode>();
@@ -289,7 +340,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         seen.add(current);
         if (depth > MAX_REF_DEPTH) { diag('OPENAPI_SCHEMA_DEPTH_LIMIT', `Schema nesting exceeds ${MAX_REF_DEPTH} at '${key}'.`, doc.file.path); return; }
         const ref = valueAt(current, '$ref');
-        if (typeof ref === 'string') { const target = node(doc, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, referenceKind: 'static', sourcePath: doc.file.path }, doc.evidence(current, 'schema-reference')); edge(doc, owner, target, 'uses_schema', `${key}${suffix}`, doc.evidence(current, 'schema-reference'), mediaType ? { mediaType } : {}); }
+        if (typeof ref === 'string') { const target = node(doc, 'api_schema_reference', referenceNodeKey(ref, 'static'), ref, { ref, referenceKind: 'static', sourcePath: doc.file.path }, doc.evidence(current, 'schema-reference')); edge(doc, owner, target, 'uses_schema', `${key}${suffix}`, doc.evidence(current, 'schema-reference'), mediaType ? { mediaType } : {}); }
         const typ = jsonValueAt(current, 'type');
         if (depth === 0 && createInline && typeof ref !== 'string') {
           const properties = isScalar(current) ? { schemaValue: scalar(current) } : safeProperties(current);
@@ -303,27 +354,65 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       walk(schema, '', 0);
     }
     function collectReferences(document: OpenApiDocument, owner: GraphNode) {
-      const walk = (current: YamlNode, pointer: string, depth: number) => {
-        if (depth > 64) throw new Error(`Reference traversal exceeds depth 64 in '${document.file.path}'.`);
-        if (isMap(current)) {
-          for (const [name, child] of pairs(current)) {
-            const childPointer = `${pointer}/${escapePointer(name)}`;
-            if (name === '$ref' || name === '$dynamicRef') {
-              const ref = getScalar(child);
-              if (typeof ref === 'string') {
-              const reference = node(document, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, referenceKind: name === '$dynamicRef' ? 'dynamic' : 'static', sourcePath: document.file.path }, document.evidence(child, 'reference'));
-                edge(document, owner, reference, 'references', `ref:${childPointer}`, document.evidence(child, 'reference'));
-              }
-            } else walk(child, childPointer, depth + 1);
-          }
-        } else if (isSeq(current)) {
-          for (const [index, child] of getSeq(current).entries()) walk(child, `${pointer}/${index}`, depth + 1);
+      const components = property(document.root, 'components');
+      const schemaMap = property(components, 'schemas');
+      for (const [name, schema] of pairs(schemaMap)) scanSchema(schema, `components/schemas/${escapePointer(name)}`, 0);
+      for (const componentType of ['parameters', 'requestBodies', 'responses', 'pathItems', 'securitySchemes']) {
+        for (const [name, component] of pairs(property(components, componentType))) {
+          const pointer = `components/${componentType}/${escapePointer(name)}`;
+          if (componentType === 'parameters') scanParameter(component, pointer, 0);
+          else if (componentType === 'requestBodies') scanBody(component, pointer, 0);
+          else if (componentType === 'responses') scanResponse(component, pointer, 0);
+          else if (componentType === 'pathItems') scanPathItem(component, pointer, 0);
+          else addRef(component, '$ref', `${pointer}/$ref`);
         }
-      };
-      walk(document.root, '', 0);
+      }
+      const paths = property(document.root, 'paths');
+      for (const [path, pathItem] of pairs(paths)) scanPathItem(pathItem, `paths/${escapePointer(path)}`, 0);
+
+      function scanSchema(schema: YamlNode | undefined, pointer: string, depth: number) {
+        if (!schema) return;
+        checkDepth(depth, pointer);
+        addRef(schema, '$ref', `${pointer}/$ref`); addRef(schema, '$dynamicRef', `${pointer}/$dynamicRef`);
+        for (const [name, child] of pairs(property(schema, 'properties'))) scanSchema(child, `${pointer}/properties/${escapePointer(name)}`, depth + 1);
+        for (const key of ['items', 'additionalProperties', 'not', 'contains', 'if', 'then', 'else']) scanSchema(property(schema, key), `${pointer}/${key}`, depth + 1);
+        for (const key of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) for (const [index, child] of seq(property(schema, key)).entries()) scanSchema(child, `${pointer}/${key}/${index}`, depth + 1);
+        for (const [name, child] of pairs(property(schema, 'dependentSchemas'))) scanSchema(child, `${pointer}/dependentSchemas/${escapePointer(name)}`, depth + 1);
+      }
+      function scanParameter(parameter: YamlNode | undefined, pointer: string, depth: number) {
+        if (!parameter) return; checkDepth(depth, pointer); addRef(parameter, '$ref', `${pointer}/$ref`);
+        scanSchema(property(parameter, 'schema'), `${pointer}/schema`, depth + 1);
+        for (const [mediaType, media] of pairs(property(parameter, 'content'))) scanSchema(property(media, 'schema'), `${pointer}/content/${escapePointer(mediaType)}/schema`, depth + 1);
+      }
+      function scanBody(body: YamlNode | undefined, pointer: string, depth: number) {
+        if (!body) return; checkDepth(depth, pointer); addRef(body, '$ref', `${pointer}/$ref`);
+        for (const [mediaType, media] of pairs(property(body, 'content'))) scanSchema(property(media, 'schema'), `${pointer}/content/${escapePointer(mediaType)}/schema`, depth + 1);
+      }
+      function scanResponse(response: YamlNode | undefined, pointer: string, depth: number) {
+        if (!response) return; checkDepth(depth, pointer); addRef(response, '$ref', `${pointer}/$ref`);
+        for (const [name, header] of pairs(property(response, 'headers'))) scanParameter(header, `${pointer}/headers/${escapePointer(name)}`, depth + 1);
+        scanBody(response, pointer, depth + 1);
+      }
+      function scanPathItem(pathItem: YamlNode | undefined, pointer: string, depth: number) {
+        if (!pathItem) return; checkDepth(depth, pointer); addRef(pathItem, '$ref', `${pointer}/$ref`);
+        for (const [index, parameter] of seq(property(pathItem, 'parameters')).entries()) scanParameter(parameter, `${pointer}/parameters/${index}`, depth + 1);
+        for (const method of methods) {
+          const operation = property(pathItem, method); if (!operation) continue;
+          for (const [index, parameter] of seq(property(operation, 'parameters')).entries()) scanParameter(parameter, `${pointer}/${method}/parameters/${index}`, depth + 1);
+          scanBody(property(operation, 'requestBody'), `${pointer}/${method}/requestBody`, depth + 1);
+          for (const [status, response] of pairs(property(operation, 'responses'))) scanResponse(response, `${pointer}/${method}/responses/${escapePointer(status)}`, depth + 1);
+        }
+      }
+      function addRef(ownerNode: YamlNode, key: '$ref' | '$dynamicRef', pointer: string) {
+        const ref = scalar(property(ownerNode, key)); if (typeof ref !== 'string') return;
+        const referenceKind = key === '$dynamicRef' ? 'dynamic' : 'static';
+        const reference = node(document, 'api_schema_reference', referenceNodeKey(ref, referenceKind), ref, { ref, referenceKind, sourcePath: document.file.path }, document.evidence(property(ownerNode, key), 'reference'));
+        edge(document, owner, reference, 'references', `ref:${pointer}`, document.evidence(property(ownerNode, key), 'reference'));
+      }
+      function checkDepth(depth: number, pointer: string) { if (depth > MAX_REF_DEPTH) throw new Error(`Reference traversal exceeds depth ${MAX_REF_DEPTH} at '${pointer}' in '${document.file.path}'.`); }
     }
     function addOwnerReference(ref: string, sourceNode: YamlNode, owner: GraphNode, key: string) {
-      const referenceNode = node(doc, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, referenceKind: 'static', sourcePath: doc.file.path }, doc.evidence(sourceNode, 'reference'));
+      const referenceNode = node(doc, 'api_schema_reference', referenceNodeKey(ref, 'static'), ref, { ref, referenceKind: 'static', sourcePath: doc.file.path }, doc.evidence(sourceNode, 'reference'));
       edge(doc, owner, referenceNode, 'references', `owner-ref:${key}`, doc.evidence(sourceNode, 'reference'));
       return referenceNode;
     }
@@ -371,11 +460,14 @@ function resolveJsonPointer(root: YamlNode, ref: string): YamlNode | undefined {
   return current;
 }
 function safeValue(value: unknown, depth = 0): value is null | string | number | boolean | unknown[] | Record<string, unknown> { if (depth > 16) return false; if (value === null || typeof value === 'boolean') return true; if (typeof value === 'string') return value.length <= 10_000; if (typeof value === 'number') return Number.isFinite(value); if (Array.isArray(value)) return value.length <= 10_000 && value.every((item) => safeValue(item, depth + 1)); if (value && typeof value === 'object') { const entries = Object.entries(value); return entries.length <= 10_000 && entries.every(([key, item]) => key.length <= 10_000 && safeValue(item, depth + 1)); } return false; }
-function schemaSafeValue(key: string, value: unknown) { if (key === 'type' || key === 'required') return typeof value === 'string' || Array.isArray(value) && value.every((item) => typeof item === 'string'); if (key === 'enum') return Array.isArray(value) && value.every((item) => item === null || ['string', 'boolean', 'number'].includes(typeof item)); return safeValue(value); }
+function schemaSafeValue(key: string, value: unknown) { if (key === 'type' || key === 'required') return typeof value === 'string' || Array.isArray(value) && value.every((item) => typeof item === 'string'); return safeValue(value); }
+function referenceLayers(root: YamlNode, input: YamlNode): YamlNode[] { const layers = [input], seen = new Set<string>(); let current = input; for (let depth = 0; depth < MAX_REF_DEPTH; depth++) { const ref = valueAt(current, '$ref'); if (typeof ref !== 'string' || seen.has(ref) || !ref.startsWith('#/')) return layers; seen.add(ref); const target = resolveJsonPointer(root, ref); if (!target || !isMap(target)) return layers; layers.push(target); current = target; } return layers; }
+function firstProperty(layers: YamlNode[], key: string): YamlNode | undefined { for (const layer of layers) { const value = property(layer, key); if (value) return value; } return undefined; }
 function arrayAt(node: YamlNode, key: string) { const value = property(node, key); if (!value) return undefined; if (!('items' in value) || !Array.isArray((value as { items?: unknown }).items)) throw new Error(`OpenAPI '${key}' must be a string array.`); const result = (value as { items: YamlNode[] }).items.map((item) => scalar(item)); if (result.length > 256 || result.some((item) => typeof item !== 'string' || item.length > 10_000)) throw new Error(`OpenAPI string array '${key}' is invalid or exceeds its limits.`); return result as string[]; }
 function safeProperties(node: YamlNode) { const value = node.toJSON(); const allowed = new Set(['type', 'format', 'description', 'title', 'nullable', 'deprecated', 'readOnly', 'writeOnly', 'enum', 'required', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems', 'uniqueItems', 'additionalProperties', 'name', 'in', 'style', 'explode', 'allowEmptyValue', 'allowReserved', 'contentType', 'scheme', 'bearerFormat', 'openIdConnectUrl']); if (!value || typeof value !== 'object' || Array.isArray(value)) return {}; const result: Record<string, unknown> = {}; for (const [key, item] of Object.entries(value)) { if (!allowed.has(key) || key === 'additionalProperties' && typeof item !== 'boolean') continue; if (!safeValue(item)) throw new Error(`OpenAPI property '${key}' exceeds output limits.`); result[key] = item; } return result; }
 function cleanProperties(value: Record<string, unknown>) { const result: Record<string, unknown> = {}; for (const [key, item] of Object.entries(value)) { if (item === undefined) continue; if (!safeValue(item)) throw new Error(`OpenAPI graph property '${key}' exceeds output limits.`); result[key] = item; } return result; }
 function escapePointer(value: string) { return value.replace(/~/g, '~0').replace(/\//g, '~1'); }
 function decodePointer(value: string) { if (/~(?![01])/.test(value)) throw new Error('bad pointer'); return value.replace(/~1/g, '/').replace(/~0/g, '~'); }
+function referenceNodeKey(ref: string, kind: 'static' | 'dynamic') { return `refs/${hash(`${kind}\0${ref}`)}`; }
 function hash(value: string) { return idsHash(value); }
 function idsHash(value: string) { return createHash('sha256').update(value).digest('hex'); }
