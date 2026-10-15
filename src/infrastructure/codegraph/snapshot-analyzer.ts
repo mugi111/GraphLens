@@ -2,8 +2,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { AnalysisDiagnostic, AnalysisResult, Analyzer, AnalysisEvidence, JsonValue } from '../../domain/analyzer.js';
-import type { EvidenceLevel, GraphEdge, GraphNode } from '../../domain/graph.js';
+import type { AnalysisDiagnostic, AnalysisResult, Analyzer, AnalysisEvidence, EvidenceLevel, JsonValue } from '../../domain/analyzer.js';
+import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 
 const CODEGRAPH_VERSION = '1.6.2';
 const SCHEMA_VERSION = 15;
@@ -174,7 +174,7 @@ function readScalarPreflight(db: ReadonlyDb): DbCounts {
     (SELECT COALESCE(SUM(length(CAST(id AS BLOB))+length(CAST(kind AS BLOB))+length(CAST(name AS BLOB))+length(CAST(qualified_name AS BLOB))+length(CAST(file_path AS BLOB))+length(CAST(language AS BLOB))+length(CAST(COALESCE(signature,'') AS BLOB))+length(CAST(COALESCE(visibility,'') AS BLOB))+length(CAST(COALESCE(decorators,'') AS BLOB))+length(CAST(COALESCE(type_parameters,'') AS BLOB))+length(CAST(COALESCE(return_type,'') AS BLOB))),0) FROM nodes)
     + (SELECT COALESCE(SUM(length(CAST(source AS BLOB))+length(CAST(target AS BLOB))+length(CAST(kind AS BLOB))+length(CAST(COALESCE(metadata,'') AS BLOB))+length(CAST(COALESCE(provenance,'') AS BLOB))),0) FROM edges)
     + (SELECT COALESCE(SUM(length(CAST(path AS BLOB))+length(CAST(content_hash AS BLOB))+length(CAST(language AS BLOB))+length(CAST(COALESCE(errors,'') AS BLOB))),0) FROM files) bytes,
-    (SELECT COALESCE(SUM(length(path)-length(replace(path,'/',''))),0) FROM files) directoryPotential,
+    (SELECT COALESCE(SUM(length(path)-length(replace(replace(path,'/',''),char(92),''))),0) FROM files) directoryPotential,
     (SELECT COUNT(*) FROM nodes WHERE MAX(length(CAST(id AS BLOB)),length(CAST(kind AS BLOB)),length(CAST(name AS BLOB)),length(CAST(qualified_name AS BLOB)),length(CAST(file_path AS BLOB)),length(CAST(language AS BLOB)),length(CAST(COALESCE(signature,'') AS BLOB)),length(CAST(COALESCE(visibility,'') AS BLOB)),length(CAST(COALESCE(decorators,'') AS BLOB)),length(CAST(COALESCE(type_parameters,'') AS BLOB)),length(CAST(COALESCE(return_type,'') AS BLOB))) > ${MAX_FIELD_BYTES})
     + (SELECT COUNT(*) FROM edges WHERE MAX(length(CAST(source AS BLOB)),length(CAST(target AS BLOB)),length(CAST(kind AS BLOB)),length(CAST(COALESCE(metadata,'') AS BLOB)),length(CAST(COALESCE(provenance,'') AS BLOB))) > ${MAX_FIELD_BYTES})
     + (SELECT COUNT(*) FROM files WHERE MAX(length(CAST(path AS BLOB)),length(CAST(content_hash AS BLOB)),length(CAST(language AS BLOB)),length(CAST(COALESCE(errors,'') AS BLOB))) > ${MAX_FIELD_BYTES}) oversizedFields`).get() as Record<string, number>;
