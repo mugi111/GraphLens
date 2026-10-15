@@ -116,8 +116,8 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
       return { sourceRevision: sourceHash.digest('hex'), nodes: graphNodes, edges: graphEdges, evidence, diagnostics: diagnostics.map((item) => ({ ...item })) };
     } finally {
       if (connection && inTransaction) { try { connection.getDb().exec('ROLLBACK'); } catch { /* preserve the original failure */ } }
-      connection?.close();
-      lock.release();
+      try { connection?.close(); }
+      finally { lock.release(); }
     }
     },
   };
