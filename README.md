@@ -160,6 +160,16 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.openapi","config":{"apiNamespace":"production"}}'
 ```
 
+### Frontend HTTP consumer analyzer
+
+`builtin.frontend-http` statically scans only the explicitly selected `frontendPaths` (workspace-relative files or directories) for `.js`, `.jsx`, `.ts`, and `.tsx` source. Set both `frontendPaths` and a non-default `apiNamespace`; the namespace joins the canonical `api_endpoint` identity used by backend and OpenAPI analyzers. It recognizes direct calls to the unshadowed global `fetch` with a root-relative string literal URL and an optional static `method` string (default `GET`). It does not execute modules or resolve workspace dependencies. Dynamic URLs/options, unsupported URLs, and files where `fetch` may be shadowed produce diagnostics. Syntax errors or source changes during scanning fail the run without activating partial results. Scanning is bounded to 2000 files, 1 MiB per file, 16 MiB total, and 1000 requests.
+
+```sh
+curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
+  -H 'content-type: application/json' \
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.frontend-http","config":{"frontendPaths":["src"],"apiNamespace":"production"}}'
+```
+
 ### Architecture correlation
 
 `builtin.architecture` reads the active FastAPI, OpenAPI, and SQLAlchemy generations from one workspace-scoped input snapshot. FastAPI or OpenAPI must be available; SQLAlchemy input is optional. A partial snapshot is retained when one or more sources have no active generation, and the analyzer reports those missing inputs as informational diagnostics.
