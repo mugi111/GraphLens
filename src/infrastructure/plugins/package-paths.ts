@@ -1,10 +1,10 @@
-import { resolve, sep } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 
 const PLUGIN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-/** Keeps each npm installation in a sibling directory of the selected SQLite file. */
+/** Keeps plugin packages in the selected GraphLens data directory beside its SQLite database. */
 export function resolvePluginStorePath(databaseFile: string): string {
-  return resolve(databaseFile, '..', 'plugins');
+  return resolve(dirname(databaseFile), 'plugins');
 }
 
 export function pluginInstallPrefix(pluginStorePath: string, pluginId: string): string {
