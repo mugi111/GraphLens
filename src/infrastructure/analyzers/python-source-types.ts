@@ -17,9 +17,10 @@ export type PythonSourceFacts = {
   diagnostics: AnalysisDiagnostic[];
   imports: PythonImportFact[];
 };
-export type PythonExpressionFact = { kind: string; name?: string; property?: string; literalKind?: string; children?: PythonExpressionFact[] };
+export type PythonCallArgumentFact = { kind: 'positional' | 'keyword'; keyword?: string; literalKind: string; value?: string | number | boolean | null; expression: PythonExpressionFact };
+export type PythonExpressionFact = { kind: string; name?: string; property?: string; literalKind?: string; value?: string | number | boolean | null; children?: PythonExpressionFact[]; arguments?: PythonCallArgumentFact[] };
 export type PythonParameterFact = { name: string; kind: 'positional_or_keyword' | 'positional_only' | 'keyword_only' | 'var_positional' | 'var_keyword'; annotation?: PythonExpressionFact; hasDefault: boolean };
-export type PythonCallFact = { callee: string; arguments: Array<{ kind: 'positional' | 'keyword'; keyword?: string; literalKind: string }>; line: number; column: number };
+export type PythonCallFact = { callee: string; arguments: PythonCallArgumentFact[]; line: number; column: number };
 export type PythonDecoratorFact = { name: string; arguments: PythonExpressionFact[] };
 export type PythonImportFact = { file: string; ownerId: string; module: string; imported?: string; alias?: string; relativeLevel: number; occurrence?: number; line: number; column: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
 
