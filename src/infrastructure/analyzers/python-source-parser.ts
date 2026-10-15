@@ -210,14 +210,17 @@ function structuredFacts(root: any, source: string, offsets: number[], errorRegi
   const references = new Map<string, PythonExpressionFact>();
   const calls: PythonCallFact[] = [];
   function walk(node: any, isRoot = false) {
-    if (node.name === '⚠' || intersectsDamage({ from: node.from, to: node.to }, errorRegions)) return;
+    if (node.name === '⚠') return;
     if (!isRoot && (node.name === 'ClassDefinition' || node.name === 'FunctionDefinition')) return;
-    if (node.name === 'CallExpression') calls.push(callFact(node, source, offsets, errorRegions));
+    const damaged = intersectsDamage({ from: node.from, to: node.to }, errorRegions);
+    if (node.name === 'CallExpression' && !damaged) calls.push(callFact(node, source, offsets, errorRegions));
     if (node.name === 'MemberExpression' || node.name === 'VariableName') {
-      const fact = expressionFact(node, source);
-      const key = JSON.stringify(fact);
-      references.set(key, fact);
-      if (node.name === 'MemberExpression') return;
+      if (!damaged) {
+        const fact = expressionFact(node, source);
+        const key = JSON.stringify(fact);
+        references.set(key, fact);
+      }
+      if (node.name === 'MemberExpression' && !damaged) return;
     }
     for (const child of children(node)) walk(child);
   }
