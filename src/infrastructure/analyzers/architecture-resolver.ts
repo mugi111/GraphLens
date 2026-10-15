@@ -61,6 +61,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const projectedEdgeIds = new Set<string>();
   const processedClosures = new Set<string>();
   const matchedPairs: Array<{ fast: GraphNode; spec: GraphNode; match: string }> = [];
+  const ambiguousEndpointIds = new Set<string>();
   // The resolver works only from bounded projections of the supplied generations.
   const endpointNodes = (generation: ArchitectureInputGeneration | undefined) => (generation?.nodes ?? []).filter((node) => node.kind === 'api_endpoint');
   const allFastEndpoints = endpointNodes(sources.fastApi);
@@ -95,21 +96,21 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1);
   }
   matchUnique(unmatchedFast, unmatchedSpec, (node) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; }, 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
-    for (const endpoint of candidates) addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.');
+    for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.'); }
   });
   if (config.allowPathShapeInference) matchUnique(unmatchedFast, unmatchedSpec, (node) => {
     const namespace = stringProperty(node, 'namespace'); const method = stringProperty(node, 'method'); const shape = stringProperty(node, 'pathShape');
     return namespace && method && shape ? `${namespace}\u0000${method}\u0000${shape}` : undefined;
   }, 'path_shape', pushMatch, 'INFERRED', 0.8, (kind, candidates) => {
-    for (const endpoint of candidates) addIssue(endpoint, kind, 'Path-shape candidates are ambiguous; no match was inferred.');
+    for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'Path-shape candidates are ambiguous; no match was inferred.'); }
   });
   if (sources.fastApi && sources.openApi) {
-    for (const endpoint of unmatchedFast.values()) addIssue(endpoint, 'unresolved', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
-    for (const endpoint of unmatchedSpec.values()) addIssue(endpoint, 'unresolved', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
+    for (const endpoint of unmatchedFast.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
+    for (const endpoint of unmatchedSpec.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
   }
   if (!sources.fastApi || !sources.openApi) for (const endpoint of [...fastEndpoints, ...specEndpoints]) projectClosure(sources.fastApi ? sources.fastApi : sources.openApi, endpoint);
   for (const pair of matchedPairs) compareContract(pair.fast, pair.spec, pair.match);
-  function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved', message: string) {
+  function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved' | 'gap', message: string) {
     const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
     if (issueIds.has(id) || nodes.length + edges.length + 2 > 9000 || evidence.length >= 10000 || diagnostics.length >= 10000) return;
     issueIds.add(id);
@@ -117,7 +118,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
     const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
     edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: endpoint.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: `ARCHITECTURE_${kind.toUpperCase()}` } });
-    diagnostics.push({ code: `ARCHITECTURE_${kind.toUpperCase()}`, severity: kind === 'ambiguous' ? 'warning' : 'info', message, detail: { endpointId: endpoint.id } });
+    diagnostics.push({ code: `ARCHITECTURE_${kind.toUpperCase()}`, severity: kind === 'unresolved' ? 'info' : 'warning', message, detail: { endpointId: endpoint.id } });
     const input = openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi;
     const source = evidenceFor(input, endpoint.id);
     const item: AnalysisEvidence = {
