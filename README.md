@@ -138,3 +138,17 @@ npm run pack:check
 ```
 
 The published package includes compiled server and web assets. `npm start` requires a preceding build when running from a checkout.
+
+### FastAPI source analyzer
+
+`builtin.fastapi` statically reads Python source with the bundled parser. It never imports or executes workspace modules and does not require a Python interpreter or FastAPI installation. It recognizes statically constructed `FastAPI` applications and `APIRouter` instances, nested `include_router` mounts, supported path-operation decorators, `api_route`, and `add_api_route`. Literal prefixes and paths are concatenated as written; dynamic values, cycles, and unresolved handlers produce diagnostics instead of guessed routes.
+
+The graph includes API endpoint identities, route handlers, explicit and scalar-inferred parameters, request bodies, response metadata, schema references, local dependency links, and supported security schemes. Supported parameter markers are `Path`, `Query`, `Header`, `Cookie`, `Body`, `Form`, and `File`; dependencies use statically resolved `Depends` and `Security` callables. Security output is limited to public constructor metadata for OAuth2 password/authorization-code bearer, API key, HTTP bearer/basic, and OpenID Connect schemes. Callable defaults and runtime values are never evaluated or persisted. Decorators and imports must be canonically imported from FastAPI for recognition.
+
+The analyzer accepts the Python scanner options (`includeStubs`, `excludes`, `maxFiles`, `maxFileBytes`, and `maxTotalBytes`) plus `apiNamespace` (default `default`), `maxRouterDepth` (default 8, maximum 16), `maxDependencyDepth` (default 8, maximum 16), and `maxResolvedFunctionsPerRoute` (default 500, maximum 2000). It also caps effective routes at 5000 and applies the shared graph/evidence/diagnostic limits. The source revision hashes the effective Python scan configuration and file contents.
+
+```sh
+curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
+  -H 'content-type: application/json' \
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.fastapi","config":{"apiNamespace":"production","maxRouterDepth":8}}'
+```
