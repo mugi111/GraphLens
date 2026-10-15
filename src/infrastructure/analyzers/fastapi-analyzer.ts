@@ -303,7 +303,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const explicit = defaultName ? PARAMETER_NAMES.get(`fastapi.${defaultName}`) : undefined;
     const dependency = defaultName === 'Depends' || defaultName === 'Security';
     if (dependency) continue;
-    const paramIn = explicit ?? (pathNames.includes(param.name) ? 'path' : param.annotation && scalarAnnotation(param.annotation) ? 'query' : undefined);
+    const paramIn = explicit ?? (pathNames.includes(param.name) ? 'path' : param.annotation ? scalarAnnotation(param.annotation) ? 'query' : 'body' : undefined);
     if (!paramIn && defaultExpr) addDiagnostic('FASTAPI_UNRESOLVED_PARAMETER', `Parameter '${param.name}' has a dynamic or unsupported marker.`, source);
     if (paramIn) {
       const inputKind = paramIn === 'body' || paramIn === 'form' || paramIn === 'file';
@@ -314,7 +314,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
         ...(expressionString(keywordArgs(argsOf(markerExpression)).get('description')) ? { description: expressionString(keywordArgs(argsOf(markerExpression)).get('description')) } : {}),
       }, source, 'api.parameter', explicit ? 'DIRECT' : 'DERIVED');
       addEdge(endpoint, node, 'accepts', `${routeKey}:parameter:${param.name}`, source, { in: paramIn }, explicit ? 'DIRECT' : 'DERIVED');
-      const schema = expressionName(param.annotation);
+      const schema = param.annotation ? schemaName(param.annotation) : undefined;
       if (schema) addSchemaReference(schema, route.file, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files);
     }
     for (const dep of dependencyExpressions(defaultExpr)) {
