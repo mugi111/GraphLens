@@ -51,8 +51,21 @@ export class ImpactQueryService {
     const findings = attachedFindings(graph.nodes, graph.edges, new Set(result.nodes.map((node) => node.id)));
     const nodes = [...new Map([...result.nodes, ...findings].map((node) => [node.id, node])).values()].sort((a, b) => cmp([a.id], [b.id]));
     if (nodes.length > query.limit || nodes.length > 2000 || result.edges.length > 4000 || result.paths.length > 2000) throw tooLarge();
-    const evidence = query.includeEvidence ? [...graph.evidence.filter((item) => item.subjectKind === 'node' && nodes.some((node) => node.id === item.subjectId)), ...result.edges.flatMap((edge) => edge.evidence)] : undefined;
+    let outputEdges = result.edges;
+    let evidence = query.includeEvidence ? [...graph.evidence.filter((item) => item.subjectKind === 'node' && nodes.some((node) => node.id === item.subjectId)), ...result.edges.flatMap((edge) => edge.evidence)] : undefined;
     if (evidence && evidence.reduce((sum, item) => sum + 1 + item.sources.reduce((n, source) => n + source.evidenceIds.length, 0), 0) > 5000) throw tooLarge();
+    if (evidence) {
+      const edgeEvidenceCount = result.edges.reduce((count, edge) => count + edge.evidence.length, 0);
+      const confirmed = confirmSourceReferences(evidence, this.store, 5000);
+      evidence = confirmed;
+      const confirmedEdges = confirmed.slice(confirmed.length - edgeEvidenceCount);
+      let offset = 0;
+      outputEdges = result.edges.map((edge) => {
+        const edgeEvidence = confirmedEdges.slice(offset, offset + edge.evidence.length);
+        offset += edge.evidence.length;
+        return { ...edge, evidence: edgeEvidence };
+      });
+    }
     const diagnostics = query.includeDiagnostics ? snapshot.generations.flatMap((workspace) => workspace.diagnostics).sort((a, b) => cmp([a.code ?? '', a.message, a.uri ?? ''], [b.code ?? '', b.message, b.uri ?? ''])) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const impacted = result.nodes.filter((node) => node.id !== target.id);
@@ -70,7 +83,7 @@ export class ImpactQueryService {
       target,
       summary: { impactedNodeCount: impacted.length, edgeCount: result.edges.length, workspaceCount, maxDistance: Math.max(0, ...result.distances.values()), inferredPathCount: result.paths.filter((path) => path.level === 'INFERRED').length },
       nodes: nodes.map((node) => ({ ...node, distance: result.distances.get(node.id) ?? 0, impactRole: node.id === target.id ? 'target' : result.roles.get(node.id) ?? 'dependency' })),
-      edges: result.edges,
+      edges: outputEdges,
       paths: result.paths,
       findings,
       ...(evidence ? { evidence } : {}),
@@ -229,33 +242,65 @@ function isCanonicalContractId(value: string) {
 function createEdgeIdentity(edgeId: string, endpointId: string) { return createHash('sha256').update(`${edgeId}\0${endpointId}`).digest('hex'); }
 function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
   const sourceEvidence = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  let sourceLocationsUnavailable = false;
   const addSource = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean) => {
-    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return;
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return false;
     const recorded = workspace.inputGenerations.find((input) => input.analyzerId === analyzerId && input.generationId === generationId);
-    if (!recorded) return;
+    if (!recorded) return false;
     const key = `${workspace.workspace.id}\0${analyzerId}\0${generationId}`;
     const source = sourceEvidence.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
-    source.evidenceIds.add(evidenceId); sourceEvidence.set(key, source);
+    source.evidenceIds.add(evidenceId); sourceEvidence.set(key, source); return true;
   };
   for (const item of items) {
     const provenance = item.provenance;
-    if (!provenance) continue;
+    if (!provenance) { sourceLocationsUnavailable = true; continue; }
     if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
-      addSource(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string');
+      if (!addSource(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string')) sourceLocationsUnavailable = true;
     } else if (Array.isArray(provenance.sources)) {
+      if (!provenance.sources.length) sourceLocationsUnavailable = true;
       for (const source of provenance.sources) {
-        if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+        if (!source || typeof source !== 'object' || Array.isArray(source)) { sourceLocationsUnavailable = true; continue; }
         const value = source as Record<string, unknown>;
         const input = workspace.inputGenerations.find((candidate) => candidate.analyzerId === value.analyzerId);
-        addSource(value.analyzerId, input?.generationId, value.evidenceId, typeof value.uri === 'string');
+        if (!addSource(value.analyzerId, input?.generationId, value.evidenceId, typeof value.uri === 'string')) sourceLocationsUnavailable = true;
       }
-    }
+    } else sourceLocationsUnavailable = true;
   }
   return {
     id: `impact-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence',
     sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: items.map((item) => item.id).sort() }],
     sourceReferences: [...sourceEvidence.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))),
+    sourceLocationsUnavailable,
   };
+}
+function confirmSourceReferences(items: readonly CrossWorkspaceEvidence[], store: GraphStore, maxReferenceChecks: number): CrossWorkspaceEvidence[] {
+  const availability = new Map<string, boolean>();
+  let referenceChecks = 0;
+  const confirm = (item: CrossWorkspaceEvidence): CrossWorkspaceEvidence => {
+    const requestedCount = item.sourceReferences?.reduce((count, source) => count + source.evidenceIds.length, 0) ?? 0;
+    let confirmedCount = 0;
+    const sourceReferences = item.sourceReferences?.flatMap((source) => {
+      const evidenceIds = source.evidenceIds.filter((evidenceId) => {
+        const key = `${source.workspaceId}\0${source.analyzerId}\0${source.generationId}\0${evidenceId}`;
+        const cached = availability.get(key);
+        if (cached !== undefined) return cached;
+        if (++referenceChecks > maxReferenceChecks) throw tooLarge();
+        const row = store.activeSourceEvidence(source.workspaceId, source.analyzerId, source.generationId, evidenceId);
+        let available = false;
+        if (row && !row.payloadTooLarge) {
+          try { available = typeof (JSON.parse(row.payload_json) as { uri?: unknown }).uri === 'string'; } catch { available = false; }
+        }
+        availability.set(key, available);
+        return available;
+      });
+      confirmedCount += evidenceIds.length;
+      return evidenceIds.length ? [{ ...source, evidenceIds }] : [];
+    });
+    const hasProvenanceEvidence = item.sources.some((source) => source.evidenceIds.length > 0);
+    const unavailable = item.sourceLocationsUnavailable === true || (hasProvenanceEvidence && (confirmedCount < requestedCount || !sourceReferences?.length));
+    return { ...item, sourceReferences, sourceLocationsUnavailable: unavailable };
+  };
+  return items.map(confirm);
 }
 function dominant(items: readonly AnalysisEvidence[]): SystemNode['level'] { return items.some((item) => item.level === 'INFERRED') ? 'INFERRED' : items.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'DIRECT'; }
 function cmp(a: Array<string | number>, b: Array<string | number>) { for (let i = 0; i < Math.min(a.length, b.length); i++) { const value = String(a[i]).localeCompare(String(b[i])); if (value) return value; } return a.length - b.length; }
