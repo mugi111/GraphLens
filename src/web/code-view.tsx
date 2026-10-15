@@ -8,7 +8,7 @@ type Evidence = { id: string; type: string; uri?: string; line?: number; level?:
 type Node = { id: string; workspaceId: string; kind: string; label: string; properties: Record<string, unknown>; analyzerId: string; generationId: number; level: string; evidenceCount: number; evidence?: Evidence[] };
 type Edge = { id: string; workspaceId: string; sourceId: string; targetId: string; kind: string; properties: Record<string, unknown>; analyzerId: string; generationId: number; level: string; evidenceCount: number; evidence?: Evidence[] };
 type Page = { snapshotId: string; page: { nextCursor?: string }; nodes: Node[]; edges: Edge[] };
-type Branch = { parent: string; mode: 'neighbors' | 'children'; owner?: string; nodes: Node[]; edges: Edge[]; cursor?: string };
+type Branch = { parent: string; mode: 'neighbors' | 'children'; nodes: Node[]; edges: Edge[]; cursor?: string };
 type Selection = { type: 'node'; value: Node } | { type: 'edge'; value: Edge };
 const identity = (workspaceId: string, id: string) => `${workspaceId}::${id}`;
 const mergeByIdentity = <T extends { id: string; workspaceId: string }>(...groups: T[][]) => {
@@ -66,8 +66,7 @@ export function CodeView({ workspaces }: { workspaces: Workspace[] }) {
         const combinedEdges = mergeByIdentity(root?.edges ?? [], ...Object.entries(branches).filter(([key]) => key !== branchKey).map(([, branch]) => branch.edges), branchEdges);
         if (combinedNodes.length > 500 || combinedEdges.length > 500) throw new Error('Display limit reached (500 nodes or 500 relationships). The branch page was not added.');
         const focusIdentity = identity(options.focus.workspaceId, options.focus.id);
-        const owner = Object.entries(branches).find(([, branch]) => branch.nodes.some((node) => identity(node.workspaceId, node.id) === focusIdentity))?.[0];
-        setBranches((current) => ({ ...current, [branchKey]: { parent: focusIdentity, mode: options.mode as Branch['mode'], ...(owner ? { owner } : {}), nodes: branchNodes, edges: branchEdges, cursor: result.page.nextCursor } }));
+        setBranches((current) => ({ ...current, [branchKey]: { parent: focusIdentity, mode: options.mode as Branch['mode'], nodes: branchNodes, edges: branchEdges, cursor: result.page.nextCursor } }));
       }
     } catch (cause) {
       if (!controller.signal.aborted) setError((cause as Error).message);
@@ -114,8 +113,18 @@ export function CodeView({ workspaces }: { workspaces: Workspace[] }) {
     const parent = identity(node.workspaceId, node.id);
     setBranches((current) => {
       const removed = new Set(Object.entries(current).filter(([, branch]) => branch.parent === parent && (!branchMode || branch.mode === branchMode)).map(([key]) => key));
+      const remaining = Object.entries(current).filter(([key]) => !removed.has(key));
+      const reachable = new Set<string>();
       let changed = true;
-      while (changed) { changed = false; for (const [key, branch] of Object.entries(current)) if (branch.owner && removed.has(branch.owner) && !removed.has(key)) { removed.add(key); changed = true; } }
+      while (changed) {
+        changed = false;
+        for (const [key, branch] of remaining) {
+          const parentIsRoot = root?.nodes.some((item) => identity(item.workspaceId, item.id) === branch.parent) ?? false;
+          const parentInReachableBranch = [...reachable].some((owner) => remaining.find(([candidate]) => candidate === owner)?.[1].nodes.some((item) => identity(item.workspaceId, item.id) === branch.parent));
+          if (!reachable.has(key) && (parentIsRoot || parentInReachableBranch)) { reachable.add(key); changed = true; }
+        }
+      }
+      for (const [key] of remaining) if (!reachable.has(key)) removed.add(key);
       return Object.fromEntries(Object.entries(current).filter(([key]) => !removed.has(key)));
     });
   };
