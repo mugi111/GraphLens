@@ -146,13 +146,23 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (!impl || !contract) { addMismatch('parameters', { parameter: key.replace('\u0000', ':') }); continue; }
       if (typeof impl.properties.required === 'boolean' && typeof contract.properties.required === 'boolean' && impl.properties.required !== contract.properties.required) addMismatch('parameter_required', { parameter: key.replace('\u0000', ':'), implementationRequired: impl.properties.required, contractRequired: contract.properties.required });
     }
+    const bodies = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'accepts').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_request_body');
+    const fastBodies = bodies(sources.fastApi, fast); const specBodies = bodies(sources.openApi, spec);
+    if (fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
+    if (specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
+    if (fastBodies.length === 1 && specBodies.length === 1 && typeof fastBodies[0]!.properties.required === 'boolean' && typeof specBodies[0]!.properties.required === 'boolean' && fastBodies[0]!.properties.required !== specBodies[0]!.properties.required) addMismatch('request_body_required', { implementationRequired: fastBodies[0]!.properties.required, contractRequired: specBodies[0]!.properties.required });
     const responseStatuses = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'returns').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_response').map((node) => node.properties.statusCode ?? node.properties.status).filter((status) => typeof status === 'string' || typeof status === 'number').map(String);
     const fastStatus = responseStatuses(sources.fastApi, fast); if (!fastStatus.length) fastStatus.push('200');
     const specStatus = responseStatuses(sources.openApi, spec);
     const covered = (status: string) => specStatus.includes(status) || specStatus.includes('default') || specStatus.some((item) => /^([1-5])XX$/i.test(item) && item[0] === status[0]);
     if (specStatus.length && fastStatus.some((status) => /^\d{3}$/.test(status) && !covered(status))) addMismatch('response_status', { implementationStatuses: [...new Set(fastStatus)].sort(), contractStatuses: [...new Set(specStatus)].sort() });
+    const specOperationId = sources.openApi.edges.find((edge) => edge.targetId === spec.id && edge.kind === 'exposes')?.sourceId;
+    const specOperation = specOperationId ? nodeById(sources.openApi, specOperationId) : undefined;
+    const specMode = specOperation ? stringProperty(specOperation, 'securityMode') : undefined;
+    const fastHasSecurity = relations(sources.fastApi, fast, 'secured_by').length > 0;
+    if (specMode === 'disabled' && fastHasSecurity) addMismatch('security_disabled', { implementationHasSecurity: true, contractSecurityMode: specMode });
   }
-  return { nodes, edges, evidence, diagnostics, inputGenerations };
+  return { nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)), edges: edges.sort((a, b) => a.id.localeCompare(b.id)), evidence: evidence.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? '')).slice(0, 10000), diagnostics: diagnostics.slice(0, 10000), inputGenerations };
 }
 
 function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => void, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
