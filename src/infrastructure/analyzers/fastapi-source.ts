@@ -119,13 +119,18 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
     if (event.imported) {
       const imported = event.imported;
       if (imported.imported) return `${absoluteModule(file.path, imported)}.${imported.imported}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
-      const suffix = imported.alias ? name.split('.').slice(1).join('.') : name.split('.').slice(imported.module.split('.').length).join('.');
-      const module = imported.alias ? absoluteModule(file.path, imported) : absoluteModule(file.path, imported).split('.')[0]!;
-      return `${module}${suffix ? `.${suffix}` : ''}`;
+      const parts = name.split('.');
+      const moduleParts = imported.module.split('.');
+      if (imported.alias) return `${absoluteModule(file.path, imported)}${parts.length > 1 ? `.${parts.slice(1).join('.')}` : ''}`;
+      if (parts[0] !== moduleParts[0] || moduleParts.some((part, index) => parts[index] !== part)) return undefined;
+      const suffix = parts.slice(moduleParts.length);
+      return `${absoluteModule(file.path, imported)}${suffix.length ? `.${suffix.join('.')}` : ''}`;
     }
     const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
     return existsSymbol(files, local) ? local : undefined;
   }
+  const hasBinding = file.bindings.some((binding) => binding.local === head && scopes.includes(binding.scope));
+  if (hasBinding) return undefined;
   const sameModule = `${file.module}.${name}`;
   return existsSymbol(files, sameModule) ? sameModule : undefined;
 }
