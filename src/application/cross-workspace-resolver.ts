@@ -153,7 +153,7 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
       });
     }
     // Protect against accidental key collisions in canonical URI encoding.
-    if (globalId !== contractId(JSON.parse(keyText) as ApiContractKey)) throw invalid('Contract identity is not canonical.');
+    if (globalId !== keyText) throw invalid('Contract identity is not canonical.');
   }
 
   if (edges.length > options.maxSyntheticEdges) throw exceeded('synthetic edge', options.maxSyntheticEdges);
@@ -186,7 +186,7 @@ function contractKey(node: GraphNode): ApiContractKey | undefined {
   if (typeof namespace !== 'string' || !namespace || namespace === 'default' || typeof method !== 'string' || !allowedMethods.has(method) || typeof path !== 'string' || !path.startsWith('/')) return undefined;
   return { namespace, method, path };
 }
-function contractKeyString(key: ApiContractKey) { return JSON.stringify([key.namespace, key.method, key.path]); }
+function contractKeyString(key: ApiContractKey) { return contractId(key); }
 function contractId(key: ApiContractKey) { return `api-contract://${encodeURIComponent(key.namespace)}/${key.method}/${encodeURIComponent(key.path)}`; }
 function workspaceNodeKey(workspaceId: string, nodeId: string) { return `workspace\0${workspaceId}\0${nodeId}`; }
 function workspaceEdgeId(workspaceId: string, edgeId: string) { return `system-edge://${hash(`${workspaceId}\0${edgeId}`)}`; }
