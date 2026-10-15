@@ -78,9 +78,9 @@ export class ImpactQueryService {
       if (!workspace) throw new ImpactQueryError('WORKSPACE_NOT_FOUND', `Workspace '${id}' was not found.`, 404);
       return { id: workspace.id, name: workspace.name };
     });
-    return {
+    const response = {
       scope: { workspaceIds, workspaces: scope, missingArchitectureWorkspaceIds: [...snapshot.missingArchitectureWorkspaceIds] },
-      snapshot: { id: snapshot.snapshotId, generations: snapshot.generations.map((item) => item.generation), inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])) },
+      snapshot: { id: snapshot.snapshotId, generations: snapshot.generations.map((item) => item.generation), activeGenerations: snapshot.generations.flatMap((item) => item.activeGenerations.map((generation) => ({ workspaceId: item.workspace.id, ...generation }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])), inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])) },
       query: { node: query.node, direction: query.direction, depth: query.depth, includeInferred: query.includeInferred },
       target,
       summary: { impactedNodeCount: impacted.length, edgeCount: result.edges.length, workspaceCount, maxDistance: Math.max(0, ...result.distances.values()), inferredPathCount: result.paths.filter((path) => path.level === 'INFERRED').length },
@@ -91,6 +91,8 @@ export class ImpactQueryService {
       ...(evidence ? { evidence } : {}),
       ...(diagnostics ? { diagnostics } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 3 * 1_048_576) throw tooLarge();
+    return response;
   }
 }
 
@@ -225,7 +227,7 @@ function attachedFindings(nodes: SystemNode[], edges: SystemEdge[], reached: Set
   return nodes.filter((node) => node.kind.startsWith('architecture_contract_') && findingIds.has(node.id)).sort((a, b) => cmp([a.id], [b.id]));
 }
 
-function projectNode(workspace: WorkspaceArchitectureSnapshot, node: GraphNode, evidence: readonly AnalysisEvidence[]): SystemNode { return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(evidence) }; }
+function projectNode(workspace: WorkspaceArchitectureSnapshot, node: GraphNode, evidence: readonly AnalysisEvidence[]): SystemNode { return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(evidence), contributors: node.contributors, propertySources: node.propertySources, propertyConflicts: node.propertyConflicts }; }
 function groupEvidence(items: readonly AnalysisEvidence[]) { const result = new Map<string, AnalysisEvidence[]>(); for (const item of items) { const key = `${item.subjectKind}\0${item.subjectId}`; result.set(key, [...(result.get(key) ?? []), item]); } return result; }
 function addOwnerEndpoint(owners: Map<string, Set<string>>, ownerId: string, endpointId: string) { owners.set(ownerId, new Set([...(owners.get(ownerId) ?? []), endpointId])); }
 function isCanonicalContractId(value: string) {
@@ -243,38 +245,51 @@ function isCanonicalContractId(value: string) {
 }
 function createEdgeIdentity(edgeId: string, endpointId: string) { return createHash('sha256').update(`${edgeId}\0${endpointId}`).digest('hex'); }
 function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
+  const groupedSources = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: Set<string> }>();
   const sourceEvidence = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
   let sourceLocationsUnavailable = false;
-  const addSource = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean) => {
-    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return false;
-    const recorded = workspace.inputGenerations.find((input) => input.analyzerId === analyzerId && input.generationId === generationId);
-    if (!recorded) return false;
-    const key = `${workspace.workspace.id}\0${analyzerId}\0${generationId}`;
+  const addSourceReference = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean, requireInput: boolean) => {
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) { sourceLocationsUnavailable = true; return; }
+    if (!workspace.activeGenerations.some((active) => active.analyzerId === analyzerId && active.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    if (requireInput && !workspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    const key = `${analyzerId}\0${generationId}`;
     const source = sourceEvidence.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
-    source.evidenceIds.add(evidenceId); sourceEvidence.set(key, source); return true;
+    source.evidenceIds.add(evidenceId); sourceEvidence.set(key, source);
   };
   for (const item of items) {
+    const analyzerId = item.analyzerId ?? workspace.generation.analyzerId;
+    const generationId = item.generationId ?? workspace.generation.generationId;
+    const ownerKey = `${analyzerId}\0${generationId}`;
+    const source = groupedSources.get(ownerKey) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, nodeId, evidenceIds: new Set<string>() };
+    source.evidenceIds.add(item.id); groupedSources.set(ownerKey, source);
     const provenance = item.provenance;
-    if (!provenance) { sourceLocationsUnavailable = true; continue; }
-    if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
-      if (!addSource(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string')) sourceLocationsUnavailable = true;
-    } else if (Array.isArray(provenance.sources)) {
-      if (!provenance.sources.length) sourceLocationsUnavailable = true;
-      for (const source of provenance.sources) {
-        if (!source || typeof source !== 'object' || Array.isArray(source)) { sourceLocationsUnavailable = true; continue; }
-        const value = source as Record<string, unknown>;
-        const input = workspace.inputGenerations.find((candidate) => candidate.analyzerId === value.analyzerId);
-        if (!addSource(value.analyzerId, input?.generationId, value.evidenceId, typeof value.uri === 'string')) sourceLocationsUnavailable = true;
-      }
+    if (typeof item.uri === 'string' && analyzerId !== workspace.generation.analyzerId) {
+      addSourceReference(analyzerId, generationId, item.id, true, false);
+    } else if (provenance && typeof provenance === 'object') {
+      if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
+        addSourceReference(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string', true);
+      } else if (Array.isArray(provenance.sources)) {
+        if (!provenance.sources.length) sourceLocationsUnavailable = true;
+        for (const value of provenance.sources) {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) { sourceLocationsUnavailable = true; continue; }
+          const candidate = value as Record<string, unknown>;
+          const input = workspace.inputGenerations.find((entry) => entry.analyzerId === candidate.analyzerId);
+          addSourceReference(candidate.analyzerId, input?.generationId, candidate.evidenceId, typeof candidate.uri === 'string', true);
+        }
+      } else sourceLocationsUnavailable = true;
+    } else if (typeof item.uri === 'string') {
+      addSourceReference(analyzerId, generationId, item.id, true, false);
     } else sourceLocationsUnavailable = true;
   }
+  if (!groupedSources.size) groupedSources.set(`${workspace.generation.analyzerId}\0${workspace.generation.generationId}`, { workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: new Set() });
   return {
     id: `impact-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence',
-    sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: items.map((item) => item.id).sort() }],
+    sources: [...groupedSources.values()].map((source) => ({ ...source, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId, a.nodeId], [b.workspaceId, b.analyzerId, b.generationId, b.nodeId])),
     sourceReferences: [...sourceEvidence.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))),
     sourceLocationsUnavailable,
   };
 }
+
 function confirmSourceReferences(items: readonly CrossWorkspaceEvidence[], store: GraphStore, maxReferenceChecks: number): CrossWorkspaceEvidence[] {
   const availability = new Map<string, boolean>();
   let referenceChecks = 0;

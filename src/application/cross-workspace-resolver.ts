@@ -281,7 +281,7 @@ function participantSources(items: readonly Participant[], maxEvidenceSourceCost
 }
 
 function validateSnapshot(snapshot: CrossWorkspaceSnapshot): void {
-  if (!snapshot || !Array.isArray(snapshot.requestedWorkspaceIds) || snapshot.requestedWorkspaceIds.length < 2 || snapshot.requestedWorkspaceIds.length > 16 || new Set(snapshot.requestedWorkspaceIds).size !== snapshot.requestedWorkspaceIds.length || !Array.isArray(snapshot.generations) || !Array.isArray(snapshot.missingArchitectureWorkspaceIds)) throw invalid('Snapshot must contain 2–16 unique requested workspaces and generation lists.');
+  if (!snapshot || !Array.isArray(snapshot.requestedWorkspaceIds) || snapshot.requestedWorkspaceIds.length < 2 || snapshot.requestedWorkspaceIds.length > 16 || new Set(snapshot.requestedWorkspaceIds).size !== snapshot.requestedWorkspaceIds.length || !Array.isArray(snapshot.generations) || !Array.isArray(snapshot.missingArchitectureWorkspaceIds) || snapshot.generations.some((workspace) => !Array.isArray(workspace.activeGenerations) || workspace.activeGenerations.length > 256)) throw invalid('Snapshot must contain 2–16 unique requested workspaces and generation lists.');
 }
 function contractKey(node: GraphNode): ApiContractKey | undefined {
   const { namespace, method, path } = node.properties;
