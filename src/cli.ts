@@ -14,6 +14,7 @@ import { DatabaseSchemaService } from './application/database-schema-service.js'
 import { ArchitectureQueryService } from './application/architecture-query-service.js';
 import { CrossWorkspaceQueryService, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
 import { ImpactQueryService, parseImpactQuery, type ImpactQuery } from './application/impact-query-service.js';
+import { WorkspaceQueryService } from './application/workspace-query-service.js';
 import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { pythonSourceAnalyzer } from './infrastructure/analyzers/python-source-analyzer.js';
 import { sqlAlchemyAnalyzer } from './infrastructure/analyzers/sqlalchemy-analyzer.js';
@@ -196,13 +197,14 @@ async function runServer(options: ServerOptions) {
   const architectureQuery = new ArchitectureQueryService(store);
   const crossWorkspaceQuery = new CrossWorkspaceQueryService(store);
   const impactQuery = new ImpactQueryService(store);
+  const workspaceQuery = new WorkspaceQueryService(store);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
   if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
-  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, impactQuery, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
+  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, impactQuery, workspaceQuery, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
   const shutdown = () => { server.close(() => store.close()); };
