@@ -18,6 +18,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   const evidence: AnalysisEvidence[] = [];
   const nodesById = new Map<string, GraphNode>();
   const edgesById = new Set<string>();
+  const declarationOccurrences = new Map<string, number>();
   const imports: PythonImportFact[] = [];
   const diagnostics: ParsedPythonFile['diagnostics'] = errorRegions.map((region) => {
     const location = point(region.from, offsets);
@@ -57,7 +58,12 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       const async = node.name === 'FunctionDefinition' && childNamed(node, 'async');
       const qualified = [...scope, name];
       const kind = node.name === 'ClassDefinition' ? 'python_class' : async ? 'python_async_function' : 'python_function';
-      const declared = addNode(`${file.path}#${qualified.join('.')}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName: qualified.join('.'), async });
+      const qualifiedName = qualified.join('.');
+      const occurrenceKey = `${kind}:${qualifiedName}`;
+      const declarationOrdinal = declarationOccurrences.get(occurrenceKey) ?? 0;
+      declarationOccurrences.set(occurrenceKey, declarationOrdinal + 1);
+      const stableName = declarationOrdinal === 0 ? qualifiedName : `${qualifiedName}#${declarationOrdinal}`;
+      const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async });
       addEdge(parent, declared, 'contains', { from: node.from, to: node.to });
       for (const child of children(node)) visit(child, qualified, declared);
       return;
@@ -69,7 +75,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
     for (const child of children(node)) visit(child, scope, parent);
   }
   for (const child of children(tree.topNode)) visit(child, [], moduleNode);
-  return { nodes, edges, evidence, imports, diagnostics };
+  return { nodes, edges, evidence, imports: assignImportOccurrences(imports), diagnostics };
 }
 
 function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: PythonImportFact[]) {
@@ -108,8 +114,10 @@ function importedName(segment: any[], source: string): { name: string; alias?: s
 
 export function sourceEvidence(subjectKind: 'node' | 'edge', subjectId: string, uri: string, type: string, bounds: Range, lineStarts: number[]): AnalysisEvidence {
   const start = point(bounds.from, lineStarts); const end = point(bounds.to, lineStarts);
-  return { id: identity.node(subjectId, `evidence:${subjectKind}`, `${type}:${bounds.from}:${bounds.to}`), subjectKind, subjectId, level: 'DIRECT', type, uri, line: start.line, column: start.column, endLine: end.line, endColumn: end.column, startOffset: bounds.from, endOffset: bounds.to };
+  return { id: identity.node(subjectId, `evidence:${subjectKind}`, type), subjectKind, subjectId, level: 'DIRECT', type, uri, line: start.line, column: start.column, endLine: end.line, endColumn: end.column, startOffset: bounds.from, endOffset: bounds.to };
 }
+
+function assignImportOccurrences(imports: PythonImportFact[]) { const occurrences = new Map<string, number>(); return imports.map((fact) => { const key = `${fact.file}\u0000${fact.module}\u0000${fact.imported ?? ''}\u0000${fact.alias ?? ''}\u0000${fact.relativeLevel}`; const occurrence = occurrences.get(key) ?? 0; occurrences.set(key, occurrence + 1); return { ...fact, occurrence }; }); }
 
 function directChild(node: any, name: string) { return children(node).find((child) => child.name === name); }
 function collectErrorRegions(root: any) { const result: Range[] = []; function walk(node: any) { if (node.name === '⚠') result.push({ from: node.from, to: node.to }); for (const child of children(node)) walk(child); } walk(root); return result; }

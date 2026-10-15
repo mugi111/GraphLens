@@ -21,7 +21,7 @@ export function resolvePythonImports(workspace: Workspace, imports: PythonImport
   const unresolvedLocations = new Map<string, PythonImportFact>();
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
-  const seenEdges = new Set<string>();
+  const edgesById = new Map<string, GraphEdge>();
   for (const imported of imports) {
     const source = modulesByPath.get(imported.file);
     if (!source) continue;
@@ -44,9 +44,13 @@ export function resolvePythonImports(workspace: Workspace, imports: PythonImport
       }
     }
     const edgeId = identity.edge(workspace.id, source.id, destination.id, 'imports');
-    if (seenEdges.has(edgeId)) continue;
-    seenEdges.add(edgeId);
-    edges.push({ id: edgeId, workspaceId: workspace.id, sourceId: source.id, targetId: destination.id, kind: 'imports', properties: { module: moduleName, importedName: imported.imported ?? null, alias: imported.alias ?? null, relativeLevel: imported.relativeLevel, resolved: !!target, ambiguous, sourcePath: imported.file } });
+    let edge = edgesById.get(edgeId);
+    const binding = { module: moduleName, importedName: imported.imported ?? null, alias: imported.alias ?? null, relativeLevel: imported.relativeLevel, resolved: !!target, ambiguous, sourcePath: imported.file, line: imported.line, column: imported.column, endLine: imported.endLine, endColumn: imported.endColumn };
+    if (!edge) {
+      edge = { id: edgeId, workspaceId: workspace.id, sourceId: source.id, targetId: destination.id, kind: 'imports', properties: { ...binding, bindings: [binding] } };
+      edgesById.set(edgeId, edge);
+      edges.push(edge);
+    } else (edge.properties.bindings as unknown[]).push(binding);
     evidence.push(importEvidence('edge', edgeId, imported, 'python.import'));
   }
   const nodesAdded = [...unresolved.values()];
@@ -63,4 +67,4 @@ function absoluteImportName(value: PythonImportFact) {
 }
 function moduleForPath(path: string) { return path.replace(/\.pyi?$/, '').split('/').filter((part) => part !== '__init__').join('.') || '__init__'; }
 function addCandidate(map: Map<string, GraphNode[]>, key: string, candidate: GraphNode) { const list = map.get(key) ?? []; list.push(candidate); map.set(key, list); }
-function importEvidence(subjectKind: 'node' | 'edge', subjectId: string, fact: PythonImportFact, type: string): AnalysisEvidence { return { id: identity.node(subjectId, `evidence:${subjectKind}`, `${type}:${fact.startOffset}:${fact.endOffset}`), subjectKind, subjectId, level: 'DIRECT', type, uri: fact.file, line: fact.line, column: fact.column, endLine: fact.endLine, endColumn: fact.endColumn, startOffset: fact.startOffset, endOffset: fact.endOffset }; }
+function importEvidence(subjectKind: 'node' | 'edge', subjectId: string, fact: PythonImportFact, type: string): AnalysisEvidence { return { id: identity.node(subjectId, `evidence:${subjectKind}`, `${type}:${fact.file}:${fact.occurrence ?? 0}`), subjectKind, subjectId, level: 'DIRECT', type, uri: fact.file, line: fact.line, column: fact.column, endLine: fact.endLine, endColumn: fact.endColumn, startOffset: fact.startOffset, endOffset: fact.endOffset }; }
