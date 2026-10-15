@@ -7,6 +7,8 @@ export { AnalyzerRunner } from './application/analyzer-runner.js';
 export { CrossWorkspaceQueryService, CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
 export type { CrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
 export { CrossWorkspaceResolutionError, resolveCrossWorkspace } from './application/cross-workspace-resolver.js';
+export { ImpactQueryError, ImpactQueryService, parseImpactQuery } from './application/impact-query-service.js';
+export type { ImpactDirection, ImpactQuery } from './application/impact-query-service.js';
 export { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 export { architectureAnalyzer } from './infrastructure/analyzers/architecture-analyzer.js';
 export { architectureConfig, resolveArchitecture } from './infrastructure/analyzers/architecture-resolver.js';
