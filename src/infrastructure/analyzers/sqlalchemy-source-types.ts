@@ -41,6 +41,7 @@ export type SqlAlchemyRelationshipFact = { name: string; target?: string; target
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
+  lexicalImports: Array<{ scope: string; offset: number; local: string; canonical?: string }>;
   pythonImports: PythonImportFact[];
   classes: GraphNode[];
   assignments: GraphNode[];

@@ -1,7 +1,7 @@
 import { AnalysisError, type AnalysisContext, type AnalysisDiagnostic, type AnalysisEvidence, type Analyzer, type AnalysisResult } from '../../domain/analyzer.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
-import { canonicalSqlAlchemyName, collectSqlAlchemyFiles, collectSqlAlchemySource, expressionName, localAssignmentValue, sqlAlchemyConfig } from './sqlalchemy-source-collector.js';
+import { canonicalSqlAlchemyName, collectSqlAlchemyFiles, collectSqlAlchemySource, expressionName, importsAt, localAssignmentValue, sqlAlchemyConfig } from './sqlalchemy-source-collector.js';
 import type { SqlAlchemyCollectedFile, SqlAlchemyModelFact } from './sqlalchemy-source-types.js';
 import type { PythonExpressionFact } from './python-source-types.js';
 
@@ -37,14 +37,12 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       if (!target || assignment.properties.scope !== '') continue;
       const valueName = expressionName(assignment.properties.value);
       const directCall = asExpression(assignment.properties.value);
-      const canonicalValue = directCall?.kind === 'call' && typeof directCall.name === 'string' ? canonicalSqlAlchemyName(directCall.name, file.imports) : undefined;
+      const imports = importsFor(file, String(assignment.properties.scope ?? ''), file.evidenceBySubject.get(assignment.id)?.startOffset);
+      const canonicalValue = directCall?.kind === 'call' && typeof directCall.name === 'string' ? canonicalSqlAlchemyName(directCall.name, imports) : undefined;
       if (canonicalValue === 'sqlalchemy.orm.registry') registryVariables.add(`${moduleForAssignment(assignment)}.${target}`);
       if (canonicalValue === 'sqlalchemy.orm.declarative_base' || canonicalValue === 'sqlalchemy.ext.declarative.declarative_base') rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
       if (valueName?.endsWith('.generate_base') && registryVariables.has(`${moduleForAssignment(assignment)}.${valueName.slice(0, -'.generate_base'.length)}`)) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
-      if (calls(assignment).some((call) => {
-        const canonical = canonicalSqlAlchemyName(call.callee, file.imports);
-        return canonical === 'sqlalchemy.orm.declarative_base' || canonical === 'sqlalchemy.ext.declarative.declarative_base';
-      })) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
+      if (canonicalValue === 'sqlalchemy.orm.declarative_base' || canonicalValue === 'sqlalchemy.ext.declarative.declarative_base') rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
     }
     for (const klass of file.classes) {
       const key = `${String(klass.properties.module)}.${String(klass.properties.qualifiedName)}`;
@@ -52,10 +50,10 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const decorators = Array.isArray(klass.properties.decorators) ? klass.properties.decorators as Array<{name?: string}> : [];
       const isMappedDecorator = decorators.some(({ name }) => {
         if (!name) return false;
-        const canonical = canonicalSqlAlchemyName(name, file.imports);
+        const canonical = canonicalSqlAlchemyName(name, importsFor(file, String(klass.properties.qualifiedName ?? ''), file.evidenceBySubject.get(klass.id)?.startOffset));
         return canonical === 'sqlalchemy.orm.registry.mapped' || canonical === 'sqlalchemy.orm.registry.mapped_as_dataclass' || [...registryVariables].some((registry) => registry === `${String(klass.properties.module)}.${name.split('.')[0]}` && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!));
       });
-      if (!tableAssignment && !isMappedDecorator && classBases(klass).some((base) => canonicalSqlAlchemyName(base, file.imports) === 'sqlalchemy.orm.DeclarativeBase')) rootClasses.add(key);
+      if (!tableAssignment && !isMappedDecorator && classBases(klass).some((base) => canonicalSqlAlchemyName(base, importsFor(file, String(klass.properties.qualifiedName ?? ''), file.evidenceBySubject.get(klass.id)?.startOffset)) === 'sqlalchemy.orm.DeclarativeBase')) rootClasses.add(key);
     }
   }
   const models = new Map<string, SqlAlchemyModelFact>();
@@ -70,12 +68,12 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const abstract = localAssignmentValue(item.file.assignments, '__abstract__', item.qualifiedName);
       if (abstract && literalBoolean(abstract.properties.value) === true) continue;
       const isDerived = bases.some((base) => {
-        const canonical = canonicalSqlAlchemyName(base, item.file.imports);
+        const canonical = canonicalSqlAlchemyName(base, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset));
         const localBase = resolveLocalBaseKey(item.file, base);
         return canonical === 'sqlalchemy.orm.DeclarativeBase' || rootBases.has(localBase ?? `${item.module}.${canonical}`) || rootBases.has(canonical) || models.has(localBase ?? `${item.module}.${base}`) || classByLocal.has(localBase ?? `${item.module}.${base}`) && models.has(localBase ?? `${item.module}.${base}`);
       });
       const decorators = Array.isArray(item.node.properties.decorators) ? item.node.properties.decorators as Array<{name?: string}> : [];
-      const mappedDecorator = decorators.some(({ name }) => !!name && (/\.(mapped|mapped_as_dataclass)$/.test(canonicalSqlAlchemyName(name, item.file.imports)) || [...rootVariables].some((root) => root === `${item.module}.${name.split('.')[0]}`) && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
+      const mappedDecorator = decorators.some(({ name }) => !!name && (/\.(mapped|mapped_as_dataclass)$/.test(canonicalSqlAlchemyName(name, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset))) || [...registryVariables].some((registry) => registry === `${item.module}.${name.split('.')[0]}`) && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
       if (mappedDecorator && !rootClasses.has(key)) { models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName: null, tableResolved: false, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); continue; }
       const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
       const tableName = literalString(tableAssignment?.properties.value);
@@ -252,6 +250,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
 }
 
 function classBases(node: GraphNode): string[] { return Array.isArray(node.properties.bases) ? node.properties.bases.map(expressionName).filter((name): name is string => !!name) : []; }
+function importsFor(file: SqlAlchemyCollectedFile, scope: string, offset = Number.MAX_SAFE_INTEGER) { return importsAt(file.lexicalImports, scope, offset); }
 type CallFact = { callee: string; arguments?: Array<{ kind: 'positional' | 'keyword'; keyword?: string; expression?: PythonExpressionFact }> };
 function calls(node: GraphNode): CallFact[] { return Array.isArray(node.properties.calls) ? node.properties.calls.filter((call): call is CallFact => !!call && typeof call.callee === 'string') : []; }
 function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
@@ -259,10 +258,11 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   if (!name || name.startsWith('__')) return undefined;
   const annotation = asExpression(assignment.properties.annotation);
   const value = asExpression(assignment.properties.value);
-  const mappedAnnotation = isMappedAnnotation(annotation, file.imports);
-  const mappedType = mappedTypeName(annotation, file.imports);
+  const imports = importsFor(file, String(assignment.properties.scope ?? ''), file.evidenceBySubject.get(assignment.id)?.startOffset);
+  const mappedAnnotation = isMappedAnnotation(annotation, imports);
+  const mappedType = mappedTypeName(annotation, imports);
   const valueName = expressionName(value);
-  const canonicalCallName = (name: string) => canonicalSqlAlchemyName(name, file.imports);
+  const canonicalCallName = (name: string) => canonicalSqlAlchemyName(name, imports);
   const directCall = value?.kind === 'call' ? value : undefined;
   const directCanonical = directCall?.name ? canonicalCallName(directCall.name) : '';
   if (directCanonical === 'sqlalchemy.orm.relationship') return undefined;
@@ -295,7 +295,8 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
 
 function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile): { fact: SqlAlchemyModelFact['relationships'][number]; diagnostic?: AnalysisDiagnostic } | undefined {
   const direct = asExpression(assignment.properties.value);
-  const call = direct?.kind === 'call' && direct.name && canonicalSqlAlchemyName(direct.name, file.imports) === 'sqlalchemy.orm.relationship' ? { callee: direct.name, arguments: direct.arguments } : undefined;
+  const imports = importsFor(file, String(assignment.properties.scope ?? ''), file.evidenceBySubject.get(assignment.id)?.startOffset);
+  const call = direct?.kind === 'call' && direct.name && canonicalSqlAlchemyName(direct.name, imports) === 'sqlalchemy.orm.relationship' ? { callee: direct.name, arguments: direct.arguments } : undefined;
   if (!call) return undefined;
   const positional = call.arguments?.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) ?? [];
   const kwargs = new Map((call.arguments ?? []).filter((arg) => arg.kind === 'keyword' && arg.keyword).map((arg) => [arg.keyword!, arg.expression]));
@@ -303,7 +304,7 @@ function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile):
   const literalTarget = staticString(explicitTarget);
   const classTarget = expressionName(explicitTarget);
   const annotation = asExpression(assignment.properties.annotation);
-  const inferredTarget = mappedTypeName(annotation, file.imports);
+  const inferredTarget = mappedTypeName(annotation, imports);
   const target = literalTarget ?? classTarget ?? inferredTarget;
   const targetKind = literalTarget ? 'literal' : classTarget ? 'class' : inferredTarget ? 'annotation' : 'unresolved';
   const backPopulates = staticString(kwargs.get('back_populates'));
@@ -350,7 +351,7 @@ function tableConstraints(assignments: GraphNode[], scope: string, file: SqlAlch
     if (!isObject(value) || seen.has(value)) continue;
     seen.add(value);
     if (value.kind === 'call' && typeof value.name === 'string') {
-      const canonical = canonicalSqlAlchemyName(value.name, file.imports);
+      const canonical = canonicalSqlAlchemyName(value.name, importsFor(file, scope, file.evidenceBySubject.get(assignment.id)?.startOffset));
       const args = Array.isArray(value.arguments) ? value.arguments as PythonExpressionFact['arguments'] : [];
       const positional = args?.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) ?? [];
       const keywords = new Map((args ?? []).filter((arg) => arg.kind === 'keyword' && arg.keyword).map((arg) => [arg.keyword!, arg.expression]));

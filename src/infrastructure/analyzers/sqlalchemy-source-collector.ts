@@ -17,25 +17,41 @@ export async function collectSqlAlchemySource(context: AnalysisContext): Promise
 
 export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlchemyCollectedFile[] {
   return snapshot.parsedFiles.map(({ file, parsed }) => {
-    const imports = new Map<string, string>();
-    for (const imported of parsed.imports) {
-      if (imported.relativeLevel) continue;
-      if (imported.imported) {
-        if (imported.imported === '*') continue;
-        const local = imported.alias ?? imported.imported;
-        const canonical = `${imported.module}.${imported.imported}`;
-        if (canonical === 'sqlalchemy' || canonical.startsWith('sqlalchemy.')) imports.set(local, canonical);
-      } else {
-        const local = imported.alias ?? imported.module.split('.')[0]!;
-        if (imported.module === 'sqlalchemy' || imported.module.startsWith('sqlalchemy.')) imports.set(local, imported.module);
-      }
-    }
     const classes = parsed.nodes.filter((node) => node.kind === 'python_class');
     const assignments = parsed.nodes.filter((node) => node.kind === 'python_assignment');
     const evidenceBySubject = new Map<string, AnalysisEvidence>();
     for (const evidence of parsed.evidence) if (evidence.subjectKind === 'node') evidenceBySubject.set(evidence.subjectId, evidence);
-    return { path: file.path, imports, pythonImports: parsed.imports, classes, assignments, evidenceBySubject };
+    const owners = new Map(parsed.nodes.map((node) => [node.id, node]));
+    const lexicalImports: SqlAlchemyCollectedFile['lexicalImports'] = [];
+    for (const imported of parsed.imports) {
+      if (imported.relativeLevel) continue;
+      const owner = owners.get(imported.ownerId);
+      const scope = owner?.kind === 'python_class' || owner?.kind === 'python_function' || owner?.kind === 'python_async_function' ? String(owner.properties.qualifiedName ?? '') : '';
+      const local = imported.imported ? imported.alias ?? imported.imported : imported.alias ?? imported.module.split('.')[0]!;
+      const canonical = imported.imported ? `${imported.module}.${imported.imported}` : imported.module;
+      lexicalImports.push({ scope, offset: imported.startOffset, local, canonical: canonical === 'sqlalchemy' || canonical.startsWith('sqlalchemy.') ? canonical : undefined });
+    }
+    for (const assignment of assignments) {
+      const target = expressionName(assignment.properties.target);
+      if (!target || target.includes('.')) continue;
+      lexicalImports.push({ scope: String(assignment.properties.scope ?? ''), offset: evidenceBySubject.get(assignment.id)?.startOffset ?? Number.MAX_SAFE_INTEGER, local: target });
+    }
+    lexicalImports.sort((a, b) => a.offset - b.offset || a.scope.localeCompare(b.scope));
+    const imports = importsAt(lexicalImports, '', Number.MAX_SAFE_INTEGER);
+    return { path: file.path, imports, lexicalImports, pythonImports: parsed.imports, classes, assignments, evidenceBySubject };
   });
+}
+
+export function importsAt(bindings: SqlAlchemyCollectedFile['lexicalImports'], scope: string, offset: number) {
+  const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')) : [];
+  scopes.push('');
+  const result = new Map<string, string>();
+  for (const current of scopes) {
+    const latest = new Map<string, SqlAlchemyCollectedFile['lexicalImports'][number]>();
+    for (const binding of bindings) if (binding.scope === current && binding.offset <= offset) latest.set(binding.local, binding);
+    for (const [local, binding] of latest) if (binding.canonical) result.set(local, binding.canonical); else result.delete(local);
+  }
+  return result;
 }
 
 export function canonicalSqlAlchemyName(name: string, imports: Map<string, string>): string {
