@@ -482,7 +482,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     for (const ref of refs) {
       const referenceName = expressionName(ref);
       if (!referenceName) continue;
-      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
+      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, new Set(), true);
       const candidates = symbol ? files.flatMap((item) => [...item.functions, ...item.classes].filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol)) : [];
       const target = candidates.length === 1 ? candidates[0] : undefined;
       if (candidates.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_REFERENCE', `Source reference '${referenceName}' has multiple declarations.`, source);
@@ -491,7 +491,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     }
     for (const [callIndex, call] of callsOf(current).entries()) {
       const callOffset = offsetAt(currentFile.source, call.line, call.column);
-      const symbol = resolveFastApiSymbol(files, currentFile, call.callee, String(current.properties.qualifiedName ?? ''), callOffset);
+      const symbol = resolveFastApiSymbol(files, currentFile, call.callee, String(current.properties.qualifiedName ?? ''), callOffset, new Set(), true);
       const target = symbol ? uniqueFunction(files, symbol, addDiagnostic, source) : undefined;
       const targetFile = target ? files.find((item) => item.functions.includes(target)) : undefined;
       if (!target || !targetFile) continue;
