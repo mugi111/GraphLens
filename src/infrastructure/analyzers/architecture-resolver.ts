@@ -104,9 +104,23 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     if (!spec) continue;
     if (pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1)) { unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id); }
   }
-  matchUnique(unmatchedFast, unmatchedSpec, (node) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; }, 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
-    for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.'); }
-  });
+  const rawOperationKey = (node: GraphNode) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; };
+  const countKeys = (items: GraphNode[]) => {
+    const counts = new Map<string, number>();
+    for (const node of items) { const key = rawOperationKey(node); if (key) counts.set(key, (counts.get(key) ?? 0) + 1); }
+    return counts;
+  };
+  const fastOperationCounts = countKeys(allFastEndpoints); const specOperationCounts = countKeys(allSpecEndpoints);
+  const ambiguousOperationKeys = new Set([...fastOperationCounts.keys(), ...specOperationCounts.keys()].filter((key) => (fastOperationCounts.get(key) ?? 0) > 0 && (specOperationCounts.get(key) ?? 0) > 0 && ((fastOperationCounts.get(key) ?? 0) !== 1 || (specOperationCounts.get(key) ?? 0) !== 1)));
+  for (const [map, counts] of [[unmatchedFast, fastOperationCounts], [unmatchedSpec, specOperationCounts]] as const) for (const node of [...map.values()]) {
+    const key = rawOperationKey(node);
+    if (!key || !ambiguousOperationKeys.has(key)) continue;
+    ambiguousEndpointIds.add(node.id); addIssue(node, 'ambiguous', 'operationId is not unique across the complete input generations.'); map.delete(node.id);
+  }
+  matchUnique(unmatchedFast, unmatchedSpec, (node) => {
+    const key = rawOperationKey(node);
+    return key && fastOperationCounts.get(key) === 1 && specOperationCounts.get(key) === 1 ? key : undefined;
+  }, 'operation_id', pushMatch);
   if (config.allowPathShapeInference) matchUnique(unmatchedFast, unmatchedSpec, (node) => {
     const namespace = stringProperty(node, 'namespace'); const method = stringProperty(node, 'method'); const shape = stringProperty(node, 'pathShape');
     return namespace && method && shape ? `${namespace}\u0000${method}\u0000${shape}` : undefined;
