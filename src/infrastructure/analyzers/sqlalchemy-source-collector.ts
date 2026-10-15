@@ -43,8 +43,8 @@ export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlche
 }
 
 export function importsAt(bindings: SqlAlchemyCollectedFile['lexicalImports'], scope: string, offset: number) {
-  const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')) : [];
-  scopes.push('');
+  const scopes = [''];
+  if (scope) scopes.push(...scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')));
   const result = new Map<string, string>();
   for (const current of scopes) {
     const latest = new Map<string, SqlAlchemyCollectedFile['lexicalImports'][number]>();
