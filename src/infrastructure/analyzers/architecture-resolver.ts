@@ -78,6 +78,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const specEndpoints = allSpecEndpoints.slice(0, Math.max(0, config.maxEndpoints - fastEndpoints.length));
   if (allFastEndpoints.length + allSpecEndpoints.length > fastEndpoints.length + specEndpoints.length) diagnostics.push({ code: 'ARCHITECTURE_ENDPOINT_LIMIT', severity: 'warning', message: `Architecture endpoint input exceeded maxEndpoints (${config.maxEndpoints}); remaining endpoints were skipped.` });
   const openApiEndpointIds = new Set(specEndpoints.map(({ id }) => id));
+  const ownersFor = (generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode, kind: string) => generation ? generation.edges.filter((edge) => edge.targetId === endpoint.id && edge.kind === 'exposes').map((edge) => generation.nodes.find((node) => node.id === edge.sourceId)).filter((node): node is GraphNode => node?.kind === kind).sort((a, b) => a.id.localeCompare(b.id)) : [];
   const pushMatch = (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => {
     const id = ids.edge(sources.workspaceId, fast.id, spec.id, `architecture_${method}`);
     if (edges.some((item) => item.id === id)) return true;
@@ -103,26 +104,43 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   };
   const unmatchedFast = new Map(fastEndpoints.map((node) => [node.id, node]));
   const unmatchedSpec = new Map(specEndpoints.map((node) => [node.id, node]));
+  for (const [map, otherMap, generation, otherGeneration, ownerKind, otherOwnerKind] of [[unmatchedFast, unmatchedSpec, sources.fastApi, sources.openApi, 'fastapi_route', 'openapi_operation'], [unmatchedSpec, unmatchedFast, sources.openApi, sources.fastApi, 'openapi_operation', 'fastapi_route']] as const) for (const endpoint of [...map.values()]) {
+    if (ownersFor(generation, endpoint, ownerKind).length <= 1) continue;
+    ambiguousEndpointIds.add(endpoint.id);
+    addIssue(endpoint, 'ambiguous', 'Endpoint has multiple route or operation owners; no owner was selected.', generation);
+    map.delete(endpoint.id);
+    const counterpart = otherMap.get(endpoint.id);
+    if (counterpart) { ambiguousEndpointIds.add(counterpart.id); addIssue(counterpart, 'ambiguous', 'Endpoint shares its identity with an endpoint that has multiple owners.', otherGeneration); otherMap.delete(counterpart.id); }
+  }
   for (const fast of fastEndpoints) {
     const spec = unmatchedSpec.get(fast.id);
     if (!spec) continue;
     if (pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1)) { unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id); }
   }
-  const rawOperationKey = (node: GraphNode) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; };
-  const countKeys = (items: GraphNode[]) => {
+  const operationKey = (node: GraphNode, generation: ArchitectureInputGeneration | undefined, ownerKind: string) => {
+    const owners = ownersFor(generation, node, ownerKind);
+    if (owners.length !== 1) return undefined;
+    const id = stringProperty(owners[0]!, 'operationId'); const namespace = stringProperty(node, 'namespace');
+    return id && namespace ? `${namespace}\u0000${id}` : undefined;
+  };
+  const countKeys = (items: GraphNode[], generation: ArchitectureInputGeneration | undefined, ownerKind: string) => {
     const counts = new Map<string, number>();
-    for (const node of items) { const key = rawOperationKey(node); if (key) counts.set(key, (counts.get(key) ?? 0) + 1); }
+    for (const node of items) for (const owner of ownersFor(generation, node, ownerKind)) {
+      const operationId = stringProperty(owner, 'operationId'); const namespace = stringProperty(node, 'namespace');
+      const key = operationId && namespace ? `${namespace}\u0000${operationId}` : undefined;
+      if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
     return counts;
   };
-  const fastOperationCounts = countKeys(allFastEndpoints); const specOperationCounts = countKeys(allSpecEndpoints);
+  const fastOperationCounts = countKeys(allFastEndpoints, sources.fastApi, 'fastapi_route'); const specOperationCounts = countKeys(allSpecEndpoints, sources.openApi, 'openapi_operation');
   const ambiguousOperationKeys = new Set([...fastOperationCounts.keys(), ...specOperationCounts.keys()].filter((key) => (fastOperationCounts.get(key) ?? 0) > 0 && (specOperationCounts.get(key) ?? 0) > 0 && ((fastOperationCounts.get(key) ?? 0) !== 1 || (specOperationCounts.get(key) ?? 0) !== 1)));
   for (const [map, counts] of [[unmatchedFast, fastOperationCounts], [unmatchedSpec, specOperationCounts]] as const) for (const node of [...map.values()]) {
-    const key = rawOperationKey(node);
+    const key = operationKey(node, map === unmatchedFast ? sources.fastApi : sources.openApi, map === unmatchedFast ? 'fastapi_route' : 'openapi_operation');
     if (!key || !ambiguousOperationKeys.has(key)) continue;
-    ambiguousEndpointIds.add(node.id); addIssue(node, 'ambiguous', 'operationId is not unique across the complete input generations.'); map.delete(node.id);
+    ambiguousEndpointIds.add(node.id); addIssue(node, 'ambiguous', 'operationId is not unique across the complete input generations.', map === unmatchedFast ? sources.fastApi : sources.openApi); map.delete(node.id);
   }
-  matchUnique(unmatchedFast, unmatchedSpec, (node) => {
-    const key = rawOperationKey(node);
+  matchUnique(unmatchedFast, unmatchedSpec, (node, side) => {
+    const key = operationKey(node, side === 'left' ? sources.fastApi : sources.openApi, side === 'left' ? 'fastapi_route' : 'openapi_operation');
     return key && fastOperationCounts.get(key) === 1 && specOperationCounts.get(key) === 1 ? key : undefined;
   }, 'operation_id', pushMatch);
   if (config.allowPathShapeInference) {
@@ -149,22 +167,22 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   }
   const endpointInputTruncated = allFastEndpoints.length + allSpecEndpoints.length > fastEndpoints.length + specEndpoints.length;
   if (sources.fastApi && sources.openApi && !endpointInputTruncated && !outputLimitReached) {
-    for (const endpoint of unmatchedFast.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
-    for (const endpoint of unmatchedSpec.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
+    for (const endpoint of unmatchedFast.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No OpenAPI operation could be matched to this FastAPI endpoint.', sources.fastApi);
+    for (const endpoint of unmatchedSpec.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No FastAPI endpoint could be matched to this OpenAPI operation.', sources.openApi);
   }
   if (!sources.fastApi || !sources.openApi) for (const endpoint of [...fastEndpoints, ...specEndpoints]) projectClosure(sources.fastApi ? sources.fastApi : sources.openApi, endpoint);
   for (const pair of matchedPairs) compareContract(pair.fast, pair.spec, pair.match);
-  function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved' | 'gap', message: string) {
+  function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved' | 'gap', message: string, generation?: ArchitectureInputGeneration) {
     const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
     if (issueIds.has(id)) return;
-    projectClosure(openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi, endpoint);
+    const input = generation ?? (openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi);
+    projectClosure(input, endpoint);
     if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) { markOutputLimit(); return; }
     issueIds.add(id);
     nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
     const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
     edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: endpoint.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: `ARCHITECTURE_${kind.toUpperCase()}` } });
     diagnostics.push({ code: `ARCHITECTURE_${kind.toUpperCase()}`, severity: kind === 'unresolved' ? 'info' : 'warning', message, detail: { endpointId: endpoint.id } });
-    const input = openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi;
     const source = evidenceFor(input, endpoint.id);
     const item: AnalysisEvidence = {
       id: evidenceId(id, `architecture.${kind}`), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: `architecture.${kind}`,
@@ -370,13 +388,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   return { nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)), edges: edges.sort((a, b) => a.id.localeCompare(b.id)), evidence: evidence.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? '')), diagnostics: diagnostics.slice(0, 10000), inputGenerations };
 }
 
-function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => boolean, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
-  const group = (nodes: Iterable<GraphNode>) => {
+function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode, side: 'left' | 'right') => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => boolean, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
+  const group = (nodes: Iterable<GraphNode>, side: 'left' | 'right') => {
     const groups = new Map<string, GraphNode[]>();
-    for (const node of nodes) { const key = keyOf(node); if (key) groups.set(key, [...(groups.get(key) ?? []), node]); }
+    for (const node of nodes) { const key = keyOf(node, side); if (key) groups.set(key, [...(groups.get(key) ?? []), node]); }
     return groups;
   };
-  const left = group(fast.values()); const right = group(spec.values());
+  const left = group(fast.values(), 'left'); const right = group(spec.values(), 'right');
   for (const [key, candidates] of left) {
     const targets = right.get(key);
     if (candidates.length !== 1 || targets?.length !== 1) {
