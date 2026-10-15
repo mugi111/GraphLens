@@ -10,10 +10,10 @@ export type SqlAlchemyColumnFact = {
   targetId: string;
   assignmentId: string;
   typeName?: string;
-  primaryKey?: boolean;
-  nullable?: boolean;
-  unique?: boolean;
-  index?: boolean;
+  primaryKey?: boolean | null;
+  nullable?: boolean | null;
+  unique?: boolean | null;
+  index?: boolean | null;
   foreignKeys: Array<{ target: string; evidenceId: string }>;
   relationships: Array<{ target?: string; backPopulates?: string; backref?: string; uselist?: boolean; evidenceId: string }>;
   sourceEvidence?: AnalysisEvidence;
@@ -30,7 +30,9 @@ export type SqlAlchemyModelFact = {
   sourceEvidence?: AnalysisEvidence;
   tableEvidence?: AnalysisEvidence;
   columns: SqlAlchemyColumnFact[];
+  constraints: SqlAlchemyConstraintFact[];
 };
+export type SqlAlchemyConstraintFact = { kind: 'primary_key' | 'unique' | 'foreign_key' | 'index'; name?: string; columns: string[]; references: string[]; sourceEvidence?: AnalysisEvidence };
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
