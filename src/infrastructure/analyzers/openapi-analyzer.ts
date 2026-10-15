@@ -44,7 +44,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
     evidenceSet.add(id); evidence.push({ ...(source ?? { id: '', subjectKind, subjectId, level: 'DIRECT', type }), id, subjectKind, subjectId }); enforce();
   };
   const addNode = (doc: OpenApiDocument, kind: string, key: string, label: string, props: Record<string, unknown>, source: AnalysisEvidence | undefined, level: 'DIRECT' | 'DERIVED' = 'DIRECT') => {
-    const id = ids.node(context.workspace.id, `openapi://${encodeURIComponent(doc.file.path)}#${key}`, kind);
+    const id = kind === 'api_endpoint' ? ids.node(context.workspace.id, key, kind) : ids.node(context.workspace.id, `openapi://${encodeURIComponent(doc.file.path)}#${key}`, kind);
     let node = nodeMap.get(id);
     if (!node) { node = { id, workspaceId: context.workspace.id, kind, label, properties: props }; nodeMap.set(id, node); nodes.push(node); }
     addEvidence('node', id, `openapi.${kind}`, doc, source, key); enforce(); return node;
