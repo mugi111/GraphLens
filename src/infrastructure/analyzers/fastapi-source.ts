@@ -136,8 +136,7 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
         const alias = expressionName(value);
         return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving) : undefined;
       }
-      const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
-      return existsSymbol(files, local) ? local : undefined;
+      return undefined;
     }
     const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
     return existsSymbol(files, local) ? local : undefined;
@@ -146,6 +145,22 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
   if (hasBinding) return undefined;
   const sameModule = `${file.module}.${name}`;
   return existsSymbol(files, sameModule) ? sameModule : undefined;
+}
+
+export function resolveFastApiAssignmentSymbol(file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER): string | undefined {
+  const head = name.split('.')[0]!;
+  const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')).reverse() : [];
+  scopes.push('');
+  for (const current of scopes) {
+    const event = file.bindings.filter((binding) => binding.scope === current && binding.local === head && binding.offset <= offset).sort((a, b) => b.offset - a.offset)[0];
+    if (!event) continue;
+    if (event.shadow || event.imported || current !== '') return undefined;
+    const assignment = event.sourceNodeId ? file.assignments.find((node) => node.id === event.sourceNodeId) : undefined;
+    if (!assignment) return undefined;
+    const target = expressionName(assignment.properties.target);
+    return target ? `${file.module}.${target}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}` : undefined;
+  }
+  return undefined;
 }
 
 export function callsOf(node: GraphNode): PythonCallFact[] {
