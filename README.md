@@ -34,6 +34,19 @@ Each successful sync writes a new immutable generation and switches the active g
 - `GET /api/v1/graph?workspace=<id>&limit=<n>`
 - `GET /api/v1/nodes/:nodeId`
 
+## Workspace graph explorer
+
+The Workspace view browses active graph facts from one or more registered workspaces. Select roots, expand `contains` relationships, follow bounded neighbor links, or search labels with literal substring matching. The view shows only facts stored by active analyzers, including their analyzer and generation identifiers; it does not infer directory structure or identify facts as CodeGraph data.
+
+`GET /api/v1/workspace-graph` accepts a required comma-separated `workspaces` selection (1–16 IDs) and these modes:
+
+- `mode=roots` (default) returns nodes without an active incoming `contains` relationship.
+- `mode=children&node=<id>` returns the node's outgoing `contains` relationships.
+- `mode=neighbors&node=<id>&direction=<outgoing|incoming|both>` returns incident relationships.
+- `mode=search&q=<text>` searches labels using literal text; optional `kind=<exact-kind>` filters roots or search results.
+
+`limit` defaults to 25 and accepts 1–100 roots or relationships per page. A response is bounded to 250 nodes, 200 edges, 1,000 evidence records, and 1 MiB each of properties and evidence payloads; requests that exceed a bound return `WORKSPACE_GRAPH_LIMIT_EXCEEDED`. Pass the returned `cursor` and `snapshot` to continue against the same active generations; the page size may change between requests. If those generations change, GraphLens returns `WORKSPACE_GRAPH_SNAPSHOT_CHANGED` and the query must be restarted. `include=evidence` adds recorded evidence. Workspace responses include IDs and names but omit filesystem paths. Unknown, repeated, incompatible, or malformed query parameters return `INVALID_WORKSPACE_GRAPH_QUERY`; other errors include `INVALID_CURSOR`, `WORKSPACE_NOT_FOUND`, and `WORKSPACE_GRAPH_NODE_NOT_FOUND`.
+
 ## Analyzer runtime
 
 GraphLens composes built-in analyzers and previously enabled package plugins at startup. Every analyzer declares a host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created. `GET /api/v1/analyzers` lists loaded analyzers; `GET /api/v1/plugins` lists sanitized plugin inventory recorded in the selected database. Plugin management is available through the CLI; the HTTP plugin API remains read-only.
