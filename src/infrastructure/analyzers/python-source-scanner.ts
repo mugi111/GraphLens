@@ -34,6 +34,7 @@ export async function inventoryPythonSources(rootInput: string, config: PythonSo
   const patterns = config.excludes.map(globRegex);
   let entryCount = 0;
   let directoryCount = 0;
+  let totalBytes = 0;
   async function visit(directory: string, depth: number) {
     if (depth > MAX_DIRECTORY_DEPTH) throw new Error(`Python source directory depth exceeds ${MAX_DIRECTORY_DEPTH}.`);
     if (++directoryCount > MAX_DIRECTORIES) throw new Error(`Python source directory count exceeds ${MAX_DIRECTORIES}.`);
@@ -63,6 +64,9 @@ export async function inventoryPythonSources(rootInput: string, config: PythonSo
         if (canonical.has(rel)) throw new Error(`Python source paths collide after NFC normalization: '${rel}'.`);
         canonical.add(rel);
         const verified = await checkedPath(absolute, root, false);
+        if (verified.size > config.maxFileBytes) throw new Error(`Python source '${rel}' exceeds maxFileBytes (${config.maxFileBytes}).`);
+        totalBytes += verified.size;
+        if (totalBytes > config.maxTotalBytes) throw new Error(`Python source total exceeds maxTotalBytes (${config.maxTotalBytes}).`);
         files.push({ path: rel, absolute, size: verified.size, mtimeMs: verified.mtimeMs, ino: verified.ino });
         if (files.length > config.maxFiles) throw new Error(`Python source file count exceeds maxFiles (${config.maxFiles}).`);
       }
@@ -72,8 +76,6 @@ export async function inventoryPythonSources(rootInput: string, config: PythonSo
   }
   await visit(root, 0);
   files.sort((a, b) => lexical(a.path, b.path));
-  let total = 0;
-  for (const file of files) { if (file.size > config.maxFileBytes) throw new Error(`Python source '${file.path}' exceeds maxFileBytes (${config.maxFileBytes}).`); total += file.size; if (total > config.maxTotalBytes) throw new Error(`Python source total exceeds maxTotalBytes (${config.maxTotalBytes}).`); }
   return files;
 }
 

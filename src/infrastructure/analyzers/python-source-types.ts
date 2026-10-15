@@ -18,7 +18,7 @@ export type PythonSourceFacts = {
   imports: PythonImportFact[];
 };
 export type PythonCallArgumentFact = { kind: 'positional' | 'keyword'; keyword?: string; literalKind: string; value?: string | number | boolean | null; expression: PythonExpressionFact };
-export type PythonExpressionFact = { kind: string; name?: string; property?: string; literalKind?: string; value?: string | number | boolean | null; children?: PythonExpressionFact[]; arguments?: PythonCallArgumentFact[] };
+export type PythonExpressionFact = { kind: string; name?: string; property?: string; literalKind?: string; value?: string | number | boolean | null; children?: PythonExpressionFact[]; arguments?: PythonCallArgumentFact[]; callee?: PythonExpressionFact };
 export type PythonParameterFact = { name: string; kind: 'positional_or_keyword' | 'positional_only' | 'keyword_only' | 'var_positional' | 'var_keyword'; annotation?: PythonExpressionFact; hasDefault: boolean };
 export type PythonCallFact = { callee: string; arguments: PythonCallArgumentFact[]; line: number; column: number };
 export type PythonDecoratorFact = { name: string; arguments: PythonExpressionFact[] };
