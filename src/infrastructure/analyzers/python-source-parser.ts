@@ -10,7 +10,7 @@ type Range = { from: number; to: number };
 const identity = new GraphIdentityFactory();
 
 /** Parser adapter: grammar-specific node names stay behind this boundary. */
-export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFile): ParsedPythonFile {
+export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFile, options: { includeParameterDefaults?: boolean } = {}): ParsedPythonFile {
   const tree = parser.parse(file.source);
   const offsets = lineOffsets(file.source);
   const errorRegions = collectErrorRegions(tree.topNode);
@@ -75,7 +75,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       const args = node.name === 'ClassDefinition' ? directChild(node, 'ArgList') : undefined;
       const bases = node.name === 'ClassDefinition' && args ? callArguments(args, file.source).filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) : [];
       const classKeywords = node.name === 'ClassDefinition' && args ? callArguments(args, file.source).filter((arg) => arg.kind === 'keyword').map((arg) => ({ name: arg.keyword, value: arg.expression })) : [];
-      const parameters = node.name === 'FunctionDefinition' ? functionParameters(directChild(node, 'ParamList'), file.source) : [];
+      const parameters = node.name === 'FunctionDefinition' ? functionParameters(directChild(node, 'ParamList'), file.source, options.includeParameterDefaults === true) : [];
       const returnTypeNode = node.name === 'FunctionDefinition' ? children(node).find((child) => child.name === 'TypeDef' && file.source.slice(child.from, child.to).startsWith('->')) : undefined;
       const declarationFacts = structuredFacts(node, file.source, offsets, errorRegions);
       const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async, decorators, bases, classKeywords, parameters, ...(returnTypeNode ? { returnAnnotation: annotationFact(returnTypeNode, file.source) } : {}), references: declarationFacts.references, calls: declarationFacts.calls });
@@ -155,7 +155,7 @@ function callArguments(node: any, source: string, errorRegions: Range[] = []): A
   return result;
 }
 
-function functionParameters(node: any, source: string): PythonParameterFact[] {
+function functionParameters(node: any, source: string, includeDefaults = false): PythonParameterFact[] {
   if (!node) return [];
   const result: PythonParameterFact[] = [];
   let keywordOnly = false;
@@ -168,7 +168,9 @@ function functionParameters(node: any, source: string): PythonParameterFact[] {
     const annotation = segment.find((child) => child.name === 'TypeDef');
     const prefix = segment.slice(0, segment.indexOf(nameNode));
     const kind = prefix.some((child) => child.name === '**') ? 'var_keyword' : prefix.some((child) => child.name === '*') ? 'var_positional' : keywordOnly ? 'keyword_only' : 'positional_or_keyword';
-    result.push({ name, kind, ...(annotation ? { annotation: annotationFact(annotation, source) } : {}), hasDefault: segment.some((child) => child.name === 'AssignOp') });
+    const assignIndex = segment.findIndex((child) => child.name === 'AssignOp');
+    const defaultNode = assignIndex < 0 ? undefined : segment.slice(assignIndex + 1).find(isExpressionNode);
+    result.push({ name, kind, ...(annotation ? { annotation: annotationFact(annotation, source) } : {}), hasDefault: assignIndex >= 0, ...(includeDefaults && defaultNode ? { default: expressionFact(defaultNode, source) } : {}) });
     if (kind === 'var_positional') keywordOnly = true;
   }
   const slashBefore = splitChildren(node).some((segment) => segment.some((child) => child.name === '/'));
