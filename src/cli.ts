@@ -12,6 +12,7 @@ import { AnalyzerRegistry } from './application/analyzer-registry.js';
 import { AnalyzerRunner } from './application/analyzer-runner.js';
 import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { pythonSourceAnalyzer } from './infrastructure/analyzers/python-source-analyzer.js';
+import { sqlAlchemyAnalyzer } from './infrastructure/analyzers/sqlalchemy-analyzer.js';
 import { workspaceFor } from './infrastructure/codegraph/adapter.js';
 import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.js';
 import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
@@ -98,7 +99,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') return listPlugins(store, command.json);
     const registry = new AnalyzerRegistry();
-    if (command.command === 'plugin-add') { registry.register(demoAnalyzer); registry.register(pythonSourceAnalyzer); }
+    if (command.command === 'plugin-add') { registry.register(demoAnalyzer); registry.register(pythonSourceAnalyzer); registry.register(sqlAlchemyAnalyzer); }
     const manager = new PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') return addPlugin(manager, command.packageName, command.version);
     await removePlugin(manager, store, command.id);
@@ -114,6 +115,7 @@ async function runServer(options: ServerOptions) {
   const registry = new AnalyzerRegistry();
   registry.register(demoAnalyzer);
   registry.register(pythonSourceAnalyzer);
+  registry.register(sqlAlchemyAnalyzer);
   await loadEnabledPlugins(resolvePluginStorePath(databaseFile), store, registry);
   const analyzerRunner = new AnalyzerRunner(store, registry);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
