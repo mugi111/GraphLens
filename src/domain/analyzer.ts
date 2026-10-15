@@ -1,7 +1,7 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
 
 /** IDs owned by GraphLens itself and unavailable to installed packages. */
-export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi'] as const;
+export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi', 'builtin.architecture'] as const;
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -23,7 +23,27 @@ export type AnalysisContext = {
   workspace: Workspace;
   sourceRevision?: string;
   config: Record<string, JsonValue>;
+  /** Optional read-only access to active, workspace-scoped analyzer generations. */
+  architectureInputProvider?: ArchitectureInputReader;
   signal?: { aborted: boolean };
+};
+
+export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
+export type ArchitectureInputGeneration = AnalysisInputGeneration & {
+  sourceRevision?: string;
+  nodes: readonly GraphNode[];
+  edges: readonly GraphEdge[];
+  evidence: readonly AnalysisEvidence[];
+  diagnostics: readonly AnalysisDiagnostic[];
+};
+export type ArchitectureInputSnapshot = { workspaceId: string; generations: readonly ArchitectureInputGeneration[] };
+export type ArchitectureInputProvider = {
+  /** Reads only the requested active generations in one workspace-scoped snapshot. */
+  snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot;
+};
+/** Workspace-bound read-only view exposed to analyzer implementations. */
+export type ArchitectureInputReader = {
+  snapshot(analyzerIds: readonly string[]): ArchitectureInputSnapshot;
 };
 
 export type EvidenceLevel = 'DIRECT' | 'DERIVED' | 'INFERRED';
@@ -61,6 +81,8 @@ export type AnalysisDiagnostic = {
 export type AnalysisResult = {
   /** Content-derived revision computed by source analyzers. */
   sourceRevision?: string;
+  /** Exact active generations consumed to derive this result. */
+  inputGenerations?: AnalysisInputGeneration[];
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
@@ -83,7 +105,10 @@ export type AnalysisErrorCode =
   | 'PROCESS_INTERRUPTED'
   | 'ANALYZER_FAILED'
   | 'INVALID_RESULT'
-  | 'PERSISTENCE_FAILED';
+  | 'PERSISTENCE_FAILED'
+  | 'INPUT_GENERATION_UNAVAILABLE'
+  | 'INPUT_GENERATION_CHANGED'
+  | 'INPUT_GENERATION_CYCLE';
 
 export class AnalysisError extends Error {
   constructor(public readonly code: AnalysisErrorCode, message: string, public readonly diagnostics: AnalysisDiagnostic[] = []) {
