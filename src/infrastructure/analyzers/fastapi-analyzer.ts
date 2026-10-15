@@ -622,7 +622,7 @@ function staticValue(expression: PythonExpressionFact | undefined, file: FastApi
 function schemaName(expression: PythonExpressionFact): string {
   const direct = expressionName(expression);
   if (direct) return direct;
-  if (expression.kind === 'SubscriptExpression' && expression.children?.length) return `${schemaName(expression.children[0]!)}[${expression.children.slice(1).map(schemaName).join(', ')}]`;
+  if ((expression.kind === 'SubscriptExpression' || expression.kind === 'subscript') && expression.children?.length) return `${schemaName(expression.children[0]!)}[${expression.children.slice(1).map(schemaName).join(', ')}]`;
   if (expression.kind.includes('Binary') && expression.children?.length) return expression.children.map(schemaName).join(' | ');
   return expression.children?.map(schemaName).filter(Boolean).join(', ') ?? expression.kind;
 }
