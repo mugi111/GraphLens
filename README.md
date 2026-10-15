@@ -152,3 +152,15 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -H 'content-type: application/json' \
   -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.fastapi","config":{"apiNamespace":"production","maxRouterDepth":8}}'
 ```
+
+### OpenAPI document analyzer
+
+`builtin.openapi` scans bounded `.json`, `.yaml`, and `.yml` files in the workspace and statically projects OpenAPI 3.0, 3.1, and 3.2 documents. It does not execute code, fetch URLs, or read files referenced by a document. JSON/YAML syntax and duplicate mapping keys are checked strictly; YAML aliases and custom tags are rejected. Only local JSON Pointers are considered, and unresolved or external references remain explicit with diagnostics.
+
+The graph includes shared `api_endpoint` identities, parameters, request and response bodies, schema/property nodes, and security requirements/schemes. Supported configuration is `apiNamespace` (default `default`), `include`, `excludes`, `maxFiles` (default 1000), `maxFileBytes` (default 5 MiB), and `maxTotalBytes` (default 32 MiB). Hard limits are 5000 files, 10 MiB per file, and 256 MiB total. The source revision includes the normalized scan configuration and document hashes.
+
+```sh
+curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
+  -H 'content-type: application/json' \
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.openapi","config":{"apiNamespace":"production"}}'
+```
