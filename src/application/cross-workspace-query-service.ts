@@ -69,11 +69,12 @@ export class CrossWorkspaceQueryService {
       if (!workspace) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', `Workspace '${id}' was not found.`, 404);
       return { id: workspace.id, name: workspace.name };
     });
-    return {
+    const response = {
       scope: { workspaceIds, workspaces: workspaceMetadata, missingArchitectureWorkspaceIds: [...snapshot.missingArchitectureWorkspaceIds] },
       snapshot: {
         id: snapshot.snapshotId,
         generations: snapshot.generations.map((item) => item.generation),
+        activeGenerations: snapshot.generations.flatMap((item) => item.activeGenerations.map((generation) => ({ workspaceId: item.workspace.id, ...generation }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
         inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
       },
       query: { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.workspace !== undefined ? { workspace: query.workspace } : {}), depth: query.depth },
@@ -83,6 +84,8 @@ export class CrossWorkspaceQueryService {
       edges: closure.edges,
       ...(diagnostics ? { diagnostics } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 3 * 1_048_576) throw tooLarge();
+    return response;
   }
 
   private readSnapshot(workspaceIds: string[]): CrossWorkspaceSnapshot {
@@ -152,12 +155,46 @@ function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWor
 }
 
 function projectSystemNode(workspace: WorkspaceArchitectureSnapshot, node: GraphNode, items: readonly AnalysisEvidence[]): SystemNode {
-  return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(items) };
+  return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(items), contributors: node.contributors, propertySources: node.propertySources, propertyConflicts: node.propertyConflicts };
 }
 function toCrossEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
-  const ids = items.map((item) => item.id).sort();
-  return { id: `cross-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: ids }] };
+  const grouped = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: Set<string> }>();
+  const references = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  let sourceLocationsUnavailable = false;
+  const addReference = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean, requireInput: boolean) => {
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) { sourceLocationsUnavailable = true; return; }
+    if (!workspace.activeGenerations.some((active) => active.analyzerId === analyzerId && active.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    if (requireInput && !workspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    const key = `${analyzerId}\0${generationId}`;
+    const entry = references.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
+    entry.evidenceIds.add(evidenceId); references.set(key, entry);
+  };
+  for (const item of items) {
+    const analyzerId = item.analyzerId ?? workspace.generation.analyzerId;
+    const generationId = item.generationId ?? workspace.generation.generationId;
+    const key = `${analyzerId}\0${generationId}`;
+    const source = grouped.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, nodeId, evidenceIds: new Set<string>() };
+    source.evidenceIds.add(item.id); grouped.set(key, source);
+    const provenance = item.provenance;
+    if (typeof item.uri === 'string' && analyzerId !== workspace.generation.analyzerId) addReference(analyzerId, generationId, item.id, true, false);
+    else if (provenance && typeof provenance === 'object') {
+      if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') addReference(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string', true);
+      else if (Array.isArray(provenance.sources)) {
+        if (!provenance.sources.length) sourceLocationsUnavailable = true;
+        for (const value of provenance.sources) {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) { sourceLocationsUnavailable = true; continue; }
+          const candidate = value as Record<string, unknown>;
+          const input = workspace.inputGenerations.find((entry) => entry.analyzerId === candidate.analyzerId);
+          addReference(candidate.analyzerId, input?.generationId, candidate.evidenceId, typeof candidate.uri === 'string', true);
+        }
+      } else sourceLocationsUnavailable = true;
+    } else if (typeof item.uri === 'string') addReference(analyzerId, generationId, item.id, true, false);
+    else sourceLocationsUnavailable = true;
+  }
+  if (!grouped.size) grouped.set(`${workspace.generation.analyzerId}\0${workspace.generation.generationId}`, { workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: new Set() });
+  return { id: `cross-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [...grouped.values()].map((source) => ({ ...source, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId, a.nodeId], [b.workspaceId, b.analyzerId, b.generationId, b.nodeId])), sourceReferences: [...references.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))), sourceLocationsUnavailable };
 }
+
 function selectRoots(nodes: SystemNode[], edges: SystemEdge[], query: CrossWorkspaceArchitectureQuery, workspaceIds: string[], workspaceNames: Map<string, string>) {
   const globalWorkspaceOwners = new Map<string, Set<string>>();
   for (const edge of edges) if (edge.scope === 'cross-workspace') {
