@@ -11,10 +11,11 @@ export type FastApiConfig = {
   maxDependencyDepth: number;
   maxResolvedFunctionsPerRoute: number;
 };
-export type FastApiBinding = { scope: string; offset: number; local: string; canonical?: string; imported?: PythonImportFact };
+export type FastApiBinding = { scope: string; offset: number; local: string; canonical?: string; imported?: PythonImportFact; sourceNodeId?: string; shadow?: boolean };
 export type FastApiFile = {
   path: string;
   module: string;
+  source: string;
   nodes: GraphNode[];
   classes: GraphNode[];
   functions: GraphNode[];
@@ -69,16 +70,22 @@ export function collectFastApiFiles(snapshot: PythonSourceSnapshot, workspace: A
     }
     for (const assignment of assignments) {
       const target = expressionName(assignment.properties.target);
-      if (target && !target.includes('.')) bindings.push({ scope: String(assignment.properties.scope ?? ''), offset: evidenceBySubject.get(assignment.id)?.endOffset ?? 0, local: target });
+      if (target && !target.includes('.')) bindings.push({ scope: String(assignment.properties.scope ?? ''), offset: evidenceBySubject.get(assignment.id)?.endOffset ?? 0, local: target, sourceNodeId: assignment.id });
     }
     for (const declaration of [...classes, ...functions]) {
       const qualifiedName = String(declaration.properties.qualifiedName ?? '');
       const parts = qualifiedName.split('.');
       const local = parts.pop();
-      if (local) bindings.push({ scope: parts.join('.'), offset: evidenceBySubject.get(declaration.id)?.endOffset ?? 0, local });
+      if (local) bindings.push({ scope: parts.join('.'), offset: evidenceBySubject.get(declaration.id)?.endOffset ?? 0, local, sourceNodeId: declaration.id });
+    }
+    for (const fn of functions) {
+      const scope = String(fn.properties.qualifiedName ?? '');
+      const offset = evidenceBySubject.get(fn.id)?.startOffset ?? 0;
+      const parameters = Array.isArray(fn.properties.parameters) ? fn.properties.parameters as Array<{ name?: string }> : [];
+      for (const parameter of parameters) if (parameter.name) bindings.push({ scope, offset, local: parameter.name, sourceNodeId: fn.id, shadow: true });
     }
     bindings.sort((a, b) => a.offset - b.offset || lexical(a.scope, b.scope));
-    return { path: file.path, module: moduleNameFor(file.path), nodes, classes, functions, assignments, moduleNode, bindings, evidenceBySubject };
+    return { path: file.path, module: moduleNameFor(file.path), source: file.source, nodes, classes, functions, assignments, moduleNode, bindings, evidenceBySubject };
   });
 }
 
@@ -108,6 +115,7 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
   for (const current of scopes) {
     const event = file.bindings.filter((binding) => binding.scope === current && binding.local === head && binding.offset <= offset).sort((a, b) => b.offset - a.offset)[0];
     if (!event) continue;
+    if (event.shadow) return undefined;
     if (event.imported) {
       const imported = event.imported;
       if (imported.imported) return `${absoluteModule(file.path, imported)}.${imported.imported}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
