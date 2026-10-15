@@ -223,6 +223,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     if (!source) continue;
     for (const reference of column.foreignKeys) {
       const target = resolveForeignKeyTarget(reference.target, model, targetColumns);
+      const ambiguousTarget = target.ambiguous || isAmbiguousForeignKeyTarget(reference.target, ambiguousClasses);
       let destination = target.node;
       if (!destination) {
         destination = unresolvedForeignKeys.get(reference.target);
@@ -230,9 +231,9 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
           destination = addNode(databaseNamespace, 'sqlalchemy_unresolved_foreign_key', reference.target, `unresolved-foreign-key/${reference.target}`, { databaseNamespace, target: reference.target, resolved: false, ambiguous: target.ambiguous }, reference.sourceEvidence, 'sqlalchemy.unresolved_foreign-key');
           unresolvedForeignKeys.set(reference.target, destination);
         }
-        diagnostics.push(sourceDiagnostic(target.ambiguous ? 'SQLALCHEMY_AMBIGUOUS_FOREIGN_KEY' : 'SQLALCHEMY_UNRESOLVED_FOREIGN_KEY', `${target.ambiguous ? 'Ambiguous' : 'Unresolved'} foreign key target '${reference.target}'.`, reference.sourceEvidence));
+        diagnostics.push(sourceDiagnostic(ambiguousTarget ? 'SQLALCHEMY_AMBIGUOUS_FOREIGN_KEY' : 'SQLALCHEMY_UNRESOLVED_FOREIGN_KEY', `${ambiguousTarget ? 'Ambiguous' : 'Unresolved'} foreign key target '${reference.target}'.`, reference.sourceEvidence));
       }
-      addEdge(source, destination, 'foreign_key', reference.sourceEvidence, `${model.qualifiedName}.${column.name}->${reference.target}`, 'DIRECT', { resolved: !!target.node, ambiguous: target.ambiguous });
+      addEdge(source, destination, 'foreign_key', reference.sourceEvidence, `${model.qualifiedName}.${column.name}->${reference.target}`, 'DIRECT', { resolved: !!target.node, ambiguous: ambiguousTarget });
     }
   }
   const unresolvedRelationships = new Map<string, GraphNode>();
@@ -243,21 +244,23 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
       const targetName = relation.target;
       const sourceFile = files.find((candidate) => candidate.path === relation.sourcePath) ?? files.find((candidate) => candidate.path === model.path)!;
       const candidates = targetName ? resolveRelationshipCandidates(models, sourceFile, model, targetName) : [];
+      const importedTarget = targetName ? resolveLocalBaseKey(sourceFile, targetName) : undefined;
+      const ambiguousTarget = candidates.length > 1 || !!targetName && ambiguousClasses.some((group) => group.some((candidate) => `${candidate.module}.${candidate.qualifiedName}` === importedTarget || `${candidate.module}.${candidate.qualifiedName}` === `${model.module}.${targetName}` || candidate.qualifiedName === targetName));
       const resolved = candidates.length === 1 ? projectedModels.get(`${candidates[0]!.module}.${candidates[0]!.qualifiedName}`) : undefined;
       const key = `relationship/${model.schema ? `${model.schema}.` : ''}${model.tableName}.${relation.name}`;
-      const relationship = addNode(model.path, 'sqlalchemy_relationship', relation.name, key, { target: targetName ?? null, backPopulates: relation.backPopulates ?? null, backref: relation.backref ?? null, uselist: relation.uselist ?? null, resolved: !!resolved, ambiguous: candidates.length > 1 }, relation.sourceEvidence, 'sqlalchemy.relationship');
+      const relationship = addNode(model.path, 'sqlalchemy_relationship', relation.name, key, { target: targetName ?? null, backPopulates: relation.backPopulates ?? null, backref: relation.backref ?? null, uselist: relation.uselist ?? null, resolved: !!resolved, ambiguous: ambiguousTarget }, relation.sourceEvidence, 'sqlalchemy.relationship');
       addEdge(source, relationship, 'contains', relation.sourceEvidence, key, 'DIRECT');
       let destination = resolved;
       if (!destination) {
         const unresolvedKey = targetName ?? `${model.module}.${model.qualifiedName}.${relation.name}`;
         destination = unresolvedRelationships.get(unresolvedKey);
         if (!destination) {
-          destination = addNode(databaseNamespace, candidates.length > 1 ? 'sqlalchemy_ambiguous_relationship' : 'sqlalchemy_unresolved_relationship', targetName ?? relation.name, `unresolved-relationship/${unresolvedKey}`, { databaseNamespace, target: targetName ?? null, resolved: false, ambiguous: candidates.length > 1 }, relation.sourceEvidence, 'sqlalchemy.unresolved-relationship');
+          destination = addNode(databaseNamespace, ambiguousTarget ? 'sqlalchemy_ambiguous_relationship' : 'sqlalchemy_unresolved_relationship', targetName ?? relation.name, `unresolved-relationship/${unresolvedKey}`, { databaseNamespace, target: targetName ?? null, resolved: false, ambiguous: ambiguousTarget }, relation.sourceEvidence, 'sqlalchemy.unresolved-relationship');
           unresolvedRelationships.set(unresolvedKey, destination);
         }
-        diagnostics.push(sourceDiagnostic(candidates.length > 1 ? 'SQLALCHEMY_AMBIGUOUS_RELATIONSHIP' : 'SQLALCHEMY_UNRESOLVED_RELATIONSHIP', `${candidates.length > 1 ? 'Ambiguous' : 'Unresolved'} relationship target '${targetName ?? relation.name}'.`, relation.sourceEvidence));
+        diagnostics.push(sourceDiagnostic(ambiguousTarget ? 'SQLALCHEMY_AMBIGUOUS_RELATIONSHIP' : 'SQLALCHEMY_UNRESOLVED_RELATIONSHIP', `${ambiguousTarget ? 'Ambiguous' : 'Unresolved'} relationship target '${targetName ?? relation.name}'.`, relation.sourceEvidence));
       }
-      addEdge(relationship, destination, 'relationship', relation.sourceEvidence, `${model.qualifiedName}.${relation.name}->${targetName ?? 'unresolved'}`, 'DERIVED', { resolved: !!resolved, ambiguous: candidates.length > 1 });
+      addEdge(relationship, destination, 'relationship', relation.sourceEvidence, `${model.qualifiedName}.${relation.name}->${targetName ?? 'unresolved'}`, 'DERIVED', { resolved: !!resolved, ambiguous: ambiguousTarget });
     }
   }
   if (nodes.length + edges.length > 9000) throw new Error('SQLAlchemy contributions exceed the combined limit (9000).');
@@ -421,6 +424,12 @@ function resolveForeignKeyTarget(reference: string, sourceModel: SqlAlchemyModel
   const key = parts.length === 2 ? `${sourceModel.schema ?? ''}.${parts[0]}.${parts[1]}` : `${parts.slice(0, -2).join('.')}.${parts.at(-2)}.${parts.at(-1)}`;
   const candidates = targets.get(key) ?? [];
   return { node: candidates.length === 1 ? candidates[0] : undefined, ambiguous: candidates.length > 1 };
+}
+function isAmbiguousForeignKeyTarget(reference: string, groups: Array<Array<{ file: SqlAlchemyCollectedFile; qualifiedName: string }>>) {
+  const parts = reference.split('.').filter(Boolean);
+  const table = parts.length >= 2 ? parts.at(-2) : undefined;
+  if (!table) return false;
+  return groups.some((group) => group.filter((candidate) => literalString(localAssignmentValue(candidate.file.assignments, '__tablename__', candidate.qualifiedName)?.properties.value) === table).length > 1);
 }
 function findModelCandidates(models: SqlAlchemyModelFact[], currentModule: string, targetName: string) {
   const normalized = targetName.replace(/^['"]|['"]$/g, '');
