@@ -68,7 +68,6 @@ function parseDatabaseSchemaQuery(params: URLSearchParams): { query: DatabaseSch
   const limitText = values.get('limit') ?? '25';
   if (!/^[1-9]\d*$/.test(limitText) || !Number.isSafeInteger(Number(limitText)) || Number(limitText) > 100) return invalid('limit must be an integer between 1 and 100.');
   const cursor = values.get('cursor');
-  if (cursor !== undefined && (!cursor || cursor.length > 4096)) return invalid('cursor is invalid.');
   const includeText = values.get('include');
   const include = includeText === undefined ? [] : includeText.split(',');
   if (includeText === '' || include.some((item) => !['evidence', 'diagnostics'].includes(item)) || new Set(include).size !== include.length) return invalid('include accepts a comma-separated list of evidence and diagnostics.');

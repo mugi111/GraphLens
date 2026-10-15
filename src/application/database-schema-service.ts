@@ -34,7 +34,7 @@ export class DatabaseSchemaService {
     if (!workspace) throw new DatabaseSchemaError('WORKSPACE_NOT_FOUND', `Workspace '${query.workspace}' was not found.`);
     const filters = filterKey(query);
     const filterHash = createHmac('sha256', this.cursorKey).update(filters).digest('base64url');
-    const cursor = query.cursor ? this.decodeCursor(query.cursor) : undefined;
+    const cursor = query.cursor !== undefined ? this.decodeCursor(query.cursor) : undefined;
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.sqlalchemy' || cursor.filters !== filterHash)) {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
