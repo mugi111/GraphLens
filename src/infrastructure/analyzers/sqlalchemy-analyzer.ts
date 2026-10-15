@@ -36,6 +36,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
   const classByLocal = new Map(uniqueClasses.map((item) => [`${item.module}.${item.qualifiedName}`, item]));
   const rootVariables = new Set<string>();
   const rootClasses = new Set<string>();
+  const abstractClasses = new Set<string>();
   const registryVariables = new Set<string>();
   for (const file of files) {
     for (const assignment of file.assignments) {
@@ -71,19 +72,23 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const key = `${item.module}.${item.qualifiedName}`;
       if (rootClasses.has(key) || models.has(key)) continue;
       const bases = classBases(item.node);
-      const abstract = localAssignmentValue(item.file.assignments, '__abstract__', item.qualifiedName);
-      if (abstract && literalBoolean(abstract.properties.value) === true) continue;
+      const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
+      const decorators = Array.isArray(item.node.properties.decorators) ? item.node.properties.decorators as Array<{name?: string}> : [];
+      const mappedDecorator = decorators.some(({ name }) => !!name && (/\.(mapped|mapped_as_dataclass)$/.test(canonicalSqlAlchemyName(name, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset))) || [...registryVariables].some((registry) => registry === `${item.module}.${name.split('.')[0]}`) && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
       const isDerived = bases.some((base) => {
         const canonical = canonicalSqlAlchemyName(base, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset));
         const localBase = resolveLocalBaseKey(item.file, base);
-        return canonical === 'sqlalchemy.orm.DeclarativeBase' || rootBases.has(localBase ?? `${item.module}.${canonical}`) || rootBases.has(canonical) || models.has(localBase ?? `${item.module}.${base}`) || classByLocal.has(localBase ?? `${item.module}.${base}`) && models.has(localBase ?? `${item.module}.${base}`);
+        const baseKey = localBase ?? `${item.module}.${base}`;
+        return canonical === 'sqlalchemy.orm.DeclarativeBase' || rootBases.has(localBase ?? `${item.module}.${canonical}`) || rootBases.has(canonical) || models.has(baseKey) || abstractClasses.has(baseKey);
       });
-      const decorators = Array.isArray(item.node.properties.decorators) ? item.node.properties.decorators as Array<{name?: string}> : [];
-      const mappedDecorator = decorators.some(({ name }) => !!name && (/\.(mapped|mapped_as_dataclass)$/.test(canonicalSqlAlchemyName(name, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset))) || [...registryVariables].some((registry) => registry === `${item.module}.${name.split('.')[0]}`) && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
-      if (mappedDecorator && !rootClasses.has(key)) { models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName: null, tableResolved: false, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); continue; }
-      const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
+      const abstract = localAssignmentValue(item.file.assignments, '__abstract__', item.qualifiedName);
+      if (abstract && literalBoolean(abstract.properties.value) === true) {
+        if (isDerived || mappedDecorator) { abstractClasses.add(key); changed = true; }
+        continue;
+      }
+      const isMapped = mappedDecorator || isDerived;
       const tableName = literalString(tableAssignment?.properties.value);
-      if (!isDerived) {
+      if (!isMapped) {
         if (tableAssignment && (item.file.imports.size > 0 || item.file.pythonImports.some((imp) => !!imp.imported))) diagnostics.push(sourceDiagnostic('SQLALCHEMY_DYNAMIC_BASE', `Could not statically resolve SQLAlchemy base for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
         continue;
       }
