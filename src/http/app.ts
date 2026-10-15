@@ -8,8 +8,9 @@ import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
 import { DatabaseSchemaError, type DatabaseSchemaQuery, type DatabaseSchemaService } from '../application/database-schema-service.js';
 import { ArchitectureQueryError, parseArchitectureQuery, type ArchitectureQueryService } from '../application/architecture-query-service.js';
 import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceQueryService } from '../application/cross-workspace-query-service.js';
+import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
 
-export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, workspacePaths: string[], webRoot: string) {
+export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspacePaths: string[], webRoot: string) {
   const app = new Hono();
   app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: await adapter.status() }));
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
@@ -52,6 +53,15 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     catch (error) {
       if (error instanceof CrossWorkspaceQueryError) return c.json({ error: error.message, code: error.code }, error.status);
       return c.json({ error: 'Cross-workspace architecture query failed.', code: 'CROSS_WORKSPACE_QUERY_FAILED' }, 500);
+    }
+  });
+  app.get('/api/v1/impact', (c) => {
+    const parsed = parseImpactQuery(new URL(c.req.url).searchParams);
+    if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
+    try { return c.json(impactQuery.query(parsed.query)); }
+    catch (error) {
+      if (error instanceof ImpactQueryError) return c.json({ error: error.message, code: error.code }, error.status);
+      return c.json({ error: 'Impact query failed.', code: 'IMPACT_QUERY_FAILED' }, 500);
     }
   });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
