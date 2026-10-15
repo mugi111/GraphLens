@@ -86,7 +86,7 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
 
 ### Database schema query
 
-`GET /api/v1/database/schema` reads the active `builtin.sqlalchemy` generation for one workspace. It does not scan source or run analysis. The `workspace` parameter is required; `root=table` is the default, and `root=model` pages mapped models instead. Optional exact filters are `namespace`, `schema`, `table`, and `model` (the last is valid with `root=model`). An omitted schema includes all schemas; `schema=` selects only unqualified tables. `limit` defaults to 25 and accepts 1–100. `include=evidence,diagnostics` opts into either or both payloads. Unknown, repeated, malformed, or incompatible parameters return `INVALID_DATABASE_QUERY`.
+`GET /api/v1/database/schema` reads the active `builtin.sqlalchemy` generation for one workspace. It does not scan source or run analysis. The `workspace` parameter is required; `root=table` is the default, and `root=model` pages mapped models instead. Optional exact filters are `namespace`, `schema`, `table`, and `model`; `model` matches a model root or a table's owning model. An omitted schema includes all schemas; `schema=` selects only unqualified tables. `limit` defaults to 25 and accepts 1–100. `include=evidence,diagnostics` opts into either or both payloads. Unknown, repeated, malformed, or incompatible parameters return `INVALID_DATABASE_QUERY`.
 
 ```sh
 curl 'http://127.0.0.1:4174/api/v1/database/schema?workspace=<workspace-id>&root=table&namespace=production&schema=public&limit=25&include=evidence,diagnostics'
