@@ -1,8 +1,8 @@
-import { LineCounter, isMap, isScalar, isSeq, parseDocument, type Node, type Pair } from 'yaml';
+import { LineCounter, isMap, isScalar, isSeq, parseDocument, type Node as YamlNode, type Pair } from 'yaml';
 import type { AnalysisEvidence, AnalysisDiagnostic } from '../../domain/analyzer.js';
 import type { OpenApiSourceFile } from './openapi-source.js';
 
-export type OpenApiDocument = { file: OpenApiSourceFile; value: Record<string, unknown>; root: Node; evidence(node: Node | undefined, type: string): AnalysisEvidence | undefined };
+export type OpenApiDocument = { file: OpenApiSourceFile; value: Record<string, unknown>; root: YamlNode; evidence(node: YamlNode | undefined, type: string): AnalysisEvidence | undefined };
 
 export function parseOpenApiDocument(file: OpenApiSourceFile): OpenApiDocument {
   const lineCounter = new LineCounter();
@@ -27,12 +27,12 @@ export function parseOpenApiDocument(file: OpenApiSourceFile): OpenApiDocument {
   } };
 }
 
-export function pairs(node: Node | undefined): Array<{ key: string; value: Node }> {
+export function pairs(node: YamlNode | undefined): Array<[string, YamlNode]> {
   if (!node || !isMap(node)) return [];
-  return node.items.flatMap((item: Pair) => isScalar(item.key) && typeof item.key.value === 'string' && item.value ? [{ key: item.key.value, value: item.value as Node }] : []);
+  return node.items.flatMap((item: Pair) => isScalar(item.key) && typeof item.key.value === 'string' && item.value ? [[item.key.value, item.value as YamlNode] as [string, YamlNode]] : []);
 }
-export function seq(node: Node | undefined): Node[] { return node && isSeq(node) ? node.items.filter((item): item is Node => !!item && typeof item === 'object') : []; }
-export function property(node: Node | undefined, name: string): Node | undefined { return pairs(node).find((item) => item.key === name)?.value; }
-export function scalar(node: Node | undefined): unknown { return node && isScalar(node) ? node.value : undefined; }
-export function objectValue(node: Node | undefined): Record<string, unknown> | undefined { const value = node && isMap(node) ? node.toJSON() : undefined; return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
+export function seq(node: YamlNode | undefined): YamlNode[] { return node && isSeq(node) ? node.items.filter((item): item is YamlNode => !!item && typeof item === 'object') : []; }
+export function property(node: YamlNode | undefined, name: string): YamlNode | undefined { return pairs(node).find(([key]) => key === name)?.[1]; }
+export function scalar(node: YamlNode | undefined): unknown { return node && isScalar(node) ? node.value : undefined; }
+export function objectValue(node: YamlNode | undefined): Record<string, unknown> | undefined { const value = node && isMap(node) ? node.toJSON() : undefined; return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
 export function diagnosticsForDocument(file: OpenApiSourceFile): AnalysisDiagnostic[] { return [{ code: 'OPENAPI_DOCUMENT_IGNORED', severity: 'info', message: `Document '${file.path}' does not declare a supported OpenAPI version.`, uri: file.path }]; }
