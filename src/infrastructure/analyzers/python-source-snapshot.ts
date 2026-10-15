@@ -30,14 +30,22 @@ export async function collectPythonSourceSnapshot(context: AnalysisContext): Pro
   const evidence: AnalysisEvidence[] = [];
   const diagnostics: AnalysisDiagnostic[] = [];
   const imports = [];
-  const parsedFiles = files.map((file) => ({ file, parsed: parsePythonSourceFile(context.workspace, file) }));
-  for (const { parsed } of parsedFiles) {
+  let evidenceCount = 0;
+  let importCount = 0;
+  const parsedFiles: PythonSourceSnapshot['parsedFiles'] = [];
+  for (const file of files) {
+    const parsed = parsePythonSourceFile(context.workspace, file);
+    parsedFiles.push({ file, parsed });
     nodes.push(...parsed.nodes);
     edges.push(...parsed.edges);
     evidence.push(...parsed.evidence);
     diagnostics.push(...parsed.diagnostics);
     imports.push(...parsed.imports);
+    evidenceCount += parsed.evidence.length;
+    importCount += parsed.imports.length;
     assertCapacity(nodes.length, edges.length, diagnostics.length);
+    if (evidenceCount > 10_000) throw new Error('Python source evidence exceeds the result limit (10000).');
+    if (importCount > 10_000) throw new Error('Python source import facts exceed the result limit (10000).');
   }
   const resolution = resolvePythonImports(context.workspace, imports, nodes);
   nodes.push(...resolution.nodes);
