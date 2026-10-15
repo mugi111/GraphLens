@@ -15,7 +15,7 @@ const PARAMETER_NAMES = new Map([
 ]);
 const SECURITY_NAMES = new Set([
   'fastapi.security.OAuth2PasswordBearer', 'fastapi.security.OAuth2AuthorizationCodeBearer', 'fastapi.security.APIKeyHeader',
-  'fastapi.security.APIKeyQuery', 'fastapi.security.APIKeyCookie', 'fastapi.security.HTTPBearer', 'fastapi.security.HTTPBasic',
+  'fastapi.security.APIKeyQuery', 'fastapi.security.APIKeyCookie', 'fastapi.security.HTTPBearer', 'fastapi.security.HTTPBasic', 'fastapi.security.HTTPDigest',
   'fastapi.security.OpenIdConnect',
 ]);
 
@@ -330,7 +330,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (!paramIn && defaultExpr) addDiagnostic('FASTAPI_UNRESOLVED_PARAMETER', `Parameter '${param.name}' has a dynamic or unsupported marker.`, source);
     if (paramIn) {
       const inputKind = paramIn === 'body' || paramIn === 'form' || paramIn === 'file';
-      const requiredState = parameterRequired(markerExpression, param.hasDefault);
+      const requiredState = paramIn === 'path' ? true : parameterRequired(markerExpression, param.hasDefault);
       const node = addNode(inputKind ? 'api_request_body' : 'api_parameter', param.name, route.handlerFile.path, `${routeKey}/parameter/${param.name}`, {
         name: param.name, in: paramIn, required: requiredState,
         ...(param.annotation ? { annotation: schemaName(param.annotation) } : {}),
@@ -361,7 +361,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
     if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
     const targetExpr = dep.arguments?.find((arg) => arg.kind === 'positional')?.expression;
-    if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), fact.file, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
+    if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
     const targetName = expressionName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
     const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source) : undefined;
@@ -376,27 +376,33 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
   void context; void namespace; void routeNode;
 }
 
-function resolveSecurityScheme(expression: PythonExpressionFact | undefined, scopeExpression: PythonExpressionFact | undefined, file: FastApiFile, endpoint: GraphNode, key: string,
+function resolveSecurityScheme(expression: PythonExpressionFact | undefined, scopeExpression: PythonExpressionFact | undefined, files: FastApiFile[], file: FastApiFile, scope: string, offset: number, endpoint: GraphNode, key: string,
   source: AnalysisEvidence | undefined, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, reportMissing = true) {
   const name = expressionName(expression);
   if (!name) return undefined;
-  const assignment = file.assignments.filter((node) => node.properties.scope === '' && expressionName(node.properties.target) === name && (file.evidenceBySubject.get(node.id)?.startOffset ?? Number.MAX_SAFE_INTEGER) <= (source?.startOffset ?? Number.MAX_SAFE_INTEGER)).sort((a, b) => (file.evidenceBySubject.get(b.id)?.startOffset ?? 0) - (file.evidenceBySubject.get(a.id)?.startOffset ?? 0))[0];
+  const symbol = resolveFastApiSymbol(files, file, name, scope, offset);
+  const assignments = symbol ? files.flatMap((candidate) => candidate.assignments.filter((node) => `${node.properties.module}.${expressionName(node.properties.target)}` === symbol).map((node) => ({ file: candidate, node }))) : [];
+  if (assignments.length > 1) { if (reportMissing) addDiagnostic('FASTAPI_AMBIGUOUS_SECURITY', `Security scheme '${name}' has multiple declarations.`, source); return undefined; }
+  const match = assignments[0];
+  const assignment = match?.node;
+  const declarationFile = match?.file ?? file;
   const value = asExpression(assignment?.properties.value);
   if (!value || value.kind !== 'call') { if (reportMissing) addDiagnostic('FASTAPI_UNRESOLVED_SECURITY', `Security scheme '${name}' is not a static supported constructor.`, source); return undefined; }
-  const assignmentEvidence = assignment ? file.evidenceBySubject.get(assignment.id) : undefined;
-  const canonical = canonicalFastApiName(value.name ?? '', file, '', assignmentEvidence?.startOffset ?? 0);
+  const assignmentEvidence = assignment ? declarationFile.evidenceBySubject.get(assignment.id) : undefined;
+  const canonical = canonicalFastApiName(value.name ?? '', declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0);
   if (!SECURITY_NAMES.has(canonical)) { if (reportMissing) addDiagnostic('FASTAPI_UNRESOLVED_SECURITY', `Security scheme '${name}' uses an unsupported constructor.`, assignmentEvidence); return undefined; }
   const args = keywordArgs(value.arguments ?? []);
   const publicProperties: Record<string, unknown> = { constructor: canonical, name };
   for (const field of ['scheme_name', 'description', 'scheme', 'bearerFormat', 'auto_error', 'tokenUrl', 'authorizationUrl', 'refreshUrl', 'openIdConnectUrl', 'scopes', 'name', 'in']) {
-    const extracted = staticValue(args.get(field), file, '', assignmentEvidence?.startOffset ?? 0);
+    const extracted = staticValue(args.get(field), declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0);
     if (extracted !== undefined && (extracted === null || ['string', 'number', 'boolean'].includes(typeof extracted) || Array.isArray(extracted))) publicProperties[field] = extracted;
   }
-  const node = addNode('api_security_scheme', name, file.path, `security/${name}/${assignment?.id ?? canonical}`, publicProperties, assignmentEvidence, 'api.security_scheme');
+  const schemeName = expressionName(assignment?.properties.target) ?? name;
+  const node = addNode('api_security_scheme', schemeName, declarationFile.path, `security/${declarationFile.path}/${assignment?.id ?? canonical}`, publicProperties, assignmentEvidence, 'api.security_scheme');
   const scopes = stringsFromExpression(scopeExpression);
-  const requirement = addNode('api_security_requirement', `Security requirement ${name}`, file.path, `security-requirement/${key}/${name}`, { scheme: name, scopes }, source, 'api.security_requirement');
-  addEdge(endpoint, requirement, 'secured_by', `${key}:security:${name}`, source, {}, 'DIRECT');
-  addEdge(requirement, node, 'uses_scheme', `${key}:uses-scheme:${name}`, source, {}, 'DIRECT');
+  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${key}/${schemeName}`, { scheme: schemeName, scopes }, source, 'api.security_requirement');
+  addEdge(endpoint, requirement, 'secured_by', `${key}:security:${schemeName}`, source, {}, 'DIRECT');
+  addEdge(requirement, node, 'uses_scheme', `${key}:uses-scheme:${schemeName}`, source, {}, 'DIRECT');
   return node;
 }
 
@@ -431,7 +437,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
       const target = dependency.arguments?.find((argument) => argument.kind === 'positional')?.expression;
-      if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), currentFile, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
+      if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = expressionName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
       const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence) : undefined;
