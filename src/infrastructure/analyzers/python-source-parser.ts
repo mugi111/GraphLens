@@ -245,7 +245,7 @@ function expressionFact(node: any, source: string, errorRegions: Range[] = []): 
     const property = [...parts].reverse()[0];
     const propertyFact = property ? expressionFact(property, source, errorRegions) : undefined;
     const literalProperty = property ? literalValue(property, source) : undefined;
-    return { kind: 'member', property: property ? expressionName(propertyFact!) ?? (typeof literalProperty === 'string' ? literalProperty : '') : '', children: [object] };
+    return { kind: 'member', property: property ? expressionName(propertyFact!) ?? (typeof literalProperty === 'string' ? literalProperty : '') : '', children: propertyFact ? [object, propertyFact] : [object] };
   }
   if (node.name === 'CallExpression') {
     const callee = children(node).find(isExpressionNode);
