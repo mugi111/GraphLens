@@ -209,21 +209,41 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const covered = (status: string) => specStatus.includes(status) || specStatus.includes('default') || specStatus.some((item) => /^([1-5])XX$/i.test(item) && item[0] === status[0]);
     if (specStatus.length && fastStatus.some((status) => /^\d{3}$/.test(status) && !covered(status))) addMismatch('response_status', { implementationStatuses: [...new Set(fastStatus)].sort(), contractStatuses: [...new Set(specStatus)].sort() });
     const specMode = stringProperty(specOwner, 'securityMode');
-    const fastHasSecurity = relations(sources.fastApi, fast, 'secured_by').length > 0;
-    if (specMode === 'disabled' && fastHasSecurity) addMismatch('security_disabled', { implementationHasSecurity: true, contractSecurityMode: specMode });
-    const securityFacts = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'secured_by').map((edge) => {
-      const requirement = nodeById(generation, edge.targetId);
-      if (!requirement) return undefined;
-      const schemeEdge = generation.edges.filter((item) => item.sourceId === requirement.id && item.kind === 'uses_scheme').sort((a, b) => a.id.localeCompare(b.id))[0];
-      const scheme = schemeEdge ? nodeById(generation, schemeEdge.targetId) : undefined;
-      if (!scheme) return undefined;
-      const tuple = normalizeScheme(scheme);
-      const rawScopes = schemeEdge?.properties.scopes ?? requirement.properties.scopes;
-      const scopes = Array.isArray(rawScopes) ? rawScopes.filter((value): value is string => typeof value === 'string').sort() : undefined;
-      return tuple && scopes ? { tuple, scopes } : undefined;
-    }).filter((fact): fact is { tuple: string; scopes: string[] } => !!fact);
-    const fastSecurity = securityFacts(sources.fastApi, fast); const specSecurity = securityFacts(sources.openApi, specOwner);
-    if (fastSecurity.length === 1 && specSecurity.length === 1 && (fastSecurity[0]!.tuple !== specSecurity[0]!.tuple || JSON.stringify(fastSecurity[0]!.scopes) !== JSON.stringify(specSecurity[0]!.scopes))) addMismatch('security_scheme', { implementationScheme: fastSecurity[0]!.tuple, contractScheme: specSecurity[0]!.tuple, implementationScopes: fastSecurity[0]!.scopes, contractScopes: specSecurity[0]!.scopes });
+    type SchemeFact = { tuple: string; scopes: string[] };
+    type SecurityGroup = { id: string; facts: SchemeFact[]; required: boolean; complete: boolean };
+    const securityGroups = (generation: ArchitectureInputGeneration, endpoint: GraphNode, isOpenApi: boolean): SecurityGroup[] => {
+      const groups = new Map<string, SecurityGroup>();
+      for (const edge of relations(generation, endpoint, 'secured_by')) {
+        const requirement = nodeById(generation, edge.targetId);
+        if (!requirement) continue;
+        const groupId = isOpenApi ? String(requirement.properties.alternative) : String(requirement.properties.requirementGroup ?? '');
+        if (!groupId) continue;
+        let group = groups.get(groupId);
+        if (!group) { group = { id: groupId, facts: [], required: true, complete: true }; groups.set(groupId, group); }
+        if (!isOpenApi && (requirement.properties.mode === 'optional' || requirement.properties.required === false || edge.properties.required === false)) group.required = false;
+        const schemeEdges = generation.edges.filter((item) => item.sourceId === requirement.id && item.kind === 'uses_scheme').sort((a, b) => a.id.localeCompare(b.id));
+        if (!schemeEdges.length) { group.complete = false; continue; }
+        for (const schemeEdge of schemeEdges) {
+          const scheme = nodeById(generation, schemeEdge.targetId);
+          const tuple = scheme ? normalizeScheme(scheme) : undefined;
+          const rawScopes = schemeEdge.properties.scopes ?? requirement.properties.scopes;
+          const scopes = Array.isArray(rawScopes) ? rawScopes.filter((value): value is string => typeof value === 'string').sort() : undefined;
+          if (!tuple || !scopes) { group.complete = false; continue; }
+          group.facts.push({ tuple, scopes });
+        }
+      }
+      return [...groups.values()].map((group) => ({ ...group, facts: group.facts.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) }));
+    };
+    const fastSecurity = securityGroups(sources.fastApi, fast, false);
+    const specSecurity = securityGroups(sources.openApi, specOwner, true);
+    const fastRequired = fastSecurity.some((group) => group.required && group.complete && group.facts.length > 0);
+    if ((specMode === 'disabled' || specMode === 'none') && fastRequired) addMismatch('security_requiredness', { implementationRequired: true, contractSecurityMode: specMode });
+    if (specMode === 'declared' || specMode === 'document') {
+      const fastGroup = fastSecurity.length === 1 ? fastSecurity[0] : undefined;
+      const specGroup = specSecurity.length === 1 ? specSecurity[0] : undefined;
+      if (fastGroup?.complete && fastGroup.facts.length && specGroup?.complete && specGroup.facts.length && fastGroup.required !== true) addMismatch('security_requiredness', { implementationRequired: false, contractRequired: true });
+      else if (fastGroup?.complete && fastGroup.required && specGroup?.complete && fastGroup.facts.length && specGroup.facts.length && JSON.stringify(fastGroup.facts) !== JSON.stringify(specGroup.facts)) addMismatch('security_requirement_group', { implementationSchemes: fastGroup.facts, contractSchemes: specGroup.facts });
+    }
   }
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
     if (!generation || processedClosures.has(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`)) return;
