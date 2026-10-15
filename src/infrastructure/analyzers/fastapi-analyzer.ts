@@ -331,7 +331,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
       if (!dependencyFunction) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency for parameter '${param.name}'.`, source); continue; }
       const fn = addSourceNode(route.file, dependencyFunction);
       addEdge(endpoint, fn, 'depends_on', `${routeKey}:dependency:${param.name}:${symbol}`, source, { parameter: param.name });
-      addCallsAndReferences(fn, dependencyFunction, route.file, routeKey, source, addSourceNode, addEdge, files, config, addDiagnostic);
+      addCallsAndReferences(fn, dependencyFunction, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic);
     }
   }
   const responseName = typeof route.operation.responseModel === 'string' ? route.operation.responseModel : undefined;
@@ -360,7 +360,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (!fn) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
     const sourceFunction = addSourceNode(route.file, fn);
     addEdge(endpoint, sourceFunction, 'depends_on', `${routeKey}:router-dependency:${symbol}`, source);
-    addCallsAndReferences(sourceFunction, fn, route.file, routeKey, source, addSourceNode, addEdge, files, config, addDiagnostic);
+    addCallsAndReferences(sourceFunction, fn, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic);
   }
   void context; void namespace; void routeNode;
 }
@@ -399,7 +399,7 @@ function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNod
 }
 
 function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFile, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void) {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void) {
   const visited = new Set<string>();
   let resolved = 0;
   const walk = (currentFile: FastApiFile, current: GraphNode, depth: number) => {
@@ -407,6 +407,21 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     if (visited.has(currentKey)) return;
     visited.add(currentKey);
     if (depth > config.maxDependencyDepth) { addDiagnostic('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source); return; }
+    const currentEvidence = currentFile.evidenceBySubject.get(current.id) ?? source;
+    const parameters = Array.isArray(current.properties.parameters) ? current.properties.parameters as PythonParameterFact[] : [];
+    for (const parameter of parameters) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
+      const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
+      if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
+      const target = dependency.arguments?.find((argument) => argument.kind === 'positional')?.expression;
+      if (canonical === 'fastapi.Security' && resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), currentFile, current, key, currentEvidence, addNode, addEdge, addDiagnostic)) continue;
+      const targetName = expressionName(target);
+      const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
+      const next = symbol ? files.flatMap((item) => item.functions).find((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol) : undefined;
+      const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
+      if (!next || !nextFile) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
+      addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}`, currentEvidence, { parameter: parameter.name });
+      walk(nextFile, next, depth + 1);
+    }
     const refs = Array.isArray(current.properties.references) ? current.properties.references as PythonExpressionFact[] : [];
     for (const ref of refs) {
       const referenceName = expressionName(ref);
