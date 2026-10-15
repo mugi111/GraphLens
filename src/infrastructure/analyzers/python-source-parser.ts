@@ -53,7 +53,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   function visit(node: any, scope: string[], parent: GraphNode, decorators: PythonDecoratorFact[] = []) {
     if (node.name === '⚠') return;
     if (node.name === 'DecoratedStatement') {
-      const facts = children(node).filter((child) => child.name === 'Decorator').map((child) => decoratorFact(child, file.source)).filter((fact): fact is PythonDecoratorFact => !!fact);
+      const facts = children(node).filter((child) => child.name === 'Decorator' && !intersectsDamage({ from: child.from, to: child.to }, errorRegions)).map((child) => decoratorFact(child, file.source)).filter((fact): fact is PythonDecoratorFact => !!fact);
       for (const child of children(node)) if (child.name !== 'Decorator') visit(child, scope, parent, facts);
       return;
     }
@@ -85,9 +85,9 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       return;
     }
     if (node.name === 'AssignStatement' || node.name === 'AugmentedAssignStatement') {
-      const assignments = assignmentFacts(node, file.source, offsets);
+      const assignments = intersectsDamage({ from: node.from, to: node.to }, errorRegions) ? [] : assignmentFacts(node, file.source, offsets);
       for (const assignment of assignments) {
-        const target = expressionName(assignment.target) ?? `target-${node.from}`;
+        const target = expressionName(assignment.target) ?? `${assignment.target.kind}:${JSON.stringify(assignment.target)}`;
         const occurrenceKey = `${scope.join('.')}:${target}`;
         const ordinal = assignmentOccurrences.get(occurrenceKey) ?? 0;
         assignmentOccurrences.set(occurrenceKey, ordinal + 1);
@@ -252,6 +252,7 @@ function expressionName(fact: PythonExpressionFact): string | undefined {
   if (fact.kind === 'name') return fact.name;
   if (fact.kind === 'member') { const base = fact.children?.[0] ? expressionName(fact.children[0]) : undefined; return base && fact.property ? `${base}.${fact.property}` : undefined; }
   if (fact.kind === 'call') return fact.name;
+  if (fact.kind === 'TupleExpression' || fact.kind === 'ListExpression') { const parts = fact.children?.map(expressionName); return parts?.every((part): part is string => !!part) ? parts.join(',') : undefined; }
   return undefined;
 }
 
