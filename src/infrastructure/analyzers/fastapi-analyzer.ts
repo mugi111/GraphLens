@@ -153,7 +153,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
         const routeKey = `${route.key}/mount:${mountKey}/path:${fullPath}`;
         if (expandedRouteKeys.has(routeKey)) continue;
         expandedRouteKeys.add(routeKey);
-        if (++effectiveRouteCount > 5000) throw new Error('FastAPI effective route count exceeds 5000.');
+        if (++effectiveRouteCount > 5000) throw fatalLimit('FASTAPI_ROUTE_LIMIT', 'FastAPI effective route count exceeds 5000.');
         projectRoute(context, config.apiNamespace, route, fullPath, mergeStrings(tags, Array.isArray(route.operation.routeTags) ? route.operation.routeTags as string[] : []), [...dependencies, ...routeDependencies(route)], parentNode, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config);
       }
       const nextStack = [...stack, object.key];
@@ -303,6 +303,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
   addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void,
   addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig) {
   const source = route.source ?? route.file.evidenceBySubject.get(route.handler.id);
+  const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
   const params = Array.isArray(route.handler.properties.parameters) ? route.handler.properties.parameters as PythonParameterFact[] : [];
   const pathNames = [...route.path.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]!.split(':')[0]!);
   for (const param of params) {
@@ -340,9 +341,10 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
       const symbol = targetName ? resolveFastApiSymbol(files, route.file, targetName, String(route.handler.properties.qualifiedName ?? ''), source?.startOffset ?? 0) : undefined;
       const dependencyFunction = symbol ? files.flatMap((item) => item.functions).find((fn) => `${fn.properties.module}.${fn.properties.qualifiedName}` === symbol) : undefined;
       if (!dependencyFunction) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency for parameter '${param.name}'.`, source); continue; }
+      countDependency(symbol!, dependencyBudget, config, source);
       const fn = addSourceNode(route.file, dependencyFunction);
       addEdge(endpoint, fn, 'depends_on', `${routeKey}:dependency:${param.name}:${symbol}`, source, { parameter: param.name });
-      addCallsAndReferences(fn, dependencyFunction, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic);
+      addCallsAndReferences(fn, dependencyFunction, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget);
     }
   }
   const responseName = typeof route.operation.responseModel === 'string' ? route.operation.responseModel : undefined;
@@ -369,9 +371,10 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const symbol = targetName ? resolveFastApiSymbol(files, route.file, targetName, String(route.handler.properties.qualifiedName ?? ''), source?.startOffset ?? 0) : undefined;
     const fn = symbol ? files.flatMap((item) => item.functions).find((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : undefined;
     if (!fn) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
+    countDependency(symbol!, dependencyBudget, config, source);
     const sourceFunction = addSourceNode(route.file, fn);
     addEdge(endpoint, sourceFunction, 'depends_on', `${routeKey}:router-dependency:${symbol}`, source);
-    addCallsAndReferences(sourceFunction, fn, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic);
+    addCallsAndReferences(sourceFunction, fn, route.file, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget);
   }
   void context; void namespace; void routeNode;
 }
@@ -410,14 +413,12 @@ function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNod
 }
 
 function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFile, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void) {
-  const visited = new Set<string>();
-  let resolved = 0;
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, budget: DependencyBudget) {
   const walk = (currentFile: FastApiFile, current: GraphNode, depth: number) => {
     const currentKey = `${current.properties.module}.${current.properties.qualifiedName}`;
-    if (visited.has(currentKey)) return;
-    visited.add(currentKey);
-    if (depth > config.maxDependencyDepth) { addDiagnostic('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source); return; }
+    if (budget.visited.has(currentKey)) return;
+    budget.visited.add(currentKey);
+    if (depth > config.maxDependencyDepth) throw fatalLimit('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source);
     const currentEvidence = currentFile.evidenceBySubject.get(current.id) ?? source;
     const parameters = Array.isArray(current.properties.parameters) ? current.properties.parameters as PythonParameterFact[] : [];
     for (const parameter of parameters) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
@@ -430,6 +431,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       const next = symbol ? files.flatMap((item) => item.functions).find((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
       if (!next || !nextFile) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
+      countDependency(symbol!, budget, config, currentEvidence);
       addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}`, currentEvidence, { parameter: parameter.name });
       walk(nextFile, next, depth + 1);
     }
@@ -448,12 +450,18 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       const target = symbol ? files.flatMap((item) => item.functions).find((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol) : undefined;
       const targetFile = target ? files.find((item) => item.functions.includes(target)) : undefined;
       if (!target || !targetFile) continue;
+      countDependency(symbol!, budget, config, currentEvidence);
       addEdge(current, addSourceNode(targetFile, target), 'calls', `${key}:call:${symbol}:${call.line}:${call.column}`, source, { callee: symbol });
-      if (++resolved > config.maxResolvedFunctionsPerRoute) { addDiagnostic('FASTAPI_DEPENDENCY_FUNCTION_LIMIT', `Dependency traversal exceeded maxResolvedFunctionsPerRoute (${config.maxResolvedFunctionsPerRoute}).`, source); return; }
       walk(targetFile, target, depth + 1);
     }
   };
   walk(file, fn, 1);
+}
+
+type DependencyBudget = { visited: Set<string>; resolved: Set<string> };
+function countDependency(symbol: string, budget: DependencyBudget, config: FastApiConfig, source?: AnalysisEvidence) {
+  budget.resolved.add(symbol);
+  if (budget.resolved.size > config.maxResolvedFunctionsPerRoute) throw fatalLimit('FASTAPI_DEPENDENCY_FUNCTION_LIMIT', `Dependency traversal exceeded maxResolvedFunctionsPerRoute (${config.maxResolvedFunctionsPerRoute}).`, source);
 }
 
 function canonicalCall(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number) {
