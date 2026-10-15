@@ -46,6 +46,7 @@ async function analyzePythonSource(context: AnalysisContext): Promise<AnalysisRe
   edges.push(...resolution.edges);
   evidence.push(...resolution.evidence);
   assertCapacity(nodes.length, edges.length, diagnostics.length);
+  if (evidence.length > 10_000) throw new Error('Python source evidence exceeds the result limit (10000).');
   return { sourceRevision, nodes, edges, evidence, diagnostics };
 }
 
@@ -56,7 +57,7 @@ function assertCapacity(nodes: number, edges: number, diagnostics: number) {
 
 function classify(message: string) {
   if (/UTF-8/i.test(message)) return 'PYTHON_SOURCE_INVALID_ENCODING';
-  if (/exceeds max|combined limit|result limit/i.test(message)) return 'PYTHON_SOURCE_LIMIT_EXCEEDED';
+  if (/exceeds|combined limit|result limit|directory count|inventory/i.test(message)) return 'PYTHON_SOURCE_LIMIT_EXCEEDED';
   if (/changed during|changed while|inventory changed/i.test(message)) return 'PYTHON_SOURCE_CHANGED_DURING_SCAN';
   if (/workspace root/i.test(message)) return 'PYTHON_SOURCE_INVALID_ROOT';
   if (/option|includeStubs|excludes|maxFiles|maxFileBytes|maxTotalBytes/i.test(message)) return 'PYTHON_SOURCE_INVALID_CONFIG';

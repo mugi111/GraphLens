@@ -78,12 +78,13 @@ export async function inventoryPythonSources(rootInput: string, config: PythonSo
 }
 
 export async function readStablePythonSources(root: string, config: PythonSourceConfig): Promise<PythonSourceFile[]> {
-  const initial = await inventoryPythonSources(root, config);
+  const canonicalRoot = await realpath(resolve(root));
+  const initial = await inventoryPythonSources(canonicalRoot, config);
   const files: PythonSourceFile[] = [];
   for (const item of initial) {
     let stable = false;
     for (let attempt = 0; attempt < 2 && !stable; attempt++) {
-      const pathInfo = await checkedPath(item.absolute, resolve(root), false);
+      const pathInfo = await checkedPath(item.absolute, canonicalRoot, false);
       if (!sameInventory(item, { ...pathInfo, path: item.path, absolute: item.absolute })) continue;
       if (pathInfo.size > config.maxFileBytes) throw new Error(`Python source '${item.path}' changed during analysis.`);
       const handle = await open(item.absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -92,7 +93,7 @@ export async function readStablePythonSources(root: string, config: PythonSource
         if (!sameStat(pathInfo, before) || !before.isFile() || before.size > config.maxFileBytes) continue;
         const bytes = await handle.readFile();
         const after = await handle.stat();
-        const pathAfter = await checkedPath(item.absolute, resolve(root), false);
+        const pathAfter = await checkedPath(item.absolute, canonicalRoot, false);
         stable = sameStat(before, after) && sameStat(after, pathAfter) && bytes.length === after.size && after.size === item.size && after.mtimeMs === item.mtimeMs && after.ino === item.ino;
         if (stable) {
           const source = decodePythonSource(bytes, item.path);
@@ -102,7 +103,7 @@ export async function readStablePythonSources(root: string, config: PythonSource
     }
     if (!stable) throw new Error(`Python source '${item.path}' changed while being read.`);
   }
-  const finalInventory = await inventoryPythonSources(root, config);
+  const finalInventory = await inventoryPythonSources(canonicalRoot, config);
   if (initial.length !== finalInventory.length || initial.some((file, i) => !sameInventory(file, finalInventory[i]))) throw new Error('Python source inventory changed during analysis.');
   return files;
 }
