@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './http/app.js';
 import { GraphStore } from './infrastructure/sqlite/graph-store.js';
 import { CodeGraphAdapter } from './infrastructure/codegraph/adapter.js';
+import { codeGraphRuntimeSupported, createCodeGraphSnapshotAnalyzer } from './infrastructure/codegraph/snapshot-analyzer.js';
 import { GraphService } from './application/graph-service.js';
 import { AnalyzerRegistry } from './application/analyzer-registry.js';
 import { AnalyzerRunner } from './application/analyzer-runner.js';
@@ -29,7 +30,7 @@ import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
 import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 import { legacyDataNotice, resolveDatabaseFile, resolveLegacyDatabaseFile } from './infrastructure/runtime/data-paths.js';
 
-type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean; dataDir?: string };
+type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; codegraphSdkPath?: string; port: number; noOpen: boolean; demo: boolean; dataDir?: string };
 type PluginCommand = { command: 'plugin-list'; json: boolean } | { command: 'plugin-add'; packageName: string; version: string } | { command: 'plugin-remove'; id: string };
 type ReadQueryCommand = { command: 'architecture-query'; query: CrossWorkspaceArchitectureQuery } | { command: 'impact-query'; query: ImpactQuery };
 export type CliCommand = (ServerOptions | PluginCommand | ReadQueryCommand | { command: 'help'; topic?: 'plugin' | 'query' }) & { dataDir?: string };
@@ -92,6 +93,7 @@ function parseCommandWithoutDataDir(argv: string[]): CliCommand {
     const next = (allowOption = false) => { const value = argv[++i]; if (!value || (!allowOption && value.startsWith('--'))) throw new Error(`${v} requires a value`); return value; };
     if (v === '--workspace' || v === '-w') out.workspaces.push(resolve(next()));
     else if (v === '--codegraph-command') out.codegraphCommand = next();
+    else if (v === '--codegraph-sdk') out.codegraphSdkPath = resolve(next());
     else if (v === '--codegraph-arg') out.codegraphArgs.push(next(true));
     else if (v === '--port') { out.port = Number(next()); if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error('Port must be between 1 and 65535.'); }
     else if (v === '--no-open') out.noOpen = true;
@@ -122,7 +124,11 @@ export function parseCommand(argv: string[]): CliCommand {
   return { ...parseCommandWithoutDataDir(args), dataDir };
 }
 
-function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json] [--data-dir <path>]\n       graphlens plugin add <package>@<exact-version> [--data-dir <path>]\n       graphlens plugin remove <plugin-id> [--data-dir <path>]\n`; if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options] [--data-dir <path>]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options] [--data-dir <path>]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --data-dir <path>              Select GraphLens database and plugin data directory\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+function help(topic?: 'plugin' | 'query') {
+  if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json] [--data-dir <path>]\n       graphlens plugin add <package>@<exact-version> [--data-dir <path>]\n       graphlens plugin remove <plugin-id> [--data-dir <path>]\n`;
+  if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options] [--data-dir <path>]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options] [--data-dir <path>]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`;
+  return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --data-dir <path>              Select GraphLens database and plugin data directory\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --codegraph-sdk <path>        Existing CodeGraph 1.6.2 package root for snapshot ingestion\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`;
+}
 
 function openReadOnlyStore(databaseFile: string): GraphStore {
   if (!existsSync(databaseFile)) {
@@ -179,6 +185,8 @@ async function runPlugin(command: PluginCommand, dataDir?: string): Promise<void
 }
 
 async function runServer(options: ServerOptions) {
+  if (options.codegraphSdkPath && options.demo) throw new Error('--codegraph-sdk and --demo select different graph sources; choose one for startup.');
+  const codegraphAnalyzer = options.codegraphSdkPath ? createCodeGraphSnapshotAnalyzer(options.codegraphSdkPath) : undefined;
   const databaseFile = resolveDatabaseFile(options.dataDir);
   const store = new GraphStore(databaseFile);
   const adapter = new CodeGraphAdapter({ command: options.codegraphCommand, args: options.codegraphArgs });
@@ -191,6 +199,7 @@ async function runServer(options: ServerOptions) {
   registry.register(openApiAnalyzer);
   registry.register(frontendHttpAnalyzer);
   registry.register(architectureAnalyzer);
+  if (codegraphAnalyzer) registry.register(codegraphAnalyzer);
   await loadEnabledPlugins(resolvePluginStorePath(databaseFile), store, registry);
   const analyzerRunner = new AnalyzerRunner(store, registry);
   const databaseSchema = new DatabaseSchemaService(store);
@@ -204,7 +213,11 @@ async function runServer(options: ServerOptions) {
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
-  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, impactQuery, workspaceQuery, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
+  const runtimeSupported = codeGraphRuntimeSupported();
+  const codegraphSnapshot = options.codegraphSdkPath
+    ? { configured: true, packageVersion: '1.6.2', runtimeSupported, detail: runtimeSupported ? 'CodeGraph 1.6.2 snapshot analyzer is registered; start an analysis run to import a workspace.' : `Snapshot ingestion requires Node.js >=22.5 and <25; current runtime is ${process.versions.node}. GraphLens remains available.` }
+    : { configured: false, runtimeSupported, detail: 'Set --codegraph-sdk to an existing CodeGraph 1.6.2 package root to enable explicit snapshot ingestion.' };
+  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, impactQuery, workspaceQuery, options.workspaces, webRoot, codegraphSnapshot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
   const shutdown = () => { server.close(() => store.close()); };

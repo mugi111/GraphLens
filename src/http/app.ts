@@ -11,12 +11,13 @@ import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type Cr
 import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
 import { parseWorkspaceGraphQuery, WorkspaceGraphError, type WorkspaceQueryService } from '../application/workspace-query-service.js';
 
-export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string) {
+export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string, codegraphSnapshot: { configured: boolean; packageVersion?: string; runtimeSupported: boolean; detail: string }) {
   const app = new Hono();
-  app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: await adapter.status() }));
+  app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: { mcp: await adapter.status(), snapshot: codegraphSnapshot } }));
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
   app.post('/api/v1/sync', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaces?: string[]; demo?: boolean };
+    if (body.demo !== true) return c.json({ error: 'This endpoint only activates the local demo fixture. Use analysis runs for source analyzers.' }, 400);
     const paths = Array.isArray(body.workspaces) ? body.workspaces : workspacePaths;
     const { run, alreadyRunning } = graphService.startSync(paths, body.demo === true);
     return c.json(run, alreadyRunning ? 409 : 202);
