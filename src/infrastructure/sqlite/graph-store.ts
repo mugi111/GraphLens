@@ -326,6 +326,107 @@ export class GraphStore implements ArchitectureInputProvider {
     });
     return read(workspaceId);
   }
+  architectureQueryPage(input: { workspace: string; root: 'endpoint' | 'handler' | 'model' | 'table' | 'finding'; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number }, offset: number) {
+    const read = this.db.transaction(() => {
+      const activeGenerations = this.activeGenerationVector([input.workspace]);
+      const active = this.db.prepare(`SELECT w.id workspace_id,w.name,g.id generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.architecture'`).get(input.workspace) as any;
+      if (!active) return undefined;
+      const generationId = Number(active.generation_id);
+      const kinds: Record<typeof input.root, string[]> = { endpoint: ['api_endpoint'], handler: ['python_function','python_async_function'], model: ['sqlalchemy_model'], table: ['sqlalchemy_table'], finding: ['architecture_contract_gap','architecture_contract_ambiguous','architecture_contract_unresolved','architecture_contract_mismatch'] };
+      const where: string[] = ['n.generation_id=?']; const args: unknown[] = [generationId];
+      if (input.node !== undefined) { where.push('n.id=?'); args.push(input.node); }
+      else { where.push(`n.kind IN (${kinds[input.root].map(() => '?').join(',')})`); args.push(...kinds[input.root]); if (input.root === 'handler') where.push("EXISTS(SELECT 1 FROM edge_contributions h WHERE h.generation_id=n.generation_id AND h.kind='handled_by' AND h.target_id=n.id)"); }
+      if (input.namespace !== undefined) { where.push("json_extract(n.properties_json,'$.namespace')=?"); args.push(input.namespace); }
+      if (input.method !== undefined) { where.push("(json_extract(n.properties_json,'$.method')=? OR EXISTS(SELECT 1 FROM json_each(n.properties_json,'$.methods') m WHERE m.value=?))"); args.push(input.method,input.method); }
+      if (input.path !== undefined) { where.push("json_extract(n.properties_json,'$.path')=?"); args.push(input.path); }
+      if (input.finding !== undefined) { where.push('n.kind=?'); args.push(`architecture_contract_${input.finding}`); }
+      const sort = input.root === 'model' ? "COALESCE(json_extract(properties_json,'$.databaseNamespace'),''),COALESCE(json_extract(properties_json,'$.module'),''),COALESCE(json_extract(properties_json,'$.qualifiedName'),''),id" : input.root === 'table' ? "COALESCE(json_extract(properties_json,'$.databaseNamespace'),''),CASE WHEN json_extract(properties_json,'$.schema') IS NULL THEN 0 ELSE 1 END,COALESCE(json_extract(properties_json,'$.schema'),''),COALESCE(json_extract(properties_json,'$.tableName'),''),id" : "COALESCE(json_extract(properties_json,'$.namespace'),''),COALESCE(json_extract(properties_json,'$.method'),json_extract(properties_json,'$.methods[0]'),''),COALESCE(json_extract(properties_json,'$.path'),''),COALESCE(json_extract(properties_json,'$.module'),''),COALESCE(json_extract(properties_json,'$.qualifiedName'),''),COALESCE(json_extract(properties_json,'$.databaseNamespace'),''),COALESCE(json_extract(properties_json,'$.schema'),''),COALESCE(json_extract(properties_json,'$.tableName'),''),kind,id";
+      const fromWhere = where.join(' AND ');
+      const totalRootCount = Number((this.db.prepare(`SELECT COUNT(*) count FROM node_contributions n WHERE ${fromWhere}`).get(...args) as any).count);
+      const roots = this.db.prepare(`SELECT n.id,n.workspace_id,n.kind,n.label,n.properties_json FROM node_contributions n WHERE ${fromWhere} ORDER BY ${sort} LIMIT ? OFFSET ?`).all(...args,input.limit,offset) as any[];
+      const rootIds = roots.map((row) => row.id as string);
+      let selectedIds = rootIds;
+      let edgeRows: any[] = [];
+      if (rootIds.length && input.depth > 0) {
+        const allow = ['implements_contract','architecture_contract_finding','exposes','handled_by','depends_on','calls','references','accepts','returns','uses_schema','secured_by','uses_scheme','maps_to','contains','accesses_model','http_request'];
+        const allowSql = allow.map(() => '?').join(',');
+        const walk = `WITH RECURSIVE walk(id,depth) AS (SELECT id,0 FROM node_contributions WHERE generation_id=? AND id IN (${rootIds.map(()=>'?').join(',')}) UNION SELECT CASE WHEN e.source_id=w.id THEN e.target_id ELSE e.source_id END,w.depth+1 FROM walk w JOIN edge_contributions e ON e.generation_id=? AND (e.source_id=w.id OR e.target_id=w.id) JOIN node_contributions other ON other.generation_id=e.generation_id AND other.id=CASE WHEN e.source_id=w.id THEN e.target_id ELSE e.source_id END WHERE w.depth<? AND e.kind IN (${allowSql}) LIMIT 1501)`;
+        const reachArgs = [generationId,...rootIds,generationId,input.depth,...allow];
+        if (Number((this.db.prepare(`${walk} SELECT COUNT(*) count FROM walk`).get(...reachArgs) as any).count) >= 1501) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+        const found = this.db.prepare(`${walk} SELECT id,MIN(depth) depth FROM walk GROUP BY id ORDER BY depth,id LIMIT 251`).all(...reachArgs) as any[];
+        if (found.length > 250) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+        selectedIds = found.map((row) => row.id as string);
+        const idSql = selectedIds.map(()=>'?').join(',');
+        edgeRows = this.db.prepare(`${walk} SELECT DISTINCT e.id,e.workspace_id,e.source_id,e.target_id,e.kind FROM edge_contributions e WHERE e.generation_id=? AND e.kind IN (${allowSql}) AND e.source_id IN (${idSql}) AND e.target_id IN (${idSql}) ORDER BY e.id LIMIT 201`).all(...reachArgs,generationId,...allow,...selectedIds,...selectedIds) as any[];
+        if (edgeRows.length > 200) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      }
+      const idsSql = selectedIds.length ? selectedIds.map(()=>'?').join(',') : "''";
+      const edgeIds=edgeRows.map((row)=>row.id as string); const edgeIdSql=edgeIds.length?edgeIds.map(()=>'?').join(','):"''";
+      const nodeBytes=selectedIds.length?Number((this.db.prepare(`SELECT COALESCE(SUM(length(CAST(properties_json AS BLOB))),0) bytes FROM node_contributions WHERE generation_id=? AND id IN (${idsSql})`).get(generationId,...selectedIds) as any).bytes):0;
+      const edgeBytes=edgeIds.length?Number((this.db.prepare(`SELECT COALESCE(SUM(length(CAST(properties_json AS BLOB))),0) bytes FROM edge_contributions WHERE generation_id=? AND id IN (${edgeIdSql})`).get(generationId,...edgeIds) as any).bytes):0;
+      if(nodeBytes+edgeBytes>1_048_576)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      const nodeRows = selectedIds.length ? this.db.prepare(`SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? AND id IN (${idsSql}) ORDER BY id`).all(generationId,...selectedIds) as any[] : [];
+      if(edgeIds.length){const payloads=this.db.prepare(`SELECT id,properties_json FROM edge_contributions WHERE generation_id=? AND id IN (${edgeIdSql})`).all(generationId,...edgeIds) as any[];const payloadById=new Map(payloads.map((row)=>[row.id,row.properties_json]));for(const row of edgeRows)row.properties_json=payloadById.get(row.id);}
+      const nodes: GraphNode[] = nodeRows.map((row)=>({id:row.id,workspaceId:row.workspace_id,kind:row.kind,label:row.label,properties:JSON.parse(row.properties_json)}));
+      const edges: GraphEdge[] = edgeRows.map((row)=>({id:row.id,workspaceId:row.workspace_id,sourceId:row.source_id,targetId:row.target_id,kind:row.kind,properties:JSON.parse(row.properties_json)}));
+      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
+      const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
+      if (diagnostics.length > 1000) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id LIMIT 257').all(generationId) as any[]).map((row)=>({analyzerId:row.analyzerId,generationId:Number(row.generationId)}));
+      return { snapshot: { workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes,edges,evidence:[] as AnalysisEvidence[],diagnostics,inputGenerations,activeGenerations,projectionSnapshotId } as DatabaseSchemaSnapshot & { inputGenerations:Array<{analyzerId:string;generationId:number}> },rootIds,totalRootCount };
+    });
+    return read();
+  }
+  databaseQueryPage(input: { workspace: string; root: 'table' | 'model'; namespace?: string; schema?: string; table?: string; model?: string; limit: number }, offset: number) {
+    const read = this.db.transaction(() => {
+      const activeGenerations = this.activeGenerationVector([input.workspace]);
+      const active = this.db.prepare(`SELECT w.id workspace_id,w.name,g.id generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.sqlalchemy'`).get(input.workspace) as any;
+      if (!active) return undefined;
+      const generationId = Number(active.generation_id);
+      const kind = input.root === 'table' ? 'sqlalchemy_table' : 'sqlalchemy_model';
+      const where = ['n.generation_id=?','n.kind=?']; const args: unknown[] = [generationId,kind];
+      if (input.namespace !== undefined) { where.push("json_extract(n.properties_json,'$.databaseNamespace')=?"); args.push(input.namespace); }
+      if (input.schema !== undefined) { where.push(input.schema === '' ? "json_extract(n.properties_json,'$.schema') IS NULL" : "json_extract(n.properties_json,'$.schema')=?"); if (input.schema !== '') args.push(input.schema); }
+      if (input.table !== undefined) { where.push("json_extract(n.properties_json,'$.tableName')=?"); args.push(input.table); }
+      if (input.model !== undefined) {
+        if (input.root === 'model') { where.push("(json_extract(n.properties_json,'$.qualifiedName')=? OR (COALESCE(json_extract(n.properties_json,'$.module'),'') || '.' || COALESCE(json_extract(n.properties_json,'$.qualifiedName'),''))=?)"); args.push(input.model,input.model); }
+        else { where.push("EXISTS(SELECT 1 FROM edge_contributions owner JOIN node_contributions model ON model.generation_id=owner.generation_id AND model.id=owner.source_id WHERE owner.generation_id=n.generation_id AND owner.kind='contains' AND owner.target_id=n.id AND model.kind='sqlalchemy_model' AND (json_extract(model.properties_json,'$.qualifiedName')=? OR (COALESCE(json_extract(model.properties_json,'$.module'),'') || '.' || COALESCE(json_extract(model.properties_json,'$.qualifiedName'),''))=?))"); args.push(input.model,input.model); }
+      }
+      const sort = input.root === 'table' ? "COALESCE(json_extract(n.properties_json,'$.databaseNamespace'),''),CASE WHEN json_extract(n.properties_json,'$.schema') IS NULL THEN 0 ELSE 1 END,COALESCE(json_extract(n.properties_json,'$.schema'),''),COALESCE(json_extract(n.properties_json,'$.tableName'),''),n.id" : "COALESCE(json_extract(n.properties_json,'$.databaseNamespace'),''),COALESCE(json_extract(n.properties_json,'$.module'),''),COALESCE(json_extract(n.properties_json,'$.qualifiedName'),''),n.id";
+      const rootWhere = where.join(' AND ');
+      const totalRootCount = Number((this.db.prepare(`SELECT COUNT(*) count FROM node_contributions n WHERE ${rootWhere}`).get(...args) as any).count);
+      const roots = this.db.prepare(`SELECT n.id FROM node_contributions n WHERE ${rootWhere} ORDER BY ${sort} LIMIT ? OFFSET ?`).all(...args,input.limit,offset) as Array<{id:string}>;
+      const rootIds = roots.map((row)=>row.id);
+      let selectedIds = rootIds;
+      let edgeRows: any[] = [];
+      if (rootIds.length) {
+        const relationshipKinds = ['contains','maps_to','constrains','relationship','foreign_key']; const kindsSql=relationshipKinds.map(()=>'?').join(','); const rootSql=rootIds.map(()=>'?').join(',');
+        const walk = `WITH RECURSIVE walk(id,depth) AS (SELECT id,0 FROM node_contributions WHERE generation_id=? AND id IN (${rootSql}) UNION SELECT CASE WHEN e.source_id=w.id THEN e.target_id ELSE e.source_id END,w.depth+1 FROM walk w JOIN edge_contributions e ON e.generation_id=? AND (e.source_id=w.id OR e.target_id=w.id) JOIN node_contributions n ON n.generation_id=e.generation_id AND n.id=CASE WHEN e.source_id=w.id THEN e.target_id ELSE e.source_id END WHERE w.depth<2 AND e.kind IN (${kindsSql}) LIMIT 1501)`;
+        const walkArgs=[generationId,...rootIds,generationId,...relationshipKinds];
+        if(Number((this.db.prepare(`${walk} SELECT COUNT(*) count FROM walk`).get(...walkArgs) as any).count)>=1501)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+        const found=this.db.prepare(`${walk} SELECT id,MIN(depth) depth FROM walk GROUP BY id ORDER BY depth,id LIMIT 251`).all(...walkArgs) as any[];
+        if(found.length>250)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+        selectedIds=found.map((row)=>row.id as string);
+        const selectedSql=selectedIds.map(()=>'?').join(',');
+        edgeRows=this.db.prepare(`${walk} SELECT DISTINCT e.id,e.workspace_id,e.source_id,e.target_id,e.kind FROM edge_contributions e WHERE e.generation_id=? AND e.kind IN (${kindsSql}) AND e.source_id IN (${selectedSql}) AND e.target_id IN (${selectedSql}) ORDER BY e.id LIMIT 201`).all(...walkArgs,generationId,...relationshipKinds,...selectedIds,...selectedIds) as any[];
+        if(edgeRows.length>200)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      }
+      const selectedSql=selectedIds.map(()=>'?').join(',');
+      const edgeIds=edgeRows.map((row)=>row.id as string);const edgeIdSql=edgeIds.length?edgeIds.map(()=>'?').join(','):"''";
+      const nodeBytes=selectedIds.length?Number((this.db.prepare(`SELECT COALESCE(SUM(length(CAST(properties_json AS BLOB))),0) bytes FROM node_contributions WHERE generation_id=? AND id IN (${selectedSql})`).get(generationId,...selectedIds) as any).bytes):0;
+      const edgeBytes=edgeIds.length?Number((this.db.prepare(`SELECT COALESCE(SUM(length(CAST(properties_json AS BLOB))),0) bytes FROM edge_contributions WHERE generation_id=? AND id IN (${edgeIdSql})`).get(generationId,...edgeIds) as any).bytes):0;
+      if(nodeBytes+edgeBytes>1_048_576)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      const nodeRows=selectedIds.length?this.db.prepare(`SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? AND id IN (${selectedSql}) ORDER BY id`).all(generationId,...selectedIds) as any[]:[];
+      if(edgeIds.length){const payloads=this.db.prepare(`SELECT id,properties_json FROM edge_contributions WHERE generation_id=? AND id IN (${edgeIdSql})`).all(generationId,...edgeIds) as any[];const payloadById=new Map(payloads.map((row)=>[row.id,row.properties_json]));for(const row of edgeRows)row.properties_json=payloadById.get(row.id);}
+      const nodes:GraphNode[]=nodeRows.map((row)=>({id:row.id,workspaceId:row.workspace_id,kind:row.kind,label:row.label,properties:JSON.parse(row.properties_json)}));
+      const edges:GraphEdge[]=edgeRows.map((row)=>({id:row.id,workspaceId:row.workspace_id,sourceId:row.source_id,targetId:row.target_id,kind:row.kind,properties:JSON.parse(row.properties_json)}));
+      const projectionSnapshotId=createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
+      const diagnostics=(this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
+      if(diagnostics.length>1000)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      return {snapshot:{workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes,edges,evidence:[] as AnalysisEvidence[],diagnostics,activeGenerations,projectionSnapshotId} satisfies DatabaseSchemaSnapshot,rootIds,totalRootCount};
+    });
+    return read();
+  }
   crossWorkspaceArchitectureSnapshot(workspaceIds: readonly string[]): CrossWorkspaceSnapshot {
     if (!Array.isArray(workspaceIds) || workspaceIds.length < 2 || workspaceIds.length > 16 || new Set(workspaceIds).size !== workspaceIds.length || workspaceIds.some((id) => typeof id !== 'string' || id.length < 1 || id.length > 256)) {
       throw new Error('Cross-workspace snapshot requires 2–16 unique workspace IDs.');

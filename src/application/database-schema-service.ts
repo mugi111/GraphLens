@@ -38,28 +38,28 @@ export class DatabaseSchemaService {
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.sqlalchemy' || cursor.filters !== filterHash)) {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
-    let snapshot: DatabaseSchemaSnapshot | undefined;
-    try { snapshot = this.store.databaseSchemaSnapshot(query.workspace); } catch (error) {
+    let page: ReturnType<GraphStore['databaseQueryPage']>;
+    try { page = this.store.databaseQueryPage(query, cursor?.offset ?? 0) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', error.message, 422);
       throw error;
     }
-    if (!snapshot) {
+    if (!page) {
       if (cursor) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
       throw new DatabaseSchemaError('DATABASE_ANALYSIS_NOT_FOUND', 'No active SQLAlchemy analysis exists for this workspace.');
     }
+    const snapshot = page.snapshot;
     if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
-    const roots = selectRoots(snapshot, query);
     const offset = cursor?.offset ?? 0;
-    if (offset > roots.length) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
-    const pageRoots = roots.slice(offset, offset + query.limit);
-    const closure = buildClosure(snapshot, pageRoots, query.root);
+    if (offset >= page.totalRootCount && cursor) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
+    const pageRoots = page.rootIds;
+    const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
     if (closure.nodes.length > 250 || closure.edges.length > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
     let projection: ReturnType<GraphStore['projectGraph']>;
     try { projection = this.store.projectGraph(closure.nodes, closure.edges, query.includeEvidence || query.includeDiagnostics); }
     catch (error) { if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema projection exceeds evidence or property limits.', 422); throw error; }
     const evidence = [...projection.nodes.flatMap((node) => node.evidence ?? []), ...projection.edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
     const nextOffset = offset + pageRoots.length;
-    const nextCursor = nextOffset < roots.length ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < page.totalRootCount ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
     const result = {
       workspace: snapshot.workspace,
@@ -68,8 +68,8 @@ export class DatabaseSchemaService {
         diagnostics: diagnosticCounts(diagnostics),
       },
       query: queryEcho(query),
-      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
-      rootIds: pageRoots.map((node) => node.id),
+      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: page.totalRootCount, ...(nextCursor ? { nextCursor } : {}) },
+      rootIds: pageRoots,
       nodes: projectNodes(projection.nodes, evidence, query.includeEvidence),
       edges: projectEdges(projection.edges, evidence, query.includeEvidence),
       ...(query.includeDiagnostics ? { diagnostics: relevantDiagnostics(diagnostics, projection.nodes, projection.edges, evidence) } : {}),
@@ -101,7 +101,7 @@ function isCursor(value: unknown): value is CursorPayload {
   return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && typeof value.projectionSnapshotId === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.projectionSnapshotId) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
 }
 function filterKey(query: DatabaseSchemaQuery) {
-  return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
+  return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, limit: query.limit, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
 }
 function queryEcho(query: DatabaseSchemaQuery) {
   return { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.schema !== undefined ? { schema: query.schema } : {}), ...(query.table !== undefined ? { table: query.table } : {}), ...(query.model !== undefined ? { model: query.model } : {}) };
