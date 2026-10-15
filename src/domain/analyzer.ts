@@ -23,7 +23,23 @@ export type AnalysisContext = {
   workspace: Workspace;
   sourceRevision?: string;
   config: Record<string, JsonValue>;
+  /** Optional read-only access to active, workspace-scoped analyzer generations. */
+  architectureInputProvider?: ArchitectureInputProvider;
   signal?: { aborted: boolean };
+};
+
+export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
+export type ArchitectureInputGeneration = AnalysisInputGeneration & {
+  sourceRevision?: string;
+  nodes: readonly GraphNode[];
+  edges: readonly GraphEdge[];
+  evidence: readonly AnalysisEvidence[];
+  diagnostics: readonly AnalysisDiagnostic[];
+};
+export type ArchitectureInputSnapshot = { workspaceId: string; generations: readonly ArchitectureInputGeneration[] };
+export type ArchitectureInputProvider = {
+  /** Reads only the requested active generations in one workspace-scoped snapshot. */
+  snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot;
 };
 
 export type EvidenceLevel = 'DIRECT' | 'DERIVED' | 'INFERRED';
@@ -61,6 +77,8 @@ export type AnalysisDiagnostic = {
 export type AnalysisResult = {
   /** Content-derived revision computed by source analyzers. */
   sourceRevision?: string;
+  /** Exact active generations consumed to derive this result. */
+  inputGenerations?: AnalysisInputGeneration[];
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
