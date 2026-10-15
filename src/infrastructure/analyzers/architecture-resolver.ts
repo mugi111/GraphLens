@@ -27,7 +27,7 @@ const limits: Record<Exclude<keyof ArchitectureConfig, 'allowPathShapeInference'
 };
 
 export function architectureConfig(input: Record<string, unknown>): ArchitectureConfig {
-  const unknown = Object.keys(input).filter((key) => !(key in defaults));
+  const unknown = Object.keys(input).filter((key) => !Object.hasOwn(defaults, key));
   if (unknown.length) throw new Error(`Unsupported architecture option '${unknown.sort()[0]}'.`);
   const output = { ...defaults };
   for (const key of Object.keys(input) as Array<keyof ArchitectureConfig>) {
@@ -57,6 +57,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const evidence: AnalysisEvidence[] = [];
   const evidenceIds = new Set<string>();
   const issueIds = new Set<string>();
+  const matchedPairs: Array<{ fast: GraphNode; spec: GraphNode; match: string }> = [];
   // The resolver works only from bounded projections of the supplied generations.
   const endpointNodes = (generation: ArchitectureInputGeneration | undefined) => (generation?.nodes ?? []).filter((node) => node.kind === 'api_endpoint');
   const allFastEndpoints = endpointNodes(sources.fastApi);
@@ -69,6 +70,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const id = ids.edge(sources.workspaceId, fast.id, spec.id, `architecture_${method}`);
     if (edges.some((item) => item.id === id)) return;
     edges.push({ id, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: spec.id, kind: `architecture_${method}`, properties: { confidence } });
+    matchedPairs.push({ fast, spec, match: method });
     const fastSource = evidenceFor(sources.fastApi, fast.id);
     const specSource = evidenceFor(sources.openApi, spec.id);
     const item: AnalysisEvidence = {
@@ -87,7 +89,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id);
     pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1);
   }
-  matchUnique(unmatchedFast, unmatchedSpec, (node) => stringProperty(node, 'operationId'), 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
+  matchUnique(unmatchedFast, unmatchedSpec, (node) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; }, 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
     for (const endpoint of candidates) addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.');
   });
   if (config.allowPathShapeInference) matchUnique(unmatchedFast, unmatchedSpec, (node) => {
@@ -100,9 +102,10 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     for (const endpoint of unmatchedFast.values()) addIssue(endpoint, 'unresolved', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
     for (const endpoint of unmatchedSpec.values()) addIssue(endpoint, 'unresolved', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
   }
+  for (const pair of matchedPairs) compareContract(pair.fast, pair.spec, pair.match);
   function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved', message: string) {
     const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
-    if (issueIds.has(id)) return;
+    if (issueIds.has(id) || nodes.length + edges.length + 2 > 9000 || evidence.length >= 10000 || diagnostics.length >= 10000) return;
     issueIds.add(id);
     nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
     const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
@@ -116,6 +119,38 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`), detail: message,
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
+  }
+  function compareContract(fast: GraphNode, spec: GraphNode, match: string) {
+    if (!sources.fastApi || !sources.openApi) return;
+    const relations = (generation: ArchitectureInputGeneration, endpoint: GraphNode, kind: string) => generation.edges.filter((edge) => edge.sourceId === endpoint.id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
+    const nodeById = (generation: ArchitectureInputGeneration, id: string) => generation.nodes.find((node) => node.id === id);
+    const addMismatch = (dimension: string, detail: Record<string, unknown>) => {
+      const id = ids.node(sources.workspaceId, `architecture://mismatch/${fast.id}/${dimension}`, 'architecture_contract_mismatch');
+      if (issueIds.has(id)) return;
+      if (nodes.length + edges.length >= 9000 || evidence.length >= 10000 || diagnostics.length >= 10000) return;
+      issueIds.add(id);
+      nodes.push({ id, workspaceId: sources.workspaceId, kind: 'architecture_contract_mismatch', label: `Contract mismatch: ${dimension}`, properties: { fastApiEndpointId: fast.id, openApiEndpointId: spec.id, dimension, ...detail } });
+      const edgeId = ids.edge(sources.workspaceId, fast.id, id, 'architecture_contract_finding');
+      edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: 'ARCHITECTURE_CONTRACT_MISMATCH', dimension } });
+      const fastEvidence = evidenceFor(sources.fastApi, fast.id); const specEvidence = evidenceFor(sources.openApi, spec.id);
+      evidence.push({ id: ids.node(id, 'evidence:node', 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      diagnostics.push({ code: 'ARCHITECTURE_CONTRACT_MISMATCH', severity: 'warning', message: `Provable ${dimension} contract mismatch for '${fast.label}'.`, detail: { dimension, fastApiEndpointId: fast.id, openApiEndpointId: spec.id } });
+    };
+    const fastParams = relations(sources.fastApi, fast, 'accepts').map(({ targetId }) => nodeById(sources.fastApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
+    const specParams = relations(sources.openApi, spec, 'accepts').map(({ targetId }) => nodeById(sources.openApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
+    const pkey = (node: GraphNode) => { const loc = node.properties.in; const name = node.properties.alias ?? node.properties.name; return typeof loc === 'string' && typeof name === 'string' ? `${loc}\u0000${name}` : undefined; };
+    const fastByParam = new Map(fastParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
+    const specByParam = new Map(specParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
+    for (const key of new Set([...fastByParam.keys(), ...specByParam.keys()])) {
+      const impl = fastByParam.get(key); const contract = specByParam.get(key);
+      if (!impl || !contract) { addMismatch('parameters', { parameter: key.replace('\u0000', ':') }); continue; }
+      if (typeof impl.properties.required === 'boolean' && typeof contract.properties.required === 'boolean' && impl.properties.required !== contract.properties.required) addMismatch('parameter_required', { parameter: key.replace('\u0000', ':'), implementationRequired: impl.properties.required, contractRequired: contract.properties.required });
+    }
+    const responseStatuses = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'returns').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_response').map((node) => node.properties.statusCode ?? node.properties.status).filter((status) => typeof status === 'string' || typeof status === 'number').map(String);
+    const fastStatus = responseStatuses(sources.fastApi, fast); if (!fastStatus.length) fastStatus.push('200');
+    const specStatus = responseStatuses(sources.openApi, spec);
+    const covered = (status: string) => specStatus.includes(status) || specStatus.includes('default') || specStatus.some((item) => /^([1-5])XX$/i.test(item) && item[0] === status[0]);
+    if (specStatus.length && fastStatus.some((status) => /^\d{3}$/.test(status) && !covered(status))) addMismatch('response_status', { implementationStatuses: [...new Set(fastStatus)].sort(), contractStatuses: [...new Set(specStatus)].sort() });
   }
   return { nodes, edges, evidence, diagnostics, inputGenerations };
 }
