@@ -7,7 +7,7 @@ export type ArchitectureRoot = 'endpoint' | 'handler' | 'model' | 'table' | 'fin
 export type ArchitectureQuery = { workspace: string; root: ArchitectureRoot; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; cursor?: string; includeEvidence: boolean; includeDiagnostics: boolean };
 type Cursor = { v: 1; workspace: string; analyzerId: 'builtin.architecture'; generationId: number; filters: string; offset: number };
 type Snapshot = DatabaseSchemaSnapshot & { inputGenerations?: Array<{ analyzerId: string; generationId: number }> };
-const EDGE_ALLOWLIST = new Set(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model']);
+const EDGE_ALLOWLIST = new Set(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model', 'http_request']);
 
 export class ArchitectureQueryError extends Error {
   constructor(public readonly code: 'WORKSPACE_NOT_FOUND' | 'ARCHITECTURE_ANALYSIS_NOT_FOUND' | 'ARCHITECTURE_NODE_NOT_FOUND' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'ARCHITECTURE_SNAPSHOT_CHANGED' | 'ARCHITECTURE_QUERY_TOO_LARGE', message: string, public readonly status: 404 | 400 | 409 | 422 = 404) { super(message); }
