@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisInputGeneration, AnalysisResult, AnalyzerDescriptor, ArchitectureInputProvider, ArchitectureInputSnapshot } from '../../domain/analyzer.js';
+import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisInputGeneration, type AnalysisResult, type AnalyzerDescriptor, type ArchitectureInputProvider, type ArchitectureInputSnapshot } from '../../domain/analyzer.js';
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
@@ -131,7 +131,7 @@ export class GraphStore implements ArchitectureInputProvider {
         ORDER BY a.analyzer_id`).all(workspace, ...requested) as Array<{ analyzer_id: string; generation_id: number; source_revision: string | null }>;
       const byAnalyzer = new Map(active.map((item) => [item.analyzer_id, item]));
       const missing = requested.filter((id) => !byAnalyzer.has(id));
-      if (missing.length) throw new Error(`No active generation is available for analyzer input(s): ${missing.join(', ')}.`);
+      if (missing.length) throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', `No active generation is available for analyzer input(s): ${missing.join(', ')}.`);
       const generations = active.map((item) => {
         const generationId = Number(item.generation_id);
         const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphNode));
@@ -197,6 +197,21 @@ export class GraphStore implements ArchitectureInputProvider {
       edges: new Set((this.db.prepare(`SELECT e.id FROM active_analysis_generations a JOIN edge_contributions e ON e.generation_id=a.generation_id WHERE a.workspace_id=?${excluded}`).all(...params) as Array<{ id: string }>).map((row) => row.id)),
     };
   }
+  inputGraphIds(workspaceId: string, inputs: unknown) {
+    if (!Array.isArray(inputs)) return { nodes: new Set<string>(), edges: new Set<string>() };
+    const valid = inputs.filter((item): item is AnalysisInputGeneration => !!item && typeof item === 'object' && typeof (item as AnalysisInputGeneration).analyzerId === 'string' && Number.isSafeInteger((item as AnalysisInputGeneration).generationId));
+    if (valid.length !== inputs.length) return { nodes: new Set<string>(), edges: new Set<string>() };
+    const nodes = new Set<string>();
+    for (const input of valid) {
+      const active = this.db.prepare(`SELECT 1 FROM active_analysis_generations a
+        JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+        WHERE a.workspace_id=? AND a.analyzer_id=? AND a.generation_id=?`).get(workspaceId, input.analyzerId, input.generationId);
+      if (!active) throw new AnalysisError('INPUT_GENERATION_CHANGED', `Input generation '${input.analyzerId}:${input.generationId}' is no longer active for workspace '${workspaceId}'.`);
+      for (const row of this.db.prepare('SELECT id FROM node_contributions WHERE generation_id=? ORDER BY id').all(input.generationId) as Array<{ id: string }>) nodes.add(row.id);
+    }
+    return { nodes, edges: new Set<string>() };
+  }
   completeAnalysisRun(id: string, descriptor: AnalyzerDescriptor, result: AnalysisResult): void {
     const run = this.analysisRun(id); if (!run || run.status !== 'running') throw new Error(`Analysis run '${id}' is not running.`);
     const now = new Date().toISOString();
@@ -209,18 +224,25 @@ export class GraphStore implements ArchitectureInputProvider {
           JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
           JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
           WHERE a.workspace_id=? AND a.analyzer_id=?`).get(run.workspaceId, input.analyzerId) as { generation_id: number } | undefined;
-        if (!active || Number(active.generation_id) !== input.generationId) throw new Error(`Input generation '${input.analyzerId}:${input.generationId}' is no longer active for workspace '${run.workspaceId}'.`);
+        if (!active) throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', `Input generation '${input.analyzerId}:${input.generationId}' is unavailable for workspace '${run.workspaceId}'.`);
+        if (Number(active.generation_id) !== input.generationId) throw new AnalysisError('INPUT_GENERATION_CHANGED', `Input generation '${input.analyzerId}:${input.generationId}' changed during analysis.`);
       }
       const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count) VALUES(?,?,?,?,?,?)').run(id, run.workspaceId, descriptor.id, now, result.nodes.length, result.edges.length);
       const generationId = Number(generation.lastInsertRowid);
       const insertInput = this.db.prepare('INSERT INTO analysis_generation_inputs(generation_id,input_generation_id,input_analyzer_id) VALUES(?,?,?)');
       for (const input of inputs) insertInput.run(generationId, input.generationId, input.analyzerId);
-      const cycle = this.db.prepare(`WITH RECURSIVE reachable(generation_id) AS (
-        SELECT input_generation_id FROM analysis_generation_inputs WHERE generation_id=?
-        UNION
-        SELECT i.input_generation_id FROM analysis_generation_inputs i JOIN reachable r ON i.generation_id=r.generation_id
-      ) SELECT 1 FROM reachable WHERE generation_id=? LIMIT 1`).get(generationId, generationId);
-      if (cycle) throw new Error(`Analysis generation '${generationId}' would create a dependency cycle.`);
+      const repeatedAnalyzer = this.db.prepare(`WITH RECURSIVE walk(generation_id, analyzer_path, generation_path, repeated) AS (
+        SELECT g.id, '|' || ? || '|' || g.analyzer_id || '|', '|' || g.id || '|', g.analyzer_id=?
+        FROM analysis_generation_inputs i JOIN analysis_generations g ON g.id=i.input_generation_id
+        WHERE i.generation_id=?
+        UNION ALL
+        SELECT parent.id, walk.analyzer_path || parent.analyzer_id || '|', walk.generation_path || parent.id || '|',
+          instr(walk.analyzer_path, '|' || parent.analyzer_id || '|') > 0
+        FROM walk JOIN analysis_generation_inputs i ON i.generation_id=walk.generation_id
+        JOIN analysis_generations parent ON parent.id=i.input_generation_id
+        WHERE instr(walk.generation_path, '|' || parent.id || '|') = 0
+      ) SELECT 1 FROM walk WHERE repeated LIMIT 1`).get(descriptor.id, descriptor.id, generationId);
+      if (repeatedAnalyzer) throw new AnalysisError('INPUT_GENERATION_CYCLE', `Input ancestry repeats analyzer '${descriptor.id}'.`);
       const node = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
       const edge = this.db.prepare('INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json) VALUES(?,?,?,?,?,?,?)');
       const evidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
