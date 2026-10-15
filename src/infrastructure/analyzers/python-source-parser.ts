@@ -104,6 +104,8 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
     for (const child of children(node)) visit(child, scope, parent);
   }
   for (const child of children(tree.topNode)) visit(child, [], moduleNode);
+  const moduleFacts = structuredFacts(tree.topNode, file.source, offsets, errorRegions);
+  moduleNode.properties = { ...moduleNode.properties, references: moduleFacts.references, calls: moduleFacts.calls };
   return { nodes, edges, evidence, imports: assignImportOccurrences(imports), diagnostics };
 }
 
