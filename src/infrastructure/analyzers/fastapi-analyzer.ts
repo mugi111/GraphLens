@@ -20,7 +20,7 @@ const SECURITY_NAMES = new Set([
 ]);
 
 type DependencyFact = { expression: PythonExpressionFact; file: FastApiFile; scope: string; offset: number; source?: AnalysisEvidence };
-type ResponseFact = { status: string; description?: string; model?: string; source?: AnalysisEvidence };
+type ResponseFact = { status: string; description?: string; model?: string; source?: AnalysisEvidence; file?: FastApiFile; scope?: string; offset?: number };
 type RouterObject = { key: string; logicalKey: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; node: GraphNode };
 type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence; occurrence: number };
 type IncludeSpec = { key: string; ownerKey: string; childKey?: string; childSourceNodeId?: string; file: FastApiFile; scope: string; offset: number; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence };
@@ -200,7 +200,7 @@ function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], ad
     if (!prefixResolved) addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', `Could not statically resolve prefix for router '${target}'.`, source);
     const tags = stringsFromExpression(keywords.get('tags'));
     const dependencies = makeDependencyFacts(keywords.get('dependencies'), file, '', offset, source);
-    const responses = responseFacts(keywords.get('responses'), source);
+    const responses = responseFacts(keywords.get('responses'), source, file, '', offset);
     const logicalKey = `${file.module}.${target}`;
     const key = `${file.path}#${assignment.id}`;
     const node = addNode(kind === 'application' ? 'fastapi_application' : 'fastapi_router', target, file.path, `${key}/${logicalKey}`, { module: file.module, name: target, ...(kind === 'router' ? { prefix: prefix ?? null, prefixResolved, tags } : {}) }, source, kind === 'application' ? 'fastapi.application' : 'fastapi.router');
@@ -232,7 +232,7 @@ function collectIncludes(files: FastApiFile[], resolveObject: (file: FastApiFile
       const prefixExpression = keywords.get('prefix');
       const prefix = prefixExpression === undefined ? '' : expressionString(prefixExpression);
       const source = callEvidence(file.path, call.line, call.column);
-      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source });
+      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source });
     });
   }
   return includes;
@@ -262,7 +262,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       methods = methods.map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${scope}' has no supported statically known methods.`, source); continue; }
       const operation = operationFacts(keywords, file, scope, offset, addDiagnostic, source);
-      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source, occurrence });
+      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence });
     }
   }
   for (const file of files) for (const sourceNode of file.nodes) {
@@ -291,7 +291,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       if (keywords.has('methods') && !methodList) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has dynamic methods and was not exposed.`, source); return; }
       methods = (methodList ?? methods).map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has no supported statically known methods.`, source); return; }
-      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source, occurrence: callIndex });
+      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: callIndex });
     });
   }
   return routes;
@@ -357,7 +357,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const responseSource = responseFact.source ?? source;
     const node = addNode('api_response', `${status} response`, route.file.path, `${routeKey}/response/${status}`, { statusCode: Number(status) || status, ...(responseFact.description ? { description: responseFact.description } : {}), ...(responseFact.model ? { model: responseFact.model } : {}) }, responseSource, 'api.response');
     addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
-    if (responseFact.model) addSchemaReference(responseFact.model, route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files);
+    if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope);
   }
   for (const fact of dependencies) for (const dep of dependencyExpressions(fact.expression)) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
@@ -426,11 +426,12 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
 }
 
 function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNode, owner: GraphNode, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[]) {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], resolutionScope?: string) {
+  const scope = resolutionScope ?? String(scopeNode.properties.qualifiedName ?? '');
   const typeNames = schemaTypeNames(name);
   for (const typeName of typeNames) {
-    const symbol = resolveFastApiSymbol(files, file, typeName, String(scopeNode.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
-    const canonicalType = canonicalFastApiName(typeName, file, String(scopeNode.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
+    const symbol = resolveFastApiSymbol(files, file, typeName, scope, source?.startOffset ?? 0);
+    const canonicalType = canonicalFastApiName(typeName, file, scope, source?.startOffset ?? 0);
     if (canonicalType.startsWith('typing.') || canonicalType.startsWith('typing_extensions.') || PARAMETER_NAMES.has(canonicalType) || DEPENDENCY_NAMES.has(canonicalType)) continue;
     const matches = symbol ? files.flatMap((item) => item.classes).filter((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : [];
     if (matches.length === 1) {
@@ -570,7 +571,9 @@ function strictStringsFromExpression(expression: PythonExpressionFact | undefine
   const strings = values.map(expressionString);
   return strings.every((value): value is string => value !== undefined) ? strings : undefined;
 }
-function responseFacts(expression: PythonExpressionFact | undefined, source?: AnalysisEvidence): ResponseFact[] { return expression?.kind === 'DictionaryExpression' ? dictionaryEntries(expression).map((item) => ({ ...item, source })) : []; }
+function responseFacts(expression: PythonExpressionFact | undefined, source?: AnalysisEvidence, file?: FastApiFile, scope?: string, offset?: number): ResponseFact[] {
+  return expression?.kind === 'DictionaryExpression' ? dictionaryEntries(expression).map((item) => ({ ...item, source, ...(file ? { file } : {}), ...(scope !== undefined ? { scope } : {}), ...(offset !== undefined ? { offset } : {}) })) : [];
+}
 function literalStringDictionary(expression: PythonExpressionFact | undefined): Record<string, string> | undefined {
   if (!expression || expression.kind !== 'DictionaryExpression') return undefined;
   const children = expression.children ?? [];
