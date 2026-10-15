@@ -17,7 +17,7 @@ export type PythonSourceFacts = {
   diagnostics: AnalysisDiagnostic[];
   imports: PythonImportFact[];
 };
-export type PythonImportFact = { file: string; module: string; imported?: string; alias?: string; relativeLevel: number; line: number; column: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
+export type PythonImportFact = { file: string; module: string; imported?: string; alias?: string; relativeLevel: number; occurrence?: number; line: number; column: number; endLine: number; endColumn: number; startOffset: number; endOffset: number };
 
 export const DEFAULT_PYTHON_SOURCE_CONFIG: PythonSourceConfig = {
   includeStubs: true,
