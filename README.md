@@ -84,6 +84,18 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.sqlalchemy","config":{"databaseNamespace":"production","includeStubs":true,"excludes":["generated/**"]}}'
 ```
 
+### Database schema query
+
+`GET /api/v1/database/schema` reads the active `builtin.sqlalchemy` generation for one workspace. It does not scan source or run analysis. The `workspace` parameter is required; `root=table` is the default, and `root=model` pages mapped models instead. Optional exact filters are `namespace`, `schema`, `table`, and `model` (the last is valid with `root=model`). An omitted schema includes all schemas; `schema=` selects only unqualified tables. `limit` defaults to 25 and accepts 1–100. `include=evidence,diagnostics` opts into either or both payloads. Unknown, repeated, malformed, or incompatible parameters return `INVALID_DATABASE_QUERY`.
+
+```sh
+curl 'http://127.0.0.1:4174/api/v1/database/schema?workspace=<workspace-id>&root=table&namespace=production&schema=public&limit=25&include=evidence,diagnostics'
+```
+
+The response includes workspace identity and name (never its filesystem path), active analyzer/run/generation metadata, diagnostic counts, the page's root IDs, and a bounded graph closure. Table roots include their model owners, mapped classes, columns, constraints, relationships, and immediate foreign-key or relationship targets with compact owner context. Model roots include their class, table contents, and immediate targets. Nodes and edges always include `evidenceCount`, `level`, `analyzerId`, and `generationId`; evidence arrays are omitted unless requested. Requested diagnostics include global diagnostics and diagnostics whose source files contribute evidence to the returned closure.
+
+Roots use deterministic ordering. `nextCursor` is opaque and bound to the workspace, query filters, and active SQLAlchemy generation; `limit` may change between pages. Reusing a cursor after the active generation changes returns `DATABASE_SNAPSHOT_CHANGED` (409). Other machine-readable errors are `WORKSPACE_REQUIRED`, `INVALID_CURSOR`, `CURSOR_QUERY_MISMATCH`, `WORKSPACE_NOT_FOUND`, `DATABASE_ANALYSIS_NOT_FOUND`, and `DATABASE_QUERY_FAILED`.
+
 Use the additive analyzer endpoints to run and poll an analyzer:
 
 ```sh
