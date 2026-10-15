@@ -19,6 +19,7 @@ import { pythonSourceAnalyzer } from './infrastructure/analyzers/python-source-a
 import { sqlAlchemyAnalyzer } from './infrastructure/analyzers/sqlalchemy-analyzer.js';
 import { fastApiAnalyzer } from './infrastructure/analyzers/fastapi-analyzer.js';
 import { openApiAnalyzer } from './infrastructure/analyzers/openapi-analyzer.js';
+import { frontendHttpAnalyzer } from './infrastructure/analyzers/frontend-http-analyzer.js';
 import { architectureAnalyzer } from './infrastructure/analyzers/architecture-analyzer.js';
 import { workspaceFor } from './infrastructure/codegraph/adapter.js';
 import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.js';
@@ -141,7 +142,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') return listPlugins(store, command.json);
     const registry = new AnalyzerRegistry();
-    if (command.command === 'plugin-add') { registry.register(demoAnalyzer); registry.register(pythonSourceAnalyzer); registry.register(sqlAlchemyAnalyzer); registry.register(fastApiAnalyzer); registry.register(openApiAnalyzer); registry.register(architectureAnalyzer); }
+    if (command.command === 'plugin-add') { registry.register(demoAnalyzer); registry.register(pythonSourceAnalyzer); registry.register(sqlAlchemyAnalyzer); registry.register(fastApiAnalyzer); registry.register(openApiAnalyzer); registry.register(frontendHttpAnalyzer); registry.register(architectureAnalyzer); }
     const manager = new PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') return addPlugin(manager, command.packageName, command.version);
     await removePlugin(manager, store, command.id);
@@ -160,6 +161,7 @@ async function runServer(options: ServerOptions) {
   registry.register(sqlAlchemyAnalyzer);
   registry.register(fastApiAnalyzer);
   registry.register(openApiAnalyzer);
+  registry.register(frontendHttpAnalyzer);
   registry.register(architectureAnalyzer);
   await loadEnabledPlugins(resolvePluginStorePath(databaseFile), store, registry);
   const analyzerRunner = new AnalyzerRunner(store, registry);
