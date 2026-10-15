@@ -2,10 +2,10 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalyzerDescriptor } from '../../domain/analyzer.js';
+import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisInputGeneration, AnalysisResult, AnalyzerDescriptor, ArchitectureInputProvider, ArchitectureInputSnapshot } from '../../domain/analyzer.js';
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
-import { analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
+import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -19,14 +19,14 @@ export type DatabaseSchemaSnapshot = {
 };
 export type StoredPlugin = GraphLensPluginManifest & { packageName: string; packagePath: string; enabled: boolean; analyzerIds: string[]; installedAt: string; installationId?: string; lockHash?: string; errorCode?: string };
 
-export class GraphStore {
+export class GraphStore implements ArchitectureInputProvider {
   private db: Database.Database;
   constructor(file: string, options: { recoverInterruptedRuns?: boolean } = {}) {
     mkdirSync(dirname(file), { recursive: true });
     this.db = new Database(file);
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
-    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration]);
+    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration]);
     if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
   }
   close() { this.db.close(); }
@@ -49,7 +49,6 @@ export class GraphStore {
       const insertNode = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
       const insertEdge = this.db.prepare('INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json) VALUES(?,?,?,?,?,?,?)');
       const insertEvidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
-      const activate = this.db.prepare('INSERT INTO active_analysis_generations(workspace_id,analyzer_id,generation_id) VALUES(?,?,?) ON CONFLICT(workspace_id,analyzer_id) DO UPDATE SET generation_id=excluded.generation_id');
       for (const snapshot of snapshots) {
         this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name').run(snapshot.workspace.id, snapshot.workspace.path, snapshot.workspace.name, now);
         const analyzerId = snapshot.source === 'demo' ? 'builtin.demo' : 'builtin.codegraph';
@@ -71,7 +70,7 @@ export class GraphStore {
             insertEvidence.run(evidenceId(snapshot.workspace.id, analyzerId, 'edge', e.id, evidence, index), generationId, 'edge', e.id, evidence.level ?? 'DIRECT', JSON.stringify(evidence));
           }
         }
-        activate.run(snapshot.workspace.id, analyzerId, generationId);
+        this.activateAnalysisGeneration(snapshot.workspace.id, analyzerId, generationId);
       }
     });
     tx();
@@ -118,6 +117,33 @@ export class GraphStore {
     });
     return read(workspaceId);
   }
+  snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot {
+    if (!Array.isArray(analyzerIds) || analyzerIds.length > 32 || new Set(analyzerIds).size !== analyzerIds.length || analyzerIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) throw new Error('Architecture input analyzer scope is invalid.');
+    const read = this.db.transaction((workspace: string, requested: readonly string[]) => {
+      if (!this.getWorkspace(workspace)) throw new Error(`Workspace '${workspace}' was not found.`);
+      if (!requested.length) return { workspaceId: workspace, generations: [] } satisfies ArchitectureInputSnapshot;
+      const placeholders = requested.map(() => '?').join(',');
+      const active = this.db.prepare(`SELECT a.analyzer_id,g.id AS generation_id,r.source_revision
+        FROM active_analysis_generations a
+        JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+        WHERE a.workspace_id=? AND a.analyzer_id IN (${placeholders})
+        ORDER BY a.analyzer_id`).all(workspace, ...requested) as Array<{ analyzer_id: string; generation_id: number; source_revision: string | null }>;
+      const byAnalyzer = new Map(active.map((item) => [item.analyzer_id, item]));
+      const missing = requested.filter((id) => !byAnalyzer.has(id));
+      if (missing.length) throw new Error(`No active generation is available for analyzer input(s): ${missing.join(', ')}.`);
+      const generations = active.map((item) => {
+        const generationId = Number(item.generation_id);
+        const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphNode));
+        const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphEdge));
+        const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: item.analyzer_id, generationId } as AnalysisEvidence));
+        const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE generation_id=? ORDER BY sequence').all(generationId) as any[]).map((row) => ({ sequence: row.sequence, generationId, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
+        return { analyzerId: item.analyzer_id, generationId, sourceRevision: item.source_revision ?? undefined, nodes, edges, evidence, diagnostics };
+      });
+      return deepFreeze({ workspaceId: workspace, generations });
+    }).deferred;
+    return read(workspaceId, analyzerIds);
+  }
   pluginInventory(): PluginInventoryItem[] {
     return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, packageName: plugin.packageName, version: plugin.version, apiVersion: plugin.apiVersion, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt, errorCode: plugin.errorCode })).sort((a, b) => a.id.localeCompare(b.id));
   }
@@ -147,6 +173,8 @@ export class GraphStore {
     if (!plugin) return undefined;
     const tx = this.db.transaction(() => {
       this.db.prepare('UPDATE plugins SET enabled=0,error_code=? WHERE id=?').run(errorCode ?? null, pluginId);
+      const active = this.db.prepare('SELECT workspace_id,generation_id FROM active_analysis_generations WHERE analyzer_id IN (SELECT analyzer_id FROM plugin_analyzers WHERE plugin_id=?)').all(pluginId) as Array<{ workspace_id: string; generation_id: number }>;
+      for (const item of active) this.invalidateDependents(item.workspace_id, Number(item.generation_id));
       this.db.prepare('DELETE FROM active_analysis_generations WHERE analyzer_id IN (SELECT analyzer_id FROM plugin_analyzers WHERE plugin_id=?)').run(pluginId);
     });
     tx();
@@ -175,8 +203,24 @@ export class GraphStore {
     const tx = this.db.transaction(() => {
       const runIdentity = this.db.prepare('SELECT analyzer_id,plugin_installation_id FROM analysis_runs WHERE id=? AND status=\'running\'').get(id) as { analyzer_id: string; plugin_installation_id: string | null } | undefined;
       if (!runIdentity || runIdentity.analyzer_id !== descriptor.id || runIdentity.plugin_installation_id !== this.assertAnalyzerEnabled(descriptor.id)) throw new Error(`Analyzer '${descriptor.id}' no longer owns the installation identity for run '${id}'.`);
+      const inputs = validateStoredInputGenerations(result.inputGenerations, descriptor.id);
+      for (const input of inputs) {
+        const active = this.db.prepare(`SELECT a.generation_id FROM active_analysis_generations a
+          JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+          JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+          WHERE a.workspace_id=? AND a.analyzer_id=?`).get(run.workspaceId, input.analyzerId) as { generation_id: number } | undefined;
+        if (!active || Number(active.generation_id) !== input.generationId) throw new Error(`Input generation '${input.analyzerId}:${input.generationId}' is no longer active for workspace '${run.workspaceId}'.`);
+      }
       const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count) VALUES(?,?,?,?,?,?)').run(id, run.workspaceId, descriptor.id, now, result.nodes.length, result.edges.length);
       const generationId = Number(generation.lastInsertRowid);
+      const insertInput = this.db.prepare('INSERT INTO analysis_generation_inputs(generation_id,input_generation_id,input_analyzer_id) VALUES(?,?,?)');
+      for (const input of inputs) insertInput.run(generationId, input.generationId, input.analyzerId);
+      const cycle = this.db.prepare(`WITH RECURSIVE reachable(generation_id) AS (
+        SELECT input_generation_id FROM analysis_generation_inputs WHERE generation_id=?
+        UNION
+        SELECT i.input_generation_id FROM analysis_generation_inputs i JOIN reachable r ON i.generation_id=r.generation_id
+      ) SELECT 1 FROM reachable WHERE generation_id=? LIMIT 1`).get(generationId, generationId);
+      if (cycle) throw new Error(`Analysis generation '${generationId}' would create a dependency cycle.`);
       const node = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
       const edge = this.db.prepare('INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json) VALUES(?,?,?,?,?,?,?)');
       const evidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
@@ -185,7 +229,7 @@ export class GraphStore {
       result.edges.forEach((value) => edge.run(generationId, value.id, value.workspaceId, value.sourceId, value.targetId, value.kind, JSON.stringify(value.properties)));
       result.evidence.forEach((value) => evidence.run(value.id, generationId, value.subjectKind, value.subjectId, value.level, JSON.stringify(value)));
       result.diagnostics.forEach((value, sequence) => diagnostic.run(id, generationId, sequence, value.code ?? 'ANALYZER_DIAGNOSTIC', value.severity, value.message, value.uri ?? null, value.line ?? null, value.detail ? JSON.stringify(value.detail) : null));
-      this.db.prepare('INSERT INTO active_analysis_generations(workspace_id,analyzer_id,generation_id) VALUES(?,?,?) ON CONFLICT(workspace_id,analyzer_id) DO UPDATE SET generation_id=excluded.generation_id').run(run.workspaceId, descriptor.id, generationId);
+      this.activateAnalysisGeneration(run.workspaceId, descriptor.id, generationId);
       this.db.prepare("UPDATE analysis_runs SET status='succeeded',completed_at=?,diagnostic_count=?,source_revision=COALESCE(?,source_revision) WHERE id=?").run(now, result.diagnostics.length, result.sourceRevision ?? null, id);
     });
     tx();
@@ -199,6 +243,19 @@ export class GraphStore {
     if (row && row.enabled !== 1) throw new Error(`Analyzer '${analyzerId}' belongs to a disabled plugin.`);
     return row?.installation_id ?? null;
   }
+  private activateAnalysisGeneration(workspaceId: string, analyzerId: string, generationId: number) {
+    const previous = this.db.prepare('SELECT generation_id FROM active_analysis_generations WHERE workspace_id=? AND analyzer_id=?').get(workspaceId, analyzerId) as { generation_id: number } | undefined;
+    if (previous && Number(previous.generation_id) !== generationId) this.invalidateDependents(workspaceId, Number(previous.generation_id));
+    this.db.prepare('INSERT INTO active_analysis_generations(workspace_id,analyzer_id,generation_id) VALUES(?,?,?) ON CONFLICT(workspace_id,analyzer_id) DO UPDATE SET generation_id=excluded.generation_id').run(workspaceId, analyzerId, generationId);
+  }
+  private invalidateDependents(workspaceId: string, generationId: number) {
+    this.db.prepare(`WITH RECURSIVE stale(generation_id) AS (
+      SELECT generation_id FROM analysis_generation_inputs WHERE input_generation_id=?
+      UNION
+      SELECT i.generation_id FROM analysis_generation_inputs i JOIN stale s ON i.input_generation_id=s.generation_id
+    ) DELETE FROM active_analysis_generations
+      WHERE workspace_id=? AND generation_id IN (SELECT generation_id FROM stale)`).run(generationId, workspaceId);
+  }
   private parseAnalysisRun(row: any): AnalysisRun { return { id: row.id, workspaceId: row.workspace_id, analyzerId: row.analyzer_id, analyzerVersion: row.analyzer_version, apiVersion: row.api_version, status: row.status, sourceRevision: row.source_revision ?? undefined, config: JSON.parse(row.config_json), startedAt: row.started_at, completedAt: row.completed_at ?? undefined, errorCode: row.error_code ?? undefined, errorMessage: row.error_message ?? undefined, diagnosticCount: row.diagnostic_count }; }
   private parseContributionNode(row: any): GraphNode {
     return { ...parseNode(row), evidence: this.evidenceFor(row, 'node') };
@@ -210,6 +267,24 @@ export class GraphStore {
     const evidence = this.db.prepare('SELECT id,generation_id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? AND subject_kind=? AND subject_id=? ORDER BY id').all(row.generation_id, subjectKind, row.id) as Array<{ id: string; generation_id: number; subject_kind: 'node' | 'edge'; subject_id: string; level: 'DIRECT' | 'DERIVED' | 'INFERRED'; payload_json: string }>;
     return evidence.map((item) => ({ ...JSON.parse(item.payload_json), id: item.id, subjectKind: item.subject_kind, subjectId: item.subject_id, level: item.level, analyzerId: row.analyzer_id, generationId: item.generation_id }));
   }
+}
+function validateStoredInputGenerations(value: unknown, analyzerId: string): AnalysisInputGeneration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) throw new Error('Analysis inputGenerations must contain at most 32 entries.');
+  const analyzers = new Set<string>(), generations = new Set<number>();
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).sort().join(',') !== 'analyzerId,generationId') throw new Error('Analysis input generation has invalid fields.');
+    const input = item as AnalysisInputGeneration;
+    if (typeof input.analyzerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.analyzerId) || !Number.isSafeInteger(input.generationId) || input.generationId < 1 || input.analyzerId === analyzerId || analyzers.has(input.analyzerId) || generations.has(input.generationId)) throw new Error('Analysis input generation identity is invalid, duplicate, or self-referential.');
+    analyzers.add(input.analyzerId); generations.add(input.generationId);
+    return { analyzerId: input.analyzerId, generationId: input.generationId };
+  });
+}
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return value;
 }
 function parseNode(r: any): GraphNode { return { id:r.id, workspaceId:r.workspace_id, kind:r.kind, label:r.label, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
 function parseEdge(r: any) { return { id:r.id, workspaceId:r.workspace_id, sourceId:r.source_id, targetId:r.target_id, kind:r.kind, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
