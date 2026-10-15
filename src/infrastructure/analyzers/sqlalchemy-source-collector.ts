@@ -34,7 +34,7 @@ export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlche
     const assignments = parsed.nodes.filter((node) => node.kind === 'python_assignment');
     const evidenceBySubject = new Map<string, AnalysisEvidence>();
     for (const evidence of parsed.evidence) if (evidence.subjectKind === 'node') evidenceBySubject.set(evidence.subjectId, evidence);
-    return { path: file.path, imports, classes, assignments, evidenceBySubject };
+    return { path: file.path, imports, pythonImports: parsed.imports, classes, assignments, evidenceBySubject };
   });
 }
 

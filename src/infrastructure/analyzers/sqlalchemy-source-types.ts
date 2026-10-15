@@ -1,6 +1,7 @@
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import type { PythonExpressionFact } from './python-source-types.js';
+import type { PythonImportFact } from './python-source-types.js';
 
 export type SqlAlchemyConfig = { databaseNamespace: string };
 export type SqlAlchemyResult = { sourceRevision: string; nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; diagnostics: AnalysisDiagnostic[] };
@@ -38,6 +39,7 @@ export type SqlAlchemyRelationshipFact = { name: string; target?: string; target
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
+  pythonImports: PythonImportFact[];
   classes: GraphNode[];
   assignments: GraphNode[];
   evidenceBySubject: Map<string, AnalysisEvidence>;
