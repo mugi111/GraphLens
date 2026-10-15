@@ -64,6 +64,11 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const ambiguousEndpointIds = new Set<string>();
   let totalVisits = 0;
   let outputLimitReached = false;
+  const markOutputLimit = () => {
+    if (outputLimitReached) return;
+    outputLimitReached = true;
+    if (diagnostics.length < 10000) diagnostics.push({ code: 'ARCHITECTURE_OUTPUT_LIMIT', severity: 'warning', message: 'Architecture projection reached the configured result bounds; remaining findings were skipped.' });
+  };
   const evidenceId = (subjectId: string, key: string) => ids.node(sources.workspaceId, `architecture-evidence://${subjectId}/${encodeURIComponent(key)}`, 'evidence');
   // The resolver works only from bounded projections of the supplied generations.
   const endpointNodes = (generation: ArchitectureInputGeneration | undefined) => (generation?.nodes ?? []).filter((node) => node.kind === 'api_endpoint');
@@ -77,8 +82,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const id = ids.edge(sources.workspaceId, fast.id, spec.id, `architecture_${method}`);
     if (edges.some((item) => item.id === id)) return true;
     if (nodes.length + edges.length + 1 > 9000 || evidence.length + 1 > 10000) {
-      outputLimitReached = true;
-      if (diagnostics.length < 10000) diagnostics.push({ code: 'ARCHITECTURE_OUTPUT_LIMIT', severity: 'warning', message: 'Architecture projection reached the configured result bounds; remaining matches were skipped.' });
+      markOutputLimit();
       return false;
     }
     edges.push({ id, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: spec.id, kind: 'implements_contract', properties: { matchMethod: method, confidence } });
@@ -154,7 +158,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
     if (issueIds.has(id)) return;
     projectClosure(openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi, endpoint);
-    if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) return;
+    if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) { markOutputLimit(); return; }
     issueIds.add(id);
     nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
     const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
@@ -183,7 +187,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const addMismatch = (dimension: string, detail: Record<string, unknown>) => {
       const id = ids.node(sources.workspaceId, `architecture://mismatch/${fast.id}/${dimension}`, 'architecture_contract_mismatch');
       if (issueIds.has(id)) return;
-      if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) return;
+      if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) { markOutputLimit(); return; }
       issueIds.add(id);
       nodes.push({ id, workspaceId: sources.workspaceId, kind: 'architecture_contract_mismatch', label: `Contract mismatch: ${dimension}`, properties: { fastApiEndpointId: fast.id, openApiEndpointId: spec.id, dimension, ...detail } });
       const edgeId = ids.edge(sources.workspaceId, fast.id, id, 'architecture_contract_finding');
@@ -268,7 +272,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const allowedKinds = new Set(['api_endpoint', 'fastapi_route', 'openapi_operation', 'python_function', 'python_class', 'api_parameter', 'api_request_body', 'api_response', 'api_security_requirement', 'api_security_scheme', 'api_schema_reference', 'api_schema', 'sqlalchemy_model', 'sqlalchemy_table']);
     const allowedEdges = new Set(['exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains']);
     const addNode = (node: GraphNode | undefined) => {
-      if (!node || !allowedKinds.has(node.kind) || projectedNodeIds.has(node.id) || nodes.length + edges.length >= 9000) return;
+      if (!node || !allowedKinds.has(node.kind) || projectedNodeIds.has(node.id)) return;
+      if (nodes.length + edges.length >= 9000) { markOutputLimit(); return; }
       projectedNodeIds.add(node.id);
       const safe: Record<string, unknown> = {};
       const fields: Record<string, string[]> = {
@@ -287,8 +292,11 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       }
     };
     const addEdge = (edge: GraphEdge) => {
-      if (!allowedEdges.has(edge.kind) || projectedEdgeIds.has(edge.id) || edges.length + nodes.length >= 9000) return;
-      addNode(byId.get(edge.sourceId)); addNode(byId.get(edge.targetId));
+      if (!allowedEdges.has(edge.kind) || projectedEdgeIds.has(edge.id)) return;
+      const endpoints = [byId.get(edge.sourceId), byId.get(edge.targetId)];
+      const newNodes = new Set(endpoints.filter((node): node is GraphNode => !!node && allowedKinds.has(node.kind) && !projectedNodeIds.has(node.id)).map(({ id }) => id)).size;
+      if (nodes.length + edges.length + newNodes + 1 > 9000) { markOutputLimit(); return; }
+      addNode(endpoints[0]); addNode(endpoints[1]);
       if (!projectedNodeIds.has(edge.sourceId) || !projectedNodeIds.has(edge.targetId)) return;
       projectedEdgeIds.add(edge.id);
       edges.push({ ...edge, analyzerId: generation.analyzerId, generationId: generation.generationId, level: 'DERIVED' });
