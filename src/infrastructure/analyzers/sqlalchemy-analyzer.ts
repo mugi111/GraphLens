@@ -15,8 +15,8 @@ export const sqlAlchemyAnalyzer: Analyzer = {
       const snapshot = await collectSqlAlchemySource(context);
       const files = collectSqlAlchemyFiles(snapshot);
       const diagnostics = [...snapshot.diagnostics];
-      const models = collectModels(files, diagnostics);
-      return projectModels(context, config.databaseNamespace, snapshot.sourceRevision, files, models, diagnostics);
+      const collected = collectModels(files, diagnostics);
+      return projectModels(context, config.databaseNamespace, snapshot.sourceRevision, files, collected.models, diagnostics, collected.ambiguousClasses);
     } catch (error) {
       if (error instanceof AnalysisError) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -25,9 +25,15 @@ export const sqlAlchemyAnalyzer: Analyzer = {
   },
 };
 
-function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDiagnostic[]): SqlAlchemyModelFact[] {
+function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDiagnostic[]) {
   const allClasses = files.flatMap((file) => file.classes.map((node) => ({ file, node, path: file.path, module: String(node.properties.module), qualifiedName: String(node.properties.qualifiedName), label: node.label })));
-  const classByLocal = new Map(allClasses.map((item) => [`${item.module}.${item.qualifiedName}`, item]));
+  const logicalGroups = new Map<string, typeof allClasses>();
+  for (const item of allClasses) { const key = `${item.module}.${item.qualifiedName}`; const group = logicalGroups.get(key) ?? []; group.push(item); logicalGroups.set(key, group); }
+  const ambiguousClasses = [...logicalGroups.values()].filter((group) => group.length > 1);
+  const ambiguousKeys = new Set(ambiguousClasses.flatMap((group) => group.map((item) => `${item.module}.${item.qualifiedName}`)));
+  for (const group of ambiguousClasses) diagnostics.push(sourceDiagnostic('SQLALCHEMY_AMBIGUOUS_CLASS', `Multiple Python source files declare '${group[0]!.module}.${group[0]!.qualifiedName}'; mapping was not merged.`, group[0]!.file.evidenceBySubject.get(group[0]!.node.id)));
+  const uniqueClasses = allClasses.filter((item) => !ambiguousKeys.has(`${item.module}.${item.qualifiedName}`));
+  const classByLocal = new Map(uniqueClasses.map((item) => [`${item.module}.${item.qualifiedName}`, item]));
   const rootVariables = new Set<string>();
   const rootClasses = new Set<string>();
   const registryVariables = new Set<string>();
@@ -61,7 +67,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
   let changed = true;
   while (changed) {
     changed = false;
-    for (const item of allClasses) {
+    for (const item of uniqueClasses) {
       const key = `${item.module}.${item.qualifiedName}`;
       if (rootClasses.has(key) || models.has(key)) continue;
       const bases = classBases(item.node);
@@ -103,6 +109,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
   for (const model of collected) {
     const file = files.find((candidate) => candidate.path === model.path)!;
     const columnByName = new Map<string, SqlAlchemyModelFact['columns'][number]>();
+    const relationshipByName = new Map<string, SqlAlchemyModelFact['relationships'][number]>();
     const collectedAssignments = inheritedAssignments(model, file, classByLocal);
     for (const assignment of collectedAssignments) {
       const assignmentFile = files.find((candidate) => candidate.assignments.some((node) => node.id === assignment.id)) ?? file;
@@ -110,13 +117,14 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       if (column?.diagnostic) diagnostics.push(column.diagnostic);
       if (column) columnByName.set(column.name, column);
       const relation = relationshipFact(assignment, assignmentFile);
-      if (relation) { model.relationships.push(relation.fact); if (relation.diagnostic) diagnostics.push(relation.diagnostic); }
+      if (relation) { relationshipByName.set(relation.fact.name, relation.fact); if (relation.diagnostic) diagnostics.push(relation.diagnostic); }
     }
     model.columns = [...columnByName.values()];
+    model.relationships = [...relationshipByName.values()];
     applyMapperPrimaryKey(file.assignments, model.qualifiedName, model.columns);
     if (model.tableName) model.constraints = tableConstraints(file.assignments, model.qualifiedName, file, model.columns, diagnostics);
   }
-  return collected;
+  return { models: collected, ambiguousClasses };
 }
 
 function inheritedAssignments(model: SqlAlchemyModelFact, owningFile: SqlAlchemyCollectedFile, classByLocal: Map<string, { file: SqlAlchemyCollectedFile; node: GraphNode; path: string; module: string; qualifiedName: string; label: string }>) {
@@ -140,7 +148,7 @@ function inheritedAssignments(model: SqlAlchemyModelFact, owningFile: SqlAlchemy
   return result;
 }
 
-function projectModels(context: AnalysisContext, databaseNamespace: string, sourceRevision: string, files: SqlAlchemyCollectedFile[], models: SqlAlchemyModelFact[], diagnostics: AnalysisDiagnostic[]): AnalysisResult {
+function projectModels(context: AnalysisContext, databaseNamespace: string, sourceRevision: string, files: SqlAlchemyCollectedFile[], models: SqlAlchemyModelFact[], diagnostics: AnalysisDiagnostic[], ambiguousClasses: Array<Array<{ file: SqlAlchemyCollectedFile; node: GraphNode; path: string; module: string; qualifiedName: string; label: string }>>): AnalysisResult {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
@@ -159,13 +167,24 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     evidence.push(projectEvidence('node', id, source, type, key));
     return nodes.at(-1)!;
   };
-  const addEdge = (from: GraphNode, to: GraphNode, kind: string, source?: AnalysisEvidence, key = kind, level: 'DIRECT' | 'DERIVED' = 'DERIVED') => {
+  const addEdge = (from: GraphNode, to: GraphNode, kind: string, source?: AnalysisEvidence, key = kind, level: 'DIRECT' | 'DERIVED' = 'DERIVED', properties: Record<string, unknown> = {}) => {
     const id = identity.edge(context.workspace.id, from.id, to.id, kind);
     if (edgesById.has(id)) return;
     edgesById.add(id);
-    edges.push({ id, workspaceId: context.workspace.id, sourceId: from.id, targetId: to.id, kind, properties: {} });
+    edges.push({ id, workspaceId: context.workspace.id, sourceId: from.id, targetId: to.id, kind, properties });
     evidence.push(projectEvidence('edge', id, source, `sqlalchemy.${kind}`, key, level));
   };
+  for (const group of ambiguousClasses) {
+    const candidateIds: string[] = [];
+    for (const item of group) {
+      const sourceClass = item.node;
+      candidateIds.push(sourceClass.id);
+      if (!nodesById.has(sourceClass.id)) { nodesById.set(sourceClass.id, sourceClass); nodes.push(sourceClass); }
+      const source = item.file.evidenceBySubject.get(sourceClass.id);
+      if (source) evidence.push(projectEvidence('node', sourceClass.id, source, 'sqlalchemy.class-candidate', `candidate/${item.path}/${item.qualifiedName}`));
+    }
+    addNode(group[0]!.path, 'sqlalchemy_ambiguous_model', group[0]!.qualifiedName, `ambiguous-model/${group[0]!.module}.${group[0]!.qualifiedName}`, { module: group[0]!.module, qualifiedName: group[0]!.qualifiedName, candidateClassIds: candidateIds, resolved: false }, group[0]!.file.evidenceBySubject.get(group[0]!.node.id), 'sqlalchemy.unresolved-model');
+  }
   for (const model of models) {
     const sourceClass = files.flatMap((file) => file.classes).find((node) => node.id === model.classId);
     if (!sourceClass) continue;
@@ -173,7 +192,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     if (model.sourceEvidence) evidence.push({ ...model.sourceEvidence, id: identity.node(sourceClass.id, 'evidence:node', 'sqlalchemy.source-class'), subjectId: sourceClass.id, type: 'sqlalchemy.source-class' });
     const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, tableResolved: model.tableResolved ?? !!model.tableName }, model.sourceEvidence);
     projectedModels.set(`${model.module}.${model.qualifiedName}`, modelNode);
-    addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DIRECT');
+    addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
     if (!model.tableName || model.tableResolved === false) continue;
     const tableKey = `table/${model.schema ? `${model.schema}.` : ''}${model.tableName}`;
     const table = addNode(databaseNamespace, 'sqlalchemy_table', `${model.schema ? `${model.schema}.` : ''}${model.tableName}`, tableKey, { databaseNamespace, schema: model.schema ?? null, tableName: model.tableName }, model.tableEvidence ?? model.sourceEvidence, 'sqlalchemy.table');
@@ -214,7 +233,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
         }
         diagnostics.push(sourceDiagnostic(target.ambiguous ? 'SQLALCHEMY_AMBIGUOUS_FOREIGN_KEY' : 'SQLALCHEMY_UNRESOLVED_FOREIGN_KEY', `${target.ambiguous ? 'Ambiguous' : 'Unresolved'} foreign key target '${reference.target}'.`, reference.sourceEvidence));
       }
-      addEdge(source, destination, 'foreign_key', reference.sourceEvidence, `${model.qualifiedName}.${column.name}->${reference.target}`, 'DIRECT');
+      addEdge(source, destination, 'foreign_key', reference.sourceEvidence, `${model.qualifiedName}.${column.name}->${reference.target}`, 'DIRECT', { resolved: !!target.node, ambiguous: target.ambiguous });
     }
   }
   const unresolvedRelationships = new Map<string, GraphNode>();
@@ -223,7 +242,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     if (!source) continue;
     for (const relation of model.relationships) {
       const targetName = relation.target;
-      const sourceFile = files.find((candidate) => candidate.path === model.path)!;
+      const sourceFile = files.find((candidate) => candidate.path === relation.sourcePath) ?? files.find((candidate) => candidate.path === model.path)!;
       const candidates = targetName ? resolveRelationshipCandidates(models, sourceFile, model, targetName) : [];
       const resolved = candidates.length === 1 ? projectedModels.get(`${candidates[0]!.module}.${candidates[0]!.qualifiedName}`) : undefined;
       const key = `relationship/${model.schema ? `${model.schema}.` : ''}${model.tableName}.${relation.name}`;
@@ -239,7 +258,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
         }
         diagnostics.push(sourceDiagnostic(candidates.length > 1 ? 'SQLALCHEMY_AMBIGUOUS_RELATIONSHIP' : 'SQLALCHEMY_UNRESOLVED_RELATIONSHIP', `${candidates.length > 1 ? 'Ambiguous' : 'Unresolved'} relationship target '${targetName ?? relation.name}'.`, relation.sourceEvidence));
       }
-      addEdge(relationship, destination, 'relationship', relation.sourceEvidence, `${model.qualifiedName}.${relation.name}->${targetName ?? 'unresolved'}`, 'DIRECT');
+      addEdge(relationship, destination, 'relationship', relation.sourceEvidence, `${model.qualifiedName}.${relation.name}->${targetName ?? 'unresolved'}`, 'DERIVED', { resolved: !!resolved, ambiguous: candidates.length > 1 });
     }
   }
   if (nodes.length + edges.length > 9000) throw new Error('SQLAlchemy contributions exceed the combined limit (9000).');
@@ -310,7 +329,7 @@ function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile):
   const backPopulates = staticString(kwargs.get('back_populates'));
   const backref = staticString(kwargs.get('backref'));
   const uselist = kwargs.has('uselist') ? booleanLiteral(kwargs.get('uselist')) ?? null : null;
-  const fact: SqlAlchemyModelFact['relationships'][number] = { name: expressionName(assignment.properties.target) ?? assignment.label, target, targetKind, backPopulates, backref, uselist, sourceEvidence: file.evidenceBySubject.get(assignment.id) };
+  const fact: SqlAlchemyModelFact['relationships'][number] = { name: expressionName(assignment.properties.target) ?? assignment.label, target, targetKind, sourcePath: file.path, backPopulates, backref, uselist, sourceEvidence: file.evidenceBySubject.get(assignment.id) };
   const dynamic = !target || kwargs.has('uselist') && uselist === null || kwargs.has('back_populates') && !backPopulates || kwargs.has('backref') && !backref;
   return { fact, ...(dynamic ? { diagnostic: sourceDiagnostic('SQLALCHEMY_DYNAMIC_RELATIONSHIP', `Could not statically resolve relationship '${expressionName(assignment.properties.target) ?? assignment.label}'.`, file.evidenceBySubject.get(assignment.id)) } : {}) };
 }
