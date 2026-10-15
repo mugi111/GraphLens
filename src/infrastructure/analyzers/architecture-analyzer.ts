@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { AnalysisError, type AnalysisContext, type AnalysisDiagnostic, type Analyzer, type AnalysisResult, type ArchitectureInputGeneration } from '../../domain/analyzer.js';
-import { resolveArchitecture } from './architecture-resolver.js';
+import { architectureConfig, resolveArchitecture } from './architecture-resolver.js';
 
 const INPUT_IDS = ['builtin.fastapi', 'builtin.openapi', 'builtin.sqlalchemy'] as const;
 const VERSION = 'architecture-v1';
@@ -26,7 +26,7 @@ export const architectureAnalyzer: Analyzer = {
       openApi: byId.get('builtin.openapi') as ArchitectureInputGeneration | undefined,
       sqlAlchemy: byId.get('builtin.sqlalchemy') as ArchitectureInputGeneration | undefined,
     }, context.config);
-    const sourceRevision = revision(context.config, snapshot.generations);
+    const sourceRevision = revision(architectureConfig(context.config), snapshot.generations);
     if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed architecture source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed architecture source revision does not match the requested revision.' }]);
     return { ...result, diagnostics: [...diagnostics, ...result.diagnostics], sourceRevision };
   },
