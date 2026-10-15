@@ -584,7 +584,7 @@ function resolveLocalBaseKey(file: SqlAlchemyCollectedFile, name: string, scope 
     }
     const local = fact.alias ?? fact.module.split('.')[0]!;
     if (head !== local) return null;
-    const suffix = fact.alias ? name.split('.').slice(1).join('.') : name.split('.').slice(fact.module.split('.').length).join('.');
+    const suffix = name.split('.').slice(1).join('.');
     return `${absoluteImportedModule(file.path, fact)}${suffix ? `.${suffix}` : ''}`;
   }
   return undefined;

@@ -30,7 +30,7 @@ export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlche
       const scope = owner?.kind === 'python_class' || owner?.kind === 'python_function' || owner?.kind === 'python_async_function' ? String(owner.properties.qualifiedName ?? '') : '';
       pythonImports.push({ scope, fact: imported });
       const local = imported.imported ? imported.alias ?? imported.imported : imported.alias ?? imported.module.split('.')[0]!;
-      const canonical = imported.imported ? `${imported.module}.${imported.imported}` : imported.module;
+      const canonical = imported.imported ? `${imported.module}.${imported.imported}` : imported.alias ? imported.module : imported.module.split('.')[0]!;
       lexicalImports.push({ scope, offset: imported.startOffset, local, ...(!imported.relativeLevel && (canonical === 'sqlalchemy' || canonical.startsWith('sqlalchemy.')) ? { canonical } : {}) });
     }
     for (const assignment of assignments) {
