@@ -320,10 +320,10 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const safe: Record<string, unknown> = {};
       const fields: Record<string, string[]> = {
         api_endpoint: ['namespace', 'method', 'path', 'pathShape', 'operationId', 'securityMode'], fastapi_route: ['namespace', 'path', 'pathShape', 'methods', 'operationId'],
-        openapi_operation: ['documentPath', 'method', 'path', 'operationId', 'securityMode'], python_function: ['module', 'qualifiedName', 'async'], python_class: ['module', 'qualifiedName'],
+        openapi_operation: ['documentPath', 'method', 'path', 'operationId', 'securityMode'], python_function: ['module', 'qualifiedName', 'async'], python_async_function: ['module', 'qualifiedName', 'async'], python_class: ['module', 'qualifiedName'], openapi_schema: ['name'],
         api_parameter: ['name', 'alias', 'in', 'required', 'contentTypes'], api_request_body: ['required', 'contentTypes', 'model'], api_response: ['status', 'statusCode', 'model'],
         api_security_requirement: ['alternative', 'scopes', 'requirementGroup', 'mode', 'required'], api_security_scheme: ['constructor', 'scheme', 'type', 'name', 'in'], api_schema_reference: ['ref', 'referenceKind'], api_schema: ['name'],
-        sqlalchemy_model: ['tableName', 'schema', 'databaseNamespace'], sqlalchemy_table: ['name', 'schema', 'databaseNamespace'],
+        sqlalchemy_model: ['module', 'qualifiedName', 'tableName', 'schema', 'databaseNamespace'], sqlalchemy_table: ['tableName', 'schema', 'databaseNamespace'],
       };
       for (const key of fields[node.kind] ?? []) if (node.properties[key] !== undefined && (typeof node.properties[key] !== 'object' || node.properties[key] === null)) safe[key] = node.properties[key];
       nodes.push({ id: node.id, workspaceId: sources.workspaceId, kind: node.kind, label: node.label, properties: safe, analyzerId: generation.analyzerId, generationId: generation.generationId, level: 'DERIVED' });
