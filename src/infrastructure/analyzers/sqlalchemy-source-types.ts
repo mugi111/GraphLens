@@ -14,6 +14,7 @@ export type SqlAlchemyColumnFact = {
   typeName?: string;
   primaryKey?: boolean | null;
   nullable?: boolean | null;
+  nullableExplicit?: boolean;
   unique?: boolean | null;
   index?: boolean | null;
   foreignKeys: Array<{ target: string; sourceEvidence?: AnalysisEvidence }>;
