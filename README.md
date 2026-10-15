@@ -48,6 +48,10 @@ The Workspace view browses active graph facts from one or more registered worksp
 
 `limit` defaults to 25 and accepts 1–100 roots or relationships per page. A response is bounded to 250 nodes, 200 edges, 1,000 evidence records, and 1 MiB each of properties and evidence payloads; requests that exceed a bound return `WORKSPACE_GRAPH_LIMIT_EXCEEDED`. Pass the returned `cursor` and `snapshot` to continue against the same active generations; the page size may change between requests. If those generations change, GraphLens returns `WORKSPACE_GRAPH_SNAPSHOT_CHANGED` and the query must be restarted. `include=evidence` adds recorded evidence. Workspace responses include IDs and names but omit filesystem paths. Unknown, repeated, incompatible, or malformed query parameters return `INVALID_WORKSPACE_GRAPH_QUERY`; other errors include `INVALID_CURSOR`, `WORKSPACE_NOT_FOUND`, and `WORKSPACE_GRAPH_NODE_NOT_FOUND`.
 
+## Source evidence
+
+Evidence with a supported local file location can be opened from the Workspace, Database, Architecture, and Impact inspectors. GraphLens resolves the file from the selected evidence and active analyzer generation; requests cannot supply a filesystem path. The viewer reads at most 2 MiB and displays up to 100 numbered lines around the recorded line. It labels the result as the current working file because files may have changed since analysis. Evidence without a safe local file location remains available with its recorded details.
+
 ## Analyzer runtime
 
 GraphLens composes built-in analyzers and previously enabled package plugins at startup. Every analyzer declares a host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created. `GET /api/v1/analyzers` lists loaded analyzers; `GET /api/v1/plugins` lists sanitized plugin inventory recorded in the selected database. Plugin management is available through the CLI; the HTTP plugin API remains read-only.
