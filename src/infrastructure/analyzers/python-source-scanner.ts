@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, opendir, open, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { PythonSourceConfig, PythonSourceFile } from './python-source-types.js';
 import { DEFAULT_PYTHON_SOURCE_CONFIG, PYTHON_SOURCE_LIMITS } from './python-source-types.js';
 import { decodePythonSource, sha256 } from './python-source-content.js';

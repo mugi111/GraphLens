@@ -77,8 +77,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       const classKeywords = node.name === 'ClassDefinition' && args ? callArguments(args, file.source).filter((arg) => arg.kind === 'keyword').map((arg) => ({ name: arg.keyword, value: arg.expression })) : [];
       const parameters = node.name === 'FunctionDefinition' ? functionParameters(directChild(node, 'ParamList'), file.source) : [];
       const returnTypeNode = node.name === 'FunctionDefinition' ? children(node).find((child) => child.name === 'TypeDef' && file.source.slice(child.from, child.to).startsWith('->')) : undefined;
-      const bodyNode = directChild(node, 'Body');
-      const declarationFacts = bodyNode ? structuredFacts(bodyNode, file.source, offsets) : { references: [], calls: [] };
+      const declarationFacts = structuredFacts(node, file.source, offsets);
       const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async, decorators, bases, classKeywords, parameters, ...(returnTypeNode ? { returnAnnotation: annotationFact(returnTypeNode, file.source) } : {}), references: declarationFacts.references, calls: declarationFacts.calls });
       addEdge(parent, declared, 'contains', { from: node.from, to: node.to });
       for (const child of children(node)) visit(child, qualified, declared);
@@ -98,7 +97,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       }
     }
     if (node.name === 'ImportStatement') {
-      if (!intersectsDamage({ from: node.from, to: node.to }, errorRegions)) parseImport(node, file, offsets, imports);
+      if (!intersectsDamage({ from: node.from, to: node.to }, errorRegions)) parseImport(node, parent.id, file, offsets, imports);
       if (imports.length > 10_000) throw new Error('Python source import facts exceed the result limit (10000).');
       return;
     }
@@ -108,7 +107,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   return { nodes, edges, evidence, imports: assignImportOccurrences(imports), diagnostics };
 }
 
-function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: PythonImportFact[]) {
+function parseImport(node: any, ownerId: string, file: PythonSourceFile, offsets: number[], out: PythonImportFact[]) {
   const tokens = children(node);
   const points = range(node.from, node.to, offsets);
   if (tokens.some((child) => child.name === 'from')) {
@@ -120,12 +119,12 @@ function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: 
     const importedTokens = flattenImportTokens(tokens.slice(importIndex + 1));
     for (const segment of splitImportSegments(importedTokens)) {
       const parsed = importedName(segment, file.source);
-      if (parsed) out.push({ file: file.path, module, imported: parsed.name, alias: parsed.alias, relativeLevel, ...points });
+      if (parsed) out.push({ file: file.path, ownerId, module, imported: parsed.name, alias: parsed.alias, relativeLevel, ...points });
     }
   } else {
     for (const segment of splitImportSegments(tokens)) {
       const parsed = importedName(segment, file.source);
-      if (parsed) out.push({ file: file.path, module: parsed.name, alias: parsed.alias, relativeLevel: 0, ...points });
+      if (parsed) out.push({ file: file.path, ownerId, module: parsed.name, alias: parsed.alias, relativeLevel: 0, ...points });
     }
   }
 }
@@ -256,7 +255,6 @@ function expressionName(fact: PythonExpressionFact): string | undefined {
   return undefined;
 }
 
-function literalKind(node: any) { return ({ String: 'string', Number: 'number', Boolean: 'boolean', None: 'none', ListExpression: 'list', DictExpression: 'dict', SetExpression: 'set', TupleExpression: 'tuple', CallExpression: 'call', MemberExpression: 'member', VariableName: 'name' } as Record<string, string>)[node.name] ?? 'expression'; }
 function splitChildren(node: any) { const result: any[][] = [[]]; for (const child of children(node)) { if (child.name === ',') result.push([]); else result[result.length - 1].push(child); } return result; }
 function isExpressionNode(node: any) { return !['(', ')', '[', ']', '{', '}', ',', ':', '.', '...', 'AssignOp', 'AugAssignOp', 'as', '*', '**', '/'].includes(node.name) && !['TypeDef'].includes(node.name) && (node.name === 'VariableName' || node.name === 'PropertyName' || /Expression$|Literal$|^(String|Number|Boolean|None|True|False)$/.test(node.name)); }
 
@@ -277,7 +275,7 @@ export function sourceEvidence(subjectKind: 'node' | 'edge', subjectId: string, 
   return { id: identity.node(subjectId, `evidence:${subjectKind}`, type), subjectKind, subjectId, level: 'DIRECT', type, uri, line: start.line, column: start.column, endLine: end.line, endColumn: end.column, startOffset: bounds.from, endOffset: bounds.to };
 }
 
-function assignImportOccurrences(imports: PythonImportFact[]) { const occurrences = new Map<string, number>(); return imports.map((fact) => { const key = `${fact.file}\u0000${fact.module}\u0000${fact.imported ?? ''}\u0000${fact.alias ?? ''}\u0000${fact.relativeLevel}`; const occurrence = occurrences.get(key) ?? 0; occurrences.set(key, occurrence + 1); return { ...fact, occurrence }; }); }
+function assignImportOccurrences(imports: PythonImportFact[]) { const occurrences = new Map<string, number>(); return imports.map((fact) => { const key = `${fact.file}\u0000${fact.ownerId}\u0000${fact.module}\u0000${fact.imported ?? ''}\u0000${fact.alias ?? ''}\u0000${fact.relativeLevel}`; const occurrence = occurrences.get(key) ?? 0; occurrences.set(key, occurrence + 1); return { ...fact, occurrence }; }); }
 
 function directChild(node: any, name: string) { return children(node).find((child) => child.name === name); }
 function collectErrorRegions(root: any) { const result: Range[] = []; function walk(node: any) { if (node.name === '⚠') result.push({ from: node.from, to: node.to }); for (const child of children(node)) walk(child); } walk(root); return result; }
