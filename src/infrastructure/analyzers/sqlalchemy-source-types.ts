@@ -7,6 +7,7 @@ export type SqlAlchemyConfig = { databaseNamespace: string };
 export type SqlAlchemyResult = { sourceRevision: string; nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; diagnostics: AnalysisDiagnostic[] };
 export type SqlAlchemyImportBinding = Map<string, string>;
 export type SqlAlchemyColumnFact = {
+  pythonName: string;
   name: string;
   targetId: string;
   assignmentId: string;

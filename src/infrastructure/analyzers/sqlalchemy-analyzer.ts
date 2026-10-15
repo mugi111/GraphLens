@@ -115,6 +115,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       if (relation) { model.relationships.push(relation.fact); if (relation.diagnostic) diagnostics.push(relation.diagnostic); }
     }
     model.columns = [...columnByName.values()];
+    applyMapperPrimaryKey(file.assignments, model.qualifiedName, model.columns);
     if (model.tableName) model.constraints = tableConstraints(file.assignments, model.qualifiedName, file, model.columns, diagnostics);
   }
   return collected;
@@ -181,10 +182,10 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     addEdge(modelNode, table, 'contains', model.tableEvidence ?? model.sourceEvidence, tableKey);
     for (const column of model.columns) {
       const key = `column/${model.schema ? `${model.schema}.` : ''}${model.tableName}.${column.name}`;
-      const columnNode = addNode(databaseNamespace, 'sqlalchemy_column', column.name, key, { databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, columnName: column.name, typeName: column.typeName ?? null, primaryKey: column.primaryKey ?? null, nullable: column.nullable ?? null, unique: column.unique ?? null, index: column.index ?? null }, column.sourceEvidence, 'sqlalchemy.column');
+      const columnNode = addNode(databaseNamespace, 'sqlalchemy_column', column.name, key, { databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, pythonName: column.pythonName, columnName: column.name, typeName: column.typeName ?? null, primaryKey: column.primaryKey ?? null, nullable: column.nullable ?? null, unique: column.unique ?? null, index: column.index ?? null }, column.sourceEvidence, 'sqlalchemy.column');
       addEdge(table, columnNode, 'contains', column.sourceEvidence, key);
       const columnKey = `${model.schema ?? ''}.${model.tableName}.${column.name}`;
-      projectedColumns.set(`${model.module}.${model.qualifiedName}.${column.name}`, columnNode);
+      projectedColumns.set(`${model.module}.${model.qualifiedName}.${column.pythonName}`, columnNode);
       const targetList = targetColumns.get(columnKey) ?? [];
       if (!targetList.some((item) => item.id === columnNode.id)) targetList.push(columnNode);
       targetColumns.set(columnKey, targetList);
@@ -194,14 +195,15 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
       const node = addNode(databaseNamespace, 'sqlalchemy_constraint', constraint.name ?? constraint.kind, key, { databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, constraintKind: constraint.kind, columns: constraint.columns, references: constraint.references }, constraint.sourceEvidence, `sqlalchemy.${constraint.kind}`);
       addEdge(table, node, 'contains', constraint.sourceEvidence, key);
       for (const columnName of constraint.columns) {
-        const column = projectedColumns.get(`${model.module}.${model.qualifiedName}.${columnName}`);
+        const fact = model.columns.find((candidate) => candidate.pythonName === columnName || candidate.name === columnName);
+        const column = fact ? projectedColumns.get(`${model.module}.${model.qualifiedName}.${fact.pythonName}`) : undefined;
         if (column) addEdge(node, column, 'constrains', constraint.sourceEvidence, `${key}:${columnName}`, 'DIRECT');
       }
     }
   }
   const unresolvedForeignKeys = new Map<string, GraphNode>();
   for (const model of models) for (const column of model.columns) {
-    const source = projectedColumns.get(`${model.module}.${model.qualifiedName}.${column.name}`);
+    const source = projectedColumns.get(`${model.module}.${model.qualifiedName}.${column.pythonName}`);
     if (!source) continue;
     for (const reference of column.foreignKeys) {
       const target = resolveForeignKeyTarget(reference.target, model, targetColumns);
@@ -260,34 +262,40 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   const mappedAnnotation = isMappedAnnotation(annotation, file.imports);
   const mappedType = mappedTypeName(annotation, file.imports);
   const valueName = expressionName(value);
-  const callFacts = calls(assignment);
   const canonicalCallName = (name: string) => canonicalSqlAlchemyName(name, file.imports);
-  if (callFacts.some((call) => canonicalCallName(call.callee) === 'sqlalchemy.orm.relationship')) return undefined;
-  const columnCall = callFacts.find((call) => ['sqlalchemy.orm.mapped_column', 'sqlalchemy.Column', 'sqlalchemy.sql.schema.Column'].includes(canonicalCallName(call.callee)));
-  const recognizedFactory = ['sqlalchemy.orm.mapped_column', 'sqlalchemy.Column', 'sqlalchemy.sql.schema.Column'].includes(canonicalCallName(valueName ?? ''));
-  if (!mappedAnnotation && !columnCall && !recognizedFactory) return undefined;
-  const args = value?.arguments ?? [];
+  const directCall = value?.kind === 'call' ? value : undefined;
+  const directCanonical = directCall?.name ? canonicalCallName(directCall.name) : '';
+  if (directCanonical === 'sqlalchemy.orm.relationship') return undefined;
+  const recognizedColumnNames = ['sqlalchemy.orm.mapped_column', 'sqlalchemy.Column', 'sqlalchemy.sql.schema.Column'];
+  const recognizedFactory = recognizedColumnNames.includes(directCanonical);
+  if (!mappedAnnotation && !recognizedFactory) return undefined;
+  const args = directCall?.arguments ?? [];
   const kwargs = new Map(args.filter((arg) => arg.kind === 'keyword' && arg.keyword).map((arg) => [arg.keyword!, arg.expression]));
   const dynamicFlags = ['primary_key', 'nullable', 'unique', 'index'].filter((key) => kwargs.has(key) && booleanLiteral(kwargs.get(key)) === undefined);
   const explicitOrDefault = (key: string, fallback: boolean): boolean | null => kwargs.has(key) ? booleanLiteral(kwargs.get(key)) ?? null : fallback;
   const primaryKey = explicitOrDefault('primary_key', false);
   const nullable = kwargs.has('nullable') ? booleanLiteral(kwargs.get('nullable')) ?? null : primaryKey === true ? false : primaryKey === null ? null : mappedAnnotation ? mappedType ? !isNonOptionalMappedType(annotation) : null : true;
-  const firstPositional = args.find((arg) => arg.kind === 'positional')?.expression;
-  const typeName = mappedType ?? expressionName(firstPositional);
+  const positional = args.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression);
+  const namedColumn = staticString(kwargs.get('name'));
+  const explicitName = namedColumn ?? (recognizedFactory && staticString(positional[0]) ? staticString(positional[0]) : undefined);
+  const typeExpression = recognizedFactory && staticString(positional[0]) ? positional[1] : positional[0];
+  const typeName = mappedType ?? expressionName(typeExpression);
   const foreignKeys = [] as SqlAlchemyModelFact['columns'][number]['foreignKeys'];
   let dynamicForeignKey = false;
-  for (const call of callFacts) {
-    if (!['sqlalchemy.ForeignKey', 'sqlalchemy.schema.ForeignKey'].includes(canonicalCallName(call.callee))) continue;
+  const nestedCalls = (recognizedFactory ? args.map((arg) => arg.expression) : []).flatMap((argument) => argument?.kind === 'call' ? [argument] : []);
+  for (const call of nestedCalls) {
+    if (!['sqlalchemy.ForeignKey', 'sqlalchemy.schema.ForeignKey'].includes(canonicalCallName(call.name ?? ''))) continue;
     const target = staticString(call.arguments?.find((arg) => arg.kind === 'positional')?.expression);
     if (target) foreignKeys.push({ target, sourceEvidence: file.evidenceBySubject.get(assignment.id) }); else dynamicForeignKey = true;
   }
-  const dynamicValue = !!mappedAnnotation && !!value && !columnCall && !recognizedFactory;
+  const dynamicValue = !!mappedAnnotation && !!value && !recognizedFactory;
   const diagnostic = dynamicFlags.length ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_COLUMN_OPTION', `Could not statically resolve ${dynamicFlags.join(', ')} for column '${name}'.`, file.evidenceBySubject.get(assignment.id)) : dynamicForeignKey ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_FOREIGN_KEY', `Could not statically resolve foreign key target for '${name}'.`, file.evidenceBySubject.get(assignment.id)) : dynamicValue ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_COLUMN', `Could not statically resolve the mapped value for column '${name}'.`, file.evidenceBySubject.get(assignment.id)) : undefined;
-  return { name, targetId: assignment.id, assignmentId: assignment.id, typeName, primaryKey, nullable, unique: explicitOrDefault('unique', false), index: explicitOrDefault('index', false), foreignKeys, relationships: [], sourceEvidence: file.evidenceBySubject.get(assignment.id), ...(diagnostic ? { diagnostic } : {}) };
+  return { pythonName: name, name: explicitName ?? name, targetId: assignment.id, assignmentId: assignment.id, typeName, primaryKey, nullable, unique: explicitOrDefault('unique', false), index: explicitOrDefault('index', false), foreignKeys, relationships: [], sourceEvidence: file.evidenceBySubject.get(assignment.id), ...(diagnostic ? { diagnostic } : {}) };
 }
 
 function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile): { fact: SqlAlchemyModelFact['relationships'][number]; diagnostic?: AnalysisDiagnostic } | undefined {
-  const call = calls(assignment).find((item) => canonicalSqlAlchemyName(item.callee, file.imports) === 'sqlalchemy.orm.relationship');
+  const direct = asExpression(assignment.properties.value);
+  const call = direct?.kind === 'call' && direct.name && canonicalSqlAlchemyName(direct.name, file.imports) === 'sqlalchemy.orm.relationship' ? { callee: direct.name, arguments: direct.arguments } : undefined;
   if (!call) return undefined;
   const positional = call.arguments?.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) ?? [];
   const kwargs = new Map((call.arguments ?? []).filter((arg) => arg.kind === 'keyword' && arg.keyword).map((arg) => [arg.keyword!, arg.expression]));
@@ -347,9 +355,9 @@ function tableConstraints(assignments: GraphNode[], scope: string, file: SqlAlch
       const positional = args?.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) ?? [];
       const keywords = new Map((args ?? []).filter((arg) => arg.kind === 'keyword' && arg.keyword).map((arg) => [arg.keyword!, arg.expression]));
       let kind: SqlAlchemyModelFact['constraints'][number]['kind'] | undefined;
-      if (canonical.endsWith('.PrimaryKeyConstraint')) kind = 'primary_key';
-      else if (canonical.endsWith('.UniqueConstraint')) kind = 'unique';
-      else if (canonical.endsWith('.ForeignKeyConstraint')) kind = 'foreign_key';
+      if (['sqlalchemy.PrimaryKeyConstraint', 'sqlalchemy.schema.PrimaryKeyConstraint'].includes(canonical)) kind = 'primary_key';
+      else if (['sqlalchemy.UniqueConstraint', 'sqlalchemy.schema.UniqueConstraint'].includes(canonical)) kind = 'unique';
+      else if (['sqlalchemy.ForeignKeyConstraint', 'sqlalchemy.schema.ForeignKeyConstraint'].includes(canonical)) kind = 'foreign_key';
       else if (canonical === 'sqlalchemy.Index' || canonical === 'sqlalchemy.schema.Index') kind = 'index';
       if (kind) {
         const indexOffset = kind === 'index' ? 1 : 0;
@@ -369,6 +377,22 @@ function tableConstraints(assignments: GraphNode[], scope: string, file: SqlAlch
     if (Array.isArray(value.arguments)) stack.push(...value.arguments.map((arg: any) => arg?.expression));
   }
   return result;
+}
+function applyMapperPrimaryKey(assignments: GraphNode[], scope: string, columns: SqlAlchemyModelFact['columns']) {
+  const assignment = localAssignmentValue(assignments, '__mapper_args__', scope);
+  const mapperArgs = asExpression(assignment?.properties.value);
+  if (mapperArgs?.kind !== 'DictionaryExpression' || !mapperArgs.children) return;
+  const key = mapperArgs.children.findIndex((child) => child.literalKind === 'string' && child.value === 'primary_key');
+  if (key < 0) return;
+  const value = mapperArgs.children[key + 1];
+  const names = new Set<string>();
+  const visit = (expression: PythonExpressionFact) => {
+    const name = expressionName(expression);
+    if (name) names.add(name.split('.').at(-1)!);
+    for (const child of expression.children ?? []) visit(child);
+  };
+  if (value) visit(value);
+  for (const column of columns) if (names.has(column.pythonName) || names.has(column.name)) { column.primaryKey = true; column.nullable = false; }
 }
 function staticString(value: unknown): string | undefined { return literalString(value); }
 function literalStrings(value: unknown): string[] { if (!isObject(value)) return []; if (value.literalKind === 'string' && typeof value.value === 'string') return [value.value]; if (Array.isArray(value.children)) return value.children.flatMap(literalStrings); return []; }
