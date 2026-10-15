@@ -304,12 +304,13 @@ function projectRoute(context: AnalysisContext, namespace: string, route: RouteS
   addEdge(parent, routeNode, 'contains', routeKey, source, { path, methods: route.methods });
   addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
   const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
-    for (const method of route.methods) {
+  for (const method of route.methods) {
     const endpoint = addNode('api_endpoint', `${method} ${path}`, apiEndpointUri(namespace, method, path), `${namespace}/${method}/${path}`, { namespace, method, path, pathShape: apiPathShape(path), tags }, source, 'api.endpoint');
     addEdge(routeNode, endpoint, 'exposes', `${routeKey}:${method}`, source, { method, path });
     if (route.operation.operationId) endpoint.properties = { ...endpoint.properties, operationId: route.operation.operationId };
     addRouteFacts(context, namespace, route, path, endpoint, routeNode, dependencies, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config, dependencyBudget);
   }
+  addCallsAndReferences(handler, route.handler, route.handlerFile, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget, false);
 }
 
 function addRouteFacts(context: AnalysisContext, namespace: string, route: RouteSpec, effectivePath: string, endpoint: GraphNode, routeNode: GraphNode, dependencies: DependencyFact[], routeKey: string,
@@ -443,15 +444,15 @@ function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNod
 }
 
 function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFile, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, budget: DependencyBudget) {
-  const walk = (currentFile: FastApiFile, current: GraphNode, depth: number) => {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, budget: DependencyBudget, inspectParameters = true) {
+  const walk = (currentFile: FastApiFile, current: GraphNode, depth: number, inspectCurrentParameters = true) => {
     const currentKey = `${current.properties.module}.${current.properties.qualifiedName}`;
     if (budget.visited.has(currentKey)) return;
     budget.visited.add(currentKey);
     if (depth > config.maxDependencyDepth) throw fatalLimit('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source);
     const currentEvidence = currentFile.evidenceBySubject.get(current.id) ?? source;
     const parameters = Array.isArray(current.properties.parameters) ? current.properties.parameters as PythonParameterFact[] : [];
-    for (const parameter of parameters) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
+    for (const parameter of inspectCurrentParameters ? parameters : []) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
       const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
       const target = dependency.arguments?.find((argument) => argument.kind === 'positional')?.expression;
@@ -487,7 +488,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       walk(targetFile, target, depth + 1);
     }
   };
-  walk(file, fn, 1);
+  walk(file, fn, 1, inspectParameters);
 }
 
 type DependencyBudget = { visited: Set<string>; resolved: Set<string> };
