@@ -244,7 +244,7 @@ function expressionFact(node: any, source: string, errorRegions: Range[] = []): 
   if (node.name === 'MemberExpression') {
     const parts = children(node).filter(isExpressionNode);
     const object = parts[0] ? expressionFact(parts[0], source, errorRegions) : { kind: 'unknown' };
-    if (source.slice(node.from, node.to).includes('[')) {
+    if (children(node).some((child: any) => child.name === '[')) {
       return { kind: 'subscript', children: parts.map((part: any) => expressionFact(part, source, errorRegions)) };
     }
     const property = [...parts].reverse()[0];
