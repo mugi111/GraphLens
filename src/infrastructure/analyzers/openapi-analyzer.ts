@@ -89,6 +89,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
 
   function projectDocument(doc: OpenApiDocument, namespace: string, node: typeof addNode, edge: typeof addEdge, diag: typeof addDiag, get: typeof property, mapPairs: typeof pairs, getScalar: typeof scalar, getSeq: typeof seq) {
     const root = node(doc, 'openapi_document', 'document', doc.file.path, { path: doc.file.path, openapi: doc.value.openapi, title: stringAt(doc, doc.root, ['info', 'title']), version: stringAt(doc, doc.root, ['info', 'version']) }, doc.evidence(doc.root, 'document'));
+    const serverSources = new Map<string, AnalysisEvidence>();
     const tagNodes = new Map<string, GraphNode>();
     for (const [index, tag] of getSeq(get(doc.root, 'tags')).entries()) {
       const name = valueAt(tag, 'name'); if (typeof name !== 'string') { diag('OPENAPI_INVALID_TAG', 'Document tag is missing a string name.', doc.file.path); continue; }
@@ -158,7 +159,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         edge(doc, root, endpoint, 'contains', `operation:${upperMethod}:${path}`, doc.evidence(operation, 'operation'));
         const operationServers = get(operation, 'servers');
         const applicableServers = operationServers ? projectServers(operationServers, endpoint, `paths/${escapePointer(path)}/${upperMethod}/servers`) : pathServerNodes;
-        if (!operationServers) for (const server of applicableServers) edge(doc, endpoint, server, 'uses_server', `operation-server:${path}:${upperMethod}:${server.id}`);
+        if (!operationServers) for (const server of applicableServers) edge(doc, endpoint, server, 'uses_server', `operation-server:${path}:${upperMethod}:${server.id}`, serverSources.get(server.id), {}, 'DERIVED');
         for (const tagName of arrayAt(operation, 'tags') ?? []) {
           let tagNode = tagNodes.get(tagName);
           if (!tagNode) { tagNode = node(doc, 'openapi_tag', `tags/${escapePointer(tagName)}`, tagName, { name: tagName }, doc.evidence(operation, 'operation-tag')); tagNodes.set(tagName, tagNode); }
@@ -212,6 +213,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
         const url = valueAt(server, 'url');
         if (typeof url !== 'string') { diag('OPENAPI_INVALID_SERVER', `Server at '${key}/${index}' has no literal URL.`, doc.file.path); continue; }
         const serverNode = node(doc, 'openapi_server', `${key}/${index}`, url, { url, description: valueAt(server, 'description') }, doc.evidence(server, 'server'));
+        serverSources.set(serverNode.id, doc.evidence(server, 'server')!);
         edge(doc, owner, serverNode, 'uses_server', `${key}/${index}`, doc.evidence(server, 'server'));
         result.push(serverNode);
       }
@@ -271,18 +273,20 @@ function resolveReferences(doc: OpenApiDocument, nodes: GraphNode[], evidence: A
   for (const node of [...nodes]) if (node.kind === 'api_schema_reference' && node.properties.sourcePath === doc.file.path && typeof node.properties.ref === 'string') {
     const ref = node.properties.ref;
     const source = evidence.find((item) => item.subjectId === node.id);
-    if (!ref.startsWith('#/')) { addDiag('OPENAPI_EXTERNAL_REF_UNRESOLVED', `Reference '${ref}' was not followed because only local JSON Pointers are supported.`, source?.uri ?? doc.file.path, source?.line); continue; }
+    if (!ref.startsWith('#/')) { node.properties.resolved = false; node.properties.resolution = 'external'; addDiag('OPENAPI_EXTERNAL_REF_UNRESOLVED', `Reference '${ref}' was not followed because only local JSON Pointers are supported.`, source?.uri ?? doc.file.path, source?.line); continue; }
     let decoded: string;
-    try { decoded = ref.slice(2).split('/').map((part) => decodePointer(part)).join('/'); } catch { addDiag('OPENAPI_INVALID_REF', `Reference '${ref}' has invalid JSON Pointer escaping.`, source?.uri ?? doc.file.path, source?.line); continue; }
+    try { decoded = ref.slice(2).split('/').map((part) => decodePointer(part)).join('/'); } catch { node.properties.resolved = false; node.properties.resolution = 'invalid-pointer'; addDiag('OPENAPI_INVALID_REF', `Reference '${ref}' has invalid JSON Pointer escaping.`, source?.uri ?? doc.file.path, source?.line); continue; }
     const target = byRef.get(ref);
+    node.properties.resolved = !!target;
+    node.properties.resolution = target ? 'local' : 'unresolved';
     if (target) addEdge(doc, node, target, 'references', `resolve:${ref}`, source, { ref, resolved: true }, 'DERIVED');
-    else { addNode(doc, 'api_schema_reference', `unresolved/${hash(ref)}`, ref, { ref, resolved: false, pointer: decoded }, source, 'DERIVED'); addDiag('OPENAPI_LOCAL_REF_UNRESOLVED', `Local reference '${ref}' does not resolve to a discovered component.`, source?.uri ?? doc.file.path, source?.line); }
+    else { node.properties.pointer = decoded; addDiag('OPENAPI_LOCAL_REF_UNRESOLVED', `Local reference '${ref}' does not resolve to a discovered component.`, source?.uri ?? doc.file.path, source?.line); }
   }
 }
 function stringAt(doc: OpenApiDocument, root: YamlNode, path: string[]) { let current: YamlNode | undefined = root; for (const part of path) current = property(current, part); const value = scalar(current); return typeof value === 'string' ? value : undefined; }
 function valueAt(node: YamlNode, key: string) { return scalar(property(node, key)); }
 function safeValue(value: unknown, depth = 0): value is null | string | number | boolean | unknown[] | Record<string, unknown> { if (depth > 32) return false; if (value === null || typeof value === 'string' || typeof value === 'boolean') return true; if (typeof value === 'number') return Number.isFinite(value); if (Array.isArray(value)) return value.length <= 10_000 && value.every((item) => safeValue(item, depth + 1)); if (value && typeof value === 'object') { const entries = Object.entries(value); return entries.length <= 10_000 && entries.every(([key, item]) => key.length <= 1024 && safeValue(item, depth + 1)); } return false; }
-function arrayAt(node: YamlNode, key: string) { const value = property(node, key); if (!value || !('items' in value) || !Array.isArray((value as { items?: unknown }).items)) return undefined; const result = (value as { items: YamlNode[] }).items.map((item) => scalar(item)); return result.length <= 256 && result.every((item) => typeof item === 'string') ? result : undefined; }
+function arrayAt(node: YamlNode, key: string) { const value = property(node, key); if (!value) return undefined; if (!('items' in value) || !Array.isArray((value as { items?: unknown }).items)) throw new Error(`OpenAPI '${key}' must be a string array.`); const result = (value as { items: YamlNode[] }).items.map((item) => scalar(item)); if (result.length > 256 || result.some((item) => typeof item !== 'string')) throw new Error(`OpenAPI string array '${key}' is invalid or exceeds 256 items.`); return result as string[]; }
 function safeProperties(node: YamlNode) { const value = node.toJSON(); const allowed = new Set(['type', 'format', 'description', 'title', 'nullable', 'deprecated', 'readOnly', 'writeOnly', 'enum', 'required', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems', 'uniqueItems', 'additionalProperties', 'name', 'in', 'style', 'explode', 'allowEmptyValue', 'allowReserved', 'contentType']); return value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([key, item]) => allowed.has(key) && safeValue(item) && (key !== 'additionalProperties' || typeof item === 'boolean'))) : {}; }
 function cleanProperties(value: Record<string, unknown>) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && safeValue(item))); }
 function escapePointer(value: string) { return value.replace(/~/g, '~0').replace(/\//g, '~1'); }
