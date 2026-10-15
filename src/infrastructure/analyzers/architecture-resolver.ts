@@ -55,23 +55,29 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
+  const evidenceIds = new Set<string>();
+  const issueIds = new Set<string>();
   // The resolver works only from bounded projections of the supplied generations.
   const endpointNodes = (generation: ArchitectureInputGeneration | undefined) => (generation?.nodes ?? []).filter((node) => node.kind === 'api_endpoint');
-  const fastEndpoints = endpointNodes(sources.fastApi).slice(0, config.maxEndpoints);
-  const specEndpoints = endpointNodes(sources.openApi).slice(0, config.maxEndpoints);
-  if (endpointNodes(sources.fastApi).length > config.maxEndpoints || endpointNodes(sources.openApi).length > config.maxEndpoints) diagnostics.push({ code: 'ARCHITECTURE_ENDPOINT_LIMIT', severity: 'warning', message: `Architecture endpoint input exceeded maxEndpoints (${config.maxEndpoints}); remaining endpoints were skipped.` });
+  const allFastEndpoints = endpointNodes(sources.fastApi);
+  const allSpecEndpoints = endpointNodes(sources.openApi);
+  const fastEndpoints = allFastEndpoints.slice(0, config.maxEndpoints);
+  const specEndpoints = allSpecEndpoints.slice(0, Math.max(0, config.maxEndpoints - fastEndpoints.length));
+  if (allFastEndpoints.length + allSpecEndpoints.length > fastEndpoints.length + specEndpoints.length) diagnostics.push({ code: 'ARCHITECTURE_ENDPOINT_LIMIT', severity: 'warning', message: `Architecture endpoint input exceeded maxEndpoints (${config.maxEndpoints}); remaining endpoints were skipped.` });
+  const openApiEndpointIds = new Set(specEndpoints.map(({ id }) => id));
   const pushMatch = (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => {
     const id = ids.edge(sources.workspaceId, fast.id, spec.id, `architecture_${method}`);
     if (edges.some((item) => item.id === id)) return;
     edges.push({ id, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: spec.id, kind: `architecture_${method}`, properties: { confidence } });
     const fastSource = evidenceFor(sources.fastApi, fast.id);
     const specSource = evidenceFor(sources.openApi, spec.id);
-    evidence.push({
+    const item: AnalysisEvidence = {
       id: ids.node(id, 'evidence:edge', `architecture.${method}`), subjectKind: 'edge', subjectId: id, level,
       type: `architecture.${method}`, confidence,
       provenance: { sources: [sourceProvenance(sources.fastApi, fastSource), sourceProvenance(sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`),
-    });
+    };
+    if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
   };
   const unmatchedFast = new Map(fastEndpoints.map((node) => [node.id, node]));
   const unmatchedSpec = new Map(specEndpoints.map((node) => [node.id, node]));
@@ -81,15 +87,40 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id);
     pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1);
   }
-  matchUnique(unmatchedFast, unmatchedSpec, (node) => stringProperty(node, 'operationId'), 'operation_id', pushMatch);
+  matchUnique(unmatchedFast, unmatchedSpec, (node) => stringProperty(node, 'operationId'), 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
+    for (const endpoint of candidates) addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.');
+  });
   if (config.allowPathShapeInference) matchUnique(unmatchedFast, unmatchedSpec, (node) => {
     const namespace = stringProperty(node, 'namespace'); const method = stringProperty(node, 'method'); const shape = stringProperty(node, 'pathShape');
     return namespace && method && shape ? `${namespace}\u0000${method}\u0000${shape}` : undefined;
-  }, 'path_shape', pushMatch, 'INFERRED', 0.8);
+  }, 'path_shape', pushMatch, 'INFERRED', 0.8, (kind, candidates) => {
+    for (const endpoint of candidates) addIssue(endpoint, kind, 'Path-shape candidates are ambiguous; no match was inferred.');
+  });
+  if (sources.fastApi && sources.openApi) {
+    for (const endpoint of unmatchedFast.values()) addIssue(endpoint, 'unresolved', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
+    for (const endpoint of unmatchedSpec.values()) addIssue(endpoint, 'unresolved', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
+  }
+  function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved', message: string) {
+    const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
+    if (issueIds.has(id)) return;
+    issueIds.add(id);
+    nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
+    const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
+    edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: endpoint.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: `ARCHITECTURE_${kind.toUpperCase()}` } });
+    diagnostics.push({ code: `ARCHITECTURE_${kind.toUpperCase()}`, severity: kind === 'ambiguous' ? 'warning' : 'info', message, detail: { endpointId: endpoint.id } });
+    const input = openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi;
+    const source = evidenceFor(input, endpoint.id);
+    const item: AnalysisEvidence = {
+      id: ids.node(id, 'evidence:node', `architecture.${kind}`), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: `architecture.${kind}`,
+      provenance: { sources: [sourceProvenance(input, source)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
+      inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`), detail: message,
+    };
+    if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
+  }
   return { nodes, edges, evidence, diagnostics, inputGenerations };
 }
 
-function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => void, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1) {
+function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => void, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
   const group = (nodes: Iterable<GraphNode>) => {
     const groups = new Map<string, GraphNode[]>();
     for (const node of nodes) { const key = keyOf(node); if (key) groups.set(key, [...(groups.get(key) ?? []), node]); }
@@ -98,7 +129,10 @@ function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>,
   const left = group(fast.values()); const right = group(spec.values());
   for (const [key, candidates] of left) {
     const targets = right.get(key);
-    if (candidates.length !== 1 || targets?.length !== 1) continue;
+    if (candidates.length !== 1 || targets?.length !== 1) {
+      if (targets?.length) ambiguous?.('ambiguous', [...candidates, ...targets]);
+      continue;
+    }
     add(candidates[0]!, targets[0]!, method, level, confidence);
     fast.delete(candidates[0]!.id); spec.delete(targets[0]!.id);
   }
