@@ -113,6 +113,90 @@ export class GraphStore implements ArchitectureInputProvider {
     const edges = (this.db.prepare(`${projectedEdgesSql(where)}`).all(...edgeParams) as any[]).filter((e) => allowed.has(e.source_id) && allowed.has(e.target_id));
     return { nodes: nodes.map((node) => this.parseContributionNode(node)), edges: edges.map((edge) => this.parseContributionEdge(edge)) };
   }
+  workspaceGraphPage(query: import('../../application/workspace-query-service.js').WorkspaceGraphQuery, cursor?: { offset?: number; snapshot?: string }) {
+    const read = this.db.transaction((input: typeof query, pageCursor?: typeof cursor) => {
+      const ids = input.workspaces; const placeholders = ids.map(() => '?').join(',');
+      const workspaceRows = this.db.prepare(`SELECT id,name FROM workspaces WHERE id IN (${placeholders}) ORDER BY id`).all(...ids) as Array<{ id: string; name: string }>;
+      const known = new Set(workspaceRows.map((item) => item.id));
+      const missing = ids.filter((id) => !known.has(id));
+      if (missing.length) throw new Error(`WORKSPACE_NOT_FOUND:${missing.join(',')}`);
+      const active = this.db.prepare(`SELECT a.workspace_id,a.analyzer_id,a.generation_id FROM active_analysis_generations a WHERE a.workspace_id IN (${placeholders}) ORDER BY a.workspace_id,a.analyzer_id`).all(...ids) as Array<{ workspace_id: string; analyzer_id: string; generation_id: number }>;
+      const generations = active.map((item) => ({ workspaceId: item.workspace_id, analyzerId: item.analyzer_id, generationId: Number(item.generation_id) }));
+      const snapshotId = createHash('sha256').update(JSON.stringify({ workspaces: workspaceRows.map(({ id }) => id), generations })).digest('base64url');
+      if ((input.snapshot !== undefined && input.snapshot !== snapshotId) || (pageCursor?.snapshot !== undefined && pageCursor.snapshot !== snapshotId)) throw new Error('WORKSPACE_GRAPH_SNAPSHOT_CHANGED');
+      const whereNode = `WHERE a.workspace_id IN (${placeholders})`;
+      const nodeQueryBase = projectedNodesSql(whereNode, false);
+      const edgeQueryBase = projectedEdgesSql(whereNode, false);
+      let rows: any[] = []; let edgeRows: any[] = []; let hasMore = false; let nextOffset: number | undefined; let cursorValid = true;
+      const offset = pageCursor?.offset ?? 0;
+      if (input.mode === 'roots' || input.mode === 'search') {
+        const filters: string[] = [];
+        const args: unknown[] = [...ids];
+        if (input.kind) { filters.push('p.kind=?'); args.push(input.kind); }
+        if (input.mode === 'search') { filters.push("p.label LIKE ? ESCAPE '\\'"); args.push(`%${escapeLike(input.q!)}%`); }
+        if (input.mode === 'roots') {
+          filters.push(`NOT EXISTS (SELECT 1 FROM (${edgeQueryBase}) pe JOIN (${nodeQueryBase}) src ON src.workspace_id=pe.workspace_id AND src.id=pe.source_id WHERE pe.workspace_id=p.workspace_id AND pe.kind='contains' AND pe.target_id=p.id)`);
+          args.push(...ids, ...ids);
+        }
+        const filtered = `SELECT * FROM (${nodeQueryBase}) p ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}`;
+        rows = this.db.prepare(`${filtered} ORDER BY p.workspace_id,p.label,p.id LIMIT ? OFFSET ?`).all(...args, input.limit + 1, offset) as any[];
+        hasMore = rows.length > input.limit; rows = rows.slice(0, input.limit);
+        cursorValid = offset === 0 || rows.length > 0;
+        if (hasMore) nextOffset = offset + rows.length;
+      } else {
+        const targetNode = this.db.prepare(`SELECT * FROM (${nodeQueryBase}) p WHERE p.id=? LIMIT 1`).get(...ids, input.node) as any;
+        if (!targetNode) throw new Error('WORKSPACE_GRAPH_NODE_NOT_FOUND');
+        const clauses = input.mode === 'children' ? "e.source_id=? AND e.kind='contains'" : input.direction === 'outgoing' ? 'e.source_id=?' : input.direction === 'incoming' ? 'e.target_id=?' : '(e.source_id=? OR e.target_id=?)';
+        const edgeArgs: unknown[] = [...ids, ...(input.direction === 'both' && input.mode === 'neighbors' ? [input.node, input.node] : [input.node])];
+        const edgeQuery = `SELECT * FROM (${edgeQueryBase}) p WHERE ${clauses.replaceAll('e.', 'p.')}`;
+        edgeRows = this.db.prepare(`${edgeQuery} ORDER BY p.id LIMIT ? OFFSET ?`).all(...edgeArgs, input.limit + 1, offset) as any[];
+        hasMore = edgeRows.length > input.limit; edgeRows = edgeRows.slice(0, input.limit); cursorValid = offset === 0 || edgeRows.length > 0; if (hasMore) nextOffset = offset + edgeRows.length;
+        const endpointIds = [...new Set([input.node, ...edgeRows.flatMap((edge) => [edge.source_id, edge.target_id])])];
+        if (endpointIds.length > 250) throw new Error('WORKSPACE_GRAPH_LIMIT_EXCEEDED');
+        const ep = endpointIds.map(() => '?').join(',');
+        rows = endpointIds.length ? this.db.prepare(`SELECT * FROM (${nodeQueryBase}) p WHERE p.id IN (${ep}) ORDER BY p.workspace_id,p.label,p.id LIMIT 251`).all(...ids, ...endpointIds) as any[] : [targetNode];
+      }
+      if (rows.length > 250 || edgeRows.length > 200) throw new Error('WORKSPACE_GRAPH_LIMIT_EXCEEDED');
+      const nodeIds = rows.map((item) => item.id); const edgeIds = edgeRows.map((item) => item.id);
+      const subjectTerms = [...nodeIds.map((id) => ['node', id] as const), ...edgeIds.map((id) => ['edge', id] as const)];
+      const evidenceItems: any[] = [];
+      const evidenceCounts = new Map<string, number>();
+      let evidenceBytes = 0;
+      if (subjectTerms.length) {
+        for (const [subjectKind, subjectId] of subjectTerms) {
+          const node = subjectKind === 'node' ? rows.find((row) => row.id === subjectId) : undefined;
+          const edge = subjectKind === 'edge' ? edgeRows.find((row) => row.id === subjectId) : undefined;
+          const contribution = node ?? edge;
+          if (input.includeEvidence) {
+            const found = this.db.prepare('SELECT id,generation_id,subject_kind,subject_id,level,length(CAST(payload_json AS BLOB)) AS payload_bytes FROM evidence WHERE generation_id=? AND subject_kind=? AND subject_id=? ORDER BY id LIMIT 1001').all(contribution.generation_id, subjectKind, subjectId) as any[];
+            evidenceCounts.set(`${subjectKind}:${subjectId}`, found.length);
+            evidenceBytes += found.reduce((sum, item) => sum + Number(item.payload_bytes), 0);
+            if (evidenceBytes > 1_048_576) throw new Error('WORKSPACE_GRAPH_LIMIT_EXCEEDED');
+            evidenceItems.push(...found.map((item) => {
+              const payloadRow = this.db.prepare('SELECT payload_json FROM evidence WHERE generation_id=? AND id=? AND subject_kind=? AND subject_id=? AND level=?').get(item.generation_id, item.id, item.subject_kind, item.subject_id, item.level) as { payload_json: string } | undefined;
+              if (!payloadRow) throw new Error('WORKSPACE_GRAPH_EVIDENCE_CHANGED');
+              const payload = payloadRow.payload_json;
+              return { ...JSON.parse(payload), id: item.id, subjectKind: item.subject_kind, subjectId: item.subject_id, level: item.level, analyzerId: contribution.analyzer_id, generationId: Number(item.generation_id) };
+            }));
+            if (evidenceItems.length > 1000) throw new Error('WORKSPACE_GRAPH_LIMIT_EXCEEDED');
+          } else {
+            const count = this.db.prepare('SELECT COUNT(*) AS count FROM evidence WHERE generation_id=? AND subject_kind=? AND subject_id=?').get(contribution.generation_id, subjectKind, subjectId) as { count: number };
+            evidenceCounts.set(`${subjectKind}:${subjectId}`, Number(count.count));
+          }
+        }
+      }
+      const propertyBytes = [...rows, ...edgeRows].reduce((sum, item) => sum + Number(item.property_bytes), 0);
+      if (propertyBytes > 1_048_576) throw new Error('WORKSPACE_GRAPH_LIMIT_EXCEEDED');
+      for (const item of rows) item.properties_json = (this.db.prepare('SELECT properties_json FROM node_contributions WHERE generation_id=? AND id=?').get(item.generation_id, item.id) as { properties_json: string }).properties_json;
+      for (const item of edgeRows) item.properties_json = (this.db.prepare('SELECT properties_json FROM edge_contributions WHERE generation_id=? AND id=?').get(item.generation_id, item.id) as { properties_json: string }).properties_json;
+      const evBy = new Map<string, any[]>(); for (const item of evidenceItems) evBy.set(`${item.subjectKind}:${item.subjectId}`, [...(evBy.get(`${item.subjectKind}:${item.subjectId}`) ?? []), item]);
+      const project = (item: any, subjectKind: string) => { const ev = evBy.get(`${subjectKind}:${item.id}`) ?? []; return { id: item.id, workspaceId: item.workspace_id, ...(subjectKind === 'node' ? { kind: item.kind, label: item.label } : { sourceId: item.source_id, targetId: item.target_id, kind: item.kind }), properties: JSON.parse(item.properties_json), analyzerId: item.analyzer_id, generationId: Number(item.generation_id), level: item.effective_level, evidenceCount: evidenceCounts.get(`${subjectKind}:${item.id}`) ?? 0, ...(input.includeEvidence ? { evidence: ev } : {}) }; };
+      const nodes = rows.map((item) => project(item, 'node'));
+      const edges = edgeRows.map((item) => project(item, 'edge'));
+      return { snapshotId, workspaces: workspaceRows, generations, rootIds: input.mode === 'roots' || input.mode === 'search' ? nodes.map((node) => node.id) : [input.node!], nodes, edges, hasMore, cursorValid, ...(nextOffset !== undefined ? { nextOffset } : {}) };
+    });
+    return read(query, cursor);
+  }
   node(nodeId: string): GraphNode | undefined {
     const row = this.db.prepare(`${projectedNodesSql('')} AND id=? ORDER BY analyzer_id LIMIT 1`).get(nodeId) as any;
     return row ? this.parseContributionNode(row) : undefined;
@@ -416,10 +500,11 @@ function assertEvidence(evidence: Evidence) {
 function evidenceId(workspaceId: string, analyzerId: string, subjectKind: 'node' | 'edge', subjectId: string, evidence: Evidence, index: number) {
   return evidence.id ?? createHash('sha256').update(JSON.stringify([workspaceId, analyzerId, subjectKind, subjectId, evidence, index])).digest('hex').slice(0, 32);
 }
+function escapeLike(value: string) { return value.replace(/[\\%_]/g, (character) => `\\${character}`); }
 
-function projectedNodesSql(where: string) {
+function projectedNodesSql(where: string, includeProperties = true) {
   return `WITH contribution_levels AS (
-    SELECT n.*, a.analyzer_id,
+      SELECT n.id,n.workspace_id,n.kind,n.label,n.generation_id,${includeProperties ? 'n.properties_json,' : 'length(CAST(n.properties_json AS BLOB)) AS property_bytes,'} a.analyzer_id,
       CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DIRECT') THEN 'DIRECT'
            WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=n.generation_id AND ev.subject_kind='node' AND ev.subject_id=n.id AND ev.level='DERIVED') THEN 'DERIVED'
            ELSE 'INFERRED' END AS effective_level
@@ -430,9 +515,9 @@ function projectedNodesSql(where: string) {
   ) SELECT * FROM ranked_nodes WHERE contribution_rank=1`;
 }
 
-function projectedEdgesSql(where: string) {
+function projectedEdgesSql(where: string, includeProperties = true) {
   return `WITH contribution_levels AS (
-    SELECT e.*, a.analyzer_id,
+      SELECT e.id,e.workspace_id,e.source_id,e.target_id,e.kind,e.generation_id,${includeProperties ? 'e.properties_json,' : 'length(CAST(e.properties_json AS BLOB)) AS property_bytes,'} a.analyzer_id,
       CASE WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DIRECT') THEN 'DIRECT'
            WHEN EXISTS (SELECT 1 FROM evidence ev WHERE ev.generation_id=e.generation_id AND ev.subject_kind='edge' AND ev.subject_id=e.id AND ev.level='DERIVED') THEN 'DERIVED'
            ELSE 'INFERRED' END AS effective_level
