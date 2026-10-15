@@ -108,7 +108,7 @@ function selectRoots(snapshot: DatabaseSchemaSnapshot, query: DatabaseSchemaQuer
     if (node.kind !== kind) return false;
     const p = node.properties;
     if (query.namespace !== undefined && p.databaseNamespace !== query.namespace) return false;
-    if (query.schema !== undefined && (p.schema ?? '') !== query.schema) return false;
+    if (query.schema !== undefined && (query.schema === '' ? p.schema !== null && p.schema !== undefined : p.schema !== query.schema)) return false;
     if (query.table !== undefined && p.tableName !== query.table) return false;
     if (query.model !== undefined) {
       const candidate = (owner: GraphNode) => owner.kind === 'sqlalchemy_model' && (owner.properties.qualifiedName === query.model || `${String(owner.properties.module)}.${String(owner.properties.qualifiedName)}` === query.model);
@@ -124,7 +124,7 @@ function selectRoots(snapshot: DatabaseSchemaSnapshot, query: DatabaseSchemaQuer
 function rootSortKey(node: GraphNode, root: 'table' | 'model') {
   const p = node.properties;
   return root === 'table'
-    ? [String(p.databaseNamespace ?? ''), String(p.schema ?? ''), String(p.tableName ?? ''), node.id]
+    ? [String(p.databaseNamespace ?? ''), p.schema === null || p.schema === undefined ? 0 : 1, String(p.schema ?? ''), String(p.tableName ?? ''), node.id]
     : [String(p.databaseNamespace ?? ''), String(p.module ?? ''), String(p.qualifiedName ?? ''), node.id];
 }
 function buildClosure(snapshot: DatabaseSchemaSnapshot, roots: GraphNode[], rootKind: 'table' | 'model') {
@@ -211,5 +211,5 @@ function relevantDiagnostics(items: StoredAnalysisDiagnostic[], nodes: GraphNode
   const uris = new Set(evidence.filter((item) => subjects.has(`${item.subjectKind}:${item.subjectId}`) && item.uri).map((item) => item.uri!));
   return items.filter((item) => !item.uri || uris.has(item.uri)).map(({ sequence: _sequence, generationId: _generationId, ...item }) => item);
 }
-function compare(a: string[], b: string[]) { for (let index = 0; index < Math.min(a.length, b.length); index++) { if (a[index]! < b[index]!) return -1; if (a[index]! > b[index]!) return 1; } return a.length - b.length; }
+function compare(a: Array<string | number>, b: Array<string | number>) { for (let index = 0; index < Math.min(a.length, b.length); index++) { if (a[index]! < b[index]!) return -1; if (a[index]! > b[index]!) return 1; } return a.length - b.length; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
