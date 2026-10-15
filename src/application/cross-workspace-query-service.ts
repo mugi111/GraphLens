@@ -144,7 +144,7 @@ function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWor
     if (!edgeAllowlist.has(edge.kind as ArchitectureEdgeKind)) continue;
     const items = sourceEvidence.get(`${workspace.workspace.id}\0edge\0${edge.id}`) ?? [];
     const id = systemEdgeKey(workspace.workspace.id, edge.id);
-    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: dominant(items), properties: edge.properties, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
+    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: edge.level ?? dominant(items), properties: edge.properties, contributors: edge.contributors, propertySources: edge.propertySources, propertyConflicts: edge.propertyConflicts, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
   }
   for (const node of resolution.nodes) nodes.set(node.scope === 'global' ? `global\0${node.id}` : systemNodeKey(node.workspaceId, node.id), node);
   for (const edge of resolution.edges) {
