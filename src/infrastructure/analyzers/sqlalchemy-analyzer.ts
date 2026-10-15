@@ -232,7 +232,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
       if (!destination) {
         destination = unresolvedForeignKeys.get(reference.target);
         if (!destination) {
-          destination = addNode(databaseNamespace, 'sqlalchemy_unresolved_foreign_key', reference.target, `unresolved-foreign-key/${reference.target}`, { databaseNamespace, target: reference.target, resolved: false, ambiguous: target.ambiguous }, reference.sourceEvidence, 'sqlalchemy.unresolved_foreign-key');
+          destination = addNode(databaseNamespace, ambiguousTarget ? 'sqlalchemy_ambiguous_foreign_key' : 'sqlalchemy_unresolved_foreign_key', reference.target, `unresolved-foreign-key/${reference.target}`, { databaseNamespace, target: reference.target, resolved: false, ambiguous: ambiguousTarget }, reference.sourceEvidence, 'sqlalchemy.unresolved_foreign-key');
           unresolvedForeignKeys.set(reference.target, destination);
         }
         diagnostics.push(sourceDiagnostic(ambiguousTarget ? 'SQLALCHEMY_AMBIGUOUS_FOREIGN_KEY' : 'SQLALCHEMY_UNRESOLVED_FOREIGN_KEY', `${ambiguousTarget ? 'Ambiguous' : 'Unresolved'} foreign key target '${reference.target}'.`, reference.sourceEvidence));
