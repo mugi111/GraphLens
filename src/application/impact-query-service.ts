@@ -35,7 +35,7 @@ export class ImpactQueryService {
       if (error instanceof CrossWorkspaceResolutionError && error.code === 'CROSS_WORKSPACE_LIMIT_EXCEEDED') throw tooLarge();
       throw new ImpactQueryError('IMPACT_QUERY_FAILED', 'Could not resolve the cross-workspace architecture graph.', 500);
     }
-    const graph = confirmSourceReferences(buildGraph(snapshot, resolution.nodes, resolution.edges, query.includeEvidence), this.store);
+    const graph = buildGraph(snapshot, resolution.nodes, resolution.edges, query.includeEvidence);
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));
     const target = byId.get(query.node);
     if (!target) throw new ImpactQueryError('IMPACT_TARGET_NOT_FOUND', `Impact target '${query.node}' was not found in the selected workspaces.`, 404);
@@ -51,8 +51,21 @@ export class ImpactQueryService {
     const findings = attachedFindings(graph.nodes, graph.edges, new Set(result.nodes.map((node) => node.id)));
     const nodes = [...new Map([...result.nodes, ...findings].map((node) => [node.id, node])).values()].sort((a, b) => cmp([a.id], [b.id]));
     if (nodes.length > query.limit || nodes.length > 2000 || result.edges.length > 4000 || result.paths.length > 2000) throw tooLarge();
-    const evidence = query.includeEvidence ? [...graph.evidence.filter((item) => item.subjectKind === 'node' && nodes.some((node) => node.id === item.subjectId)), ...result.edges.flatMap((edge) => edge.evidence)] : undefined;
+    let outputEdges = result.edges;
+    let evidence = query.includeEvidence ? [...graph.evidence.filter((item) => item.subjectKind === 'node' && nodes.some((node) => node.id === item.subjectId)), ...result.edges.flatMap((edge) => edge.evidence)] : undefined;
     if (evidence && evidence.reduce((sum, item) => sum + 1 + item.sources.reduce((n, source) => n + source.evidenceIds.length, 0), 0) > 5000) throw tooLarge();
+    if (evidence) {
+      const edgeEvidenceCount = result.edges.reduce((count, edge) => count + edge.evidence.length, 0);
+      const confirmed = confirmSourceReferences(evidence, this.store, 5000);
+      evidence = confirmed.slice(0, confirmed.length - edgeEvidenceCount);
+      const confirmedEdges = confirmed.slice(confirmed.length - edgeEvidenceCount);
+      let offset = 0;
+      outputEdges = result.edges.map((edge) => {
+        const edgeEvidence = confirmedEdges.slice(offset, offset + edge.evidence.length);
+        offset += edge.evidence.length;
+        return { ...edge, evidence: edgeEvidence };
+      });
+    }
     const diagnostics = query.includeDiagnostics ? snapshot.generations.flatMap((workspace) => workspace.diagnostics).sort((a, b) => cmp([a.code ?? '', a.message, a.uri ?? ''], [b.code ?? '', b.message, b.uri ?? ''])) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const impacted = result.nodes.filter((node) => node.id !== target.id);
@@ -70,7 +83,7 @@ export class ImpactQueryService {
       target,
       summary: { impactedNodeCount: impacted.length, edgeCount: result.edges.length, workspaceCount, maxDistance: Math.max(0, ...result.distances.values()), inferredPathCount: result.paths.filter((path) => path.level === 'INFERRED').length },
       nodes: nodes.map((node) => ({ ...node, distance: result.distances.get(node.id) ?? 0, impactRole: node.id === target.id ? 'target' : result.roles.get(node.id) ?? 'dependency' })),
-      edges: result.edges,
+      edges: outputEdges,
       paths: result.paths,
       findings,
       ...(evidence ? { evidence } : {}),
@@ -260,8 +273,9 @@ function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, su
     sourceLocationsUnavailable,
   };
 }
-function confirmSourceReferences(graph: ReturnType<typeof buildGraph>, store: GraphStore): ReturnType<typeof buildGraph> {
+function confirmSourceReferences(items: readonly CrossWorkspaceEvidence[], store: GraphStore, maxReferenceChecks: number): CrossWorkspaceEvidence[] {
   const availability = new Map<string, boolean>();
+  let referenceChecks = 0;
   const confirm = (item: CrossWorkspaceEvidence): CrossWorkspaceEvidence => {
     const requestedCount = item.sourceReferences?.reduce((count, source) => count + source.evidenceIds.length, 0) ?? 0;
     let confirmedCount = 0;
@@ -270,6 +284,7 @@ function confirmSourceReferences(graph: ReturnType<typeof buildGraph>, store: Gr
         const key = `${source.workspaceId}\0${source.analyzerId}\0${source.generationId}\0${evidenceId}`;
         const cached = availability.get(key);
         if (cached !== undefined) return cached;
+        if (++referenceChecks > maxReferenceChecks) throw tooLarge();
         const row = store.activeSourceEvidence(source.workspaceId, source.analyzerId, source.generationId, evidenceId);
         let available = false;
         if (row && !row.payloadTooLarge) {
@@ -285,9 +300,7 @@ function confirmSourceReferences(graph: ReturnType<typeof buildGraph>, store: Gr
     const unavailable = item.sourceLocationsUnavailable === true || (hasProvenanceEvidence && (confirmedCount < requestedCount || !sourceReferences?.length));
     return { ...item, sourceReferences, sourceLocationsUnavailable: unavailable };
   };
-  const graphEvidence = graph.evidence.map(confirm);
-  const graphEdges = graph.edges.map((edge) => ({ ...edge, evidence: edge.evidence.map(confirm) }));
-  return { ...graph, evidence: graphEvidence, edges: graphEdges };
+  return items.map(confirm);
 }
 function dominant(items: readonly AnalysisEvidence[]): SystemNode['level'] { return items.some((item) => item.level === 'INFERRED') ? 'INFERRED' : items.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'DIRECT'; }
 function cmp(a: Array<string | number>, b: Array<string | number>) { for (let i = 0; i < Math.min(a.length, b.length); i++) { const value = String(a[i]).localeCompare(String(b[i])); if (value) return value; } return a.length - b.length; }
