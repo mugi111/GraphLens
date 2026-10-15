@@ -56,18 +56,6 @@ Plugins are exact-version npm packages stored under `.graphlens/plugins/<plugin-
 
 The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation.
 
-### CodeGraph import investigation
-
-`colbymchenry/codegraph` is the leading candidate for a future read-only import because its source exposes a Graph Store API. MCP `explore`/`files` evidence is insufficient to enumerate a complete graph, so those tools alone cannot support an import. The source inspected was commit `8f1f842b5b828175992d2ce2cdf673b955b2cce9`; its `package.json` reports `@colbymchenry/codegraph` version `1.6.2`, MIT license, and Node.js `>=20 <25`. These are source-repository facts, not independently verified published npm provenance.
-
-This remains investigation only; GraphLens does not import CodeGraph yet. Before implementation, establish:
-
-- The canonical workspace/database identity and a way to enumerate every node, file, and edge kind. `getAllNodes()` and `getAllFiles()` return unbounded arrays, and no edge-pagination API is confirmed. Do not call them until a safe pre-read count/byte gate or bounded query is confirmed; do not assume retrieval can be paginated.
-- Stable identity and stability guarantees for imported facts; read-only transaction semantics; and whether GraphLens launch writes to CodeGraph or triggers upstream indexing.
-- Writer completion and atomicity, including how to know an index is complete before reading it.
-- Exact compatibility with GraphLens's Node.js `>=20.11` requirement. The inspected SQLite adapter declares `>=22.5`, which does not establish compatibility across GraphLens's supported range.
-- A bounded, all-or-fail import that preserves the active GraphLens generation on failure, carries inferred provenance, and namespaces unknown edge kinds without dropping them.
-
 ### Python source index
 
 `builtin.python-source` statically scans Python files below a registered workspace. It uses the bundled Lezer grammar in the Node.js process and never starts Python or imports project code. The index includes files, modules, classes, synchronous and asynchronous functions, decorators, class bases, function parameters and annotations, assignments, structured expression references, calls, containment, and import relationships. Calls retain dotted callees, keyword names, and argument literal kinds without storing source snippets. Imports are resolved only to files and declarations found in the same scan; other references appear as unresolved import nodes, while duplicate `.py` and `.pyi` candidates are marked ambiguous. Syntax recovery produces warning diagnostics and omits facts intersecting damaged syntax.
@@ -130,7 +118,7 @@ The read-only `architectureInputProvider` on analyzer context returns only reque
 
 ## CodeGraph MCP capability
 
-GraphLens does not infer a complete graph from CodeGraph search or traversal results. Publicly described MCP behavior alone does not establish that a full graph enumeration/export operation exists. On startup GraphLens sends the standard MCP stdio `initialize` and `tools/list` requests to the configured server, so it can distinguish a reachable MCP server from an unavailable one:
+On startup, GraphLens probes the configured CodeGraph MCP server with standard MCP stdio `initialize` and `tools/list` requests, and lists its available tools for connection diagnostics:
 
 ```sh
 graphlens --workspace /repo \
@@ -138,24 +126,13 @@ graphlens --workspace /repo \
   --codegraph-arg --profile=local
 ```
 
-The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens currently lists available tools for diagnostics only. It does not call a search/traversal tool and does not include a custom, undocumented `--graphlens-snapshot` protocol.
-
-The status API and UI explicitly report complete enumeration as unsupported by the MCP adapter, even after a successful connection. No partial data is claimed as complete. The current investigation gate is the read-only Graph Store API described above; if that path proves unsuitable, assess a documented upstream export next, with direct storage access as the last option.
+The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens currently uses the connection and tool list for diagnostics only. It does not import CodeGraph graph snapshots, and its status and UI do not claim partial CodeGraph data is complete.
 
 For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
 
 ```sh
 npm start -- --workspace . --demo
 ```
-
-## Package development
-
-```sh
-npm run build
-npm run pack:check
-```
-
-The published package includes compiled server and web assets. `npm start` requires a preceding build when running from a checkout.
 
 ### FastAPI source analyzer
 
@@ -201,11 +178,11 @@ Architecture result revisions include the normalized resolver configuration and 
 curl 'http://127.0.0.1:4174/api/v1/architecture?workspace=<workspace-id>&root=endpoint&method=GET&path=/users&depth=2&include=evidence,diagnostics'
 ```
 
-### Cross-workspace snapshot foundation
+### Cross-workspace API contract matching
 
-The storage layer exposes a read-only `crossWorkspaceArchitectureSnapshot` operation for 2–16 unique workspace IDs. It reads each active `builtin.architecture` generation inside one SQLite read transaction and returns a deterministic SHA-256 `snapshotId` derived from the sorted workspace/generation vector. Workspace IDs that are not registered are rejected; registered workspaces without an active architecture generation are listed separately. The response contains workspace IDs and names, generation/input metadata, and ID-sorted graph facts, evidence, and diagnostics. Workspace filesystem paths are omitted from workspace metadata; graph facts and source evidence retain their original values. This is the Phase 5.1 storage contract; the HTTP API and cross-workspace resolver are added in later phases.
+GraphLens compares active `builtin.architecture` generations across 2–16 unique workspace IDs in a single read transaction. A deterministic SHA-256 snapshot ID represents the sorted workspace/generation set. Unregistered workspaces are rejected; registered workspaces without an active architecture generation are reported separately. Snapshot metadata includes workspace names and generation/input details, with graph facts, evidence, and diagnostics in ID order. Workspace filesystem paths are omitted from workspace metadata.
 
-The Phase 5.2 pure `resolveCrossWorkspace` operation accepts this snapshot and creates a system graph for shared API contracts. It matches only an exact non-default namespace, uppercase HTTP method, and exact route path. FastAPI routes are providers and OpenAPI operations are specifications, determined through their `exposes` edges. Shared contract hubs are created only when at least two workspaces contain the same key. Duplicate FastAPI providers are all retained and reported; the resolver never selects a winner. `operationId`, default namespaces, and path-shape matching are not used. Resolver limits default to 5,000 input endpoints, 2,500 shared contracts, and 10,000 output edges; configurable ceilings are 20,000, 10,000, and 40,000. Exceeding a configured limit throws without returning partial output. This is an internal contract; no HTTP endpoint is added in this phase.
+Contracts match only on an exact non-default namespace, uppercase HTTP method, and exact route path. FastAPI routes act as providers and OpenAPI operations as specifications, based on their `exposes` edges. A shared contract appears only when at least two workspaces contain the same key. Duplicate FastAPI providers are retained and reported; GraphLens does not select a winner. Matching does not use `operationId`, default namespaces, or path-shape patterns. Resolver limits default to 5,000 input endpoints, 2,500 shared contracts, and 10,000 output edges, with configurable ceilings of 20,000, 10,000, and 40,000. Exceeding a configured limit returns no partial output.
 
 ### Cross-workspace architecture query
 
