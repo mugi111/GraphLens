@@ -203,4 +203,4 @@ The same read-only query is available from the CLI and prints JSON:
 graphlens query architecture --workspaces <workspace-id-1,workspace-id-2> --root contract --namespace payments --method GET --path /payments --depth 4 --limit 25 --include evidence,diagnostics
 ```
 
-Get workspace IDs from `GET /api/v1/workspaces`. The query command reads the local `.graphlens/graphlens.sqlite` database and does not start the server or browser.
+Get workspace IDs from `GET /api/v1/workspaces`. The query command opens the existing local `.graphlens/graphlens.sqlite` database in read-only mode; it does not create the database, apply migrations, start the server, or open a browser. It reports an error if the database is missing, uninitialized, or incompatible with this GraphLens version.
