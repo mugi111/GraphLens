@@ -227,7 +227,36 @@ function isCanonicalContractId(value: string) {
   } catch { return false; }
 }
 function createEdgeIdentity(edgeId: string, endpointId: string) { return createHash('sha256').update(`${edgeId}\0${endpointId}`).digest('hex'); }
-function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence { return { id: `impact-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: items.map((item) => item.id).sort() }] }; }
+function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
+  const sourceEvidence = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  const addSource = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean) => {
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return;
+    const recorded = workspace.inputGenerations.find((input) => input.analyzerId === analyzerId && input.generationId === generationId);
+    if (!recorded) return;
+    const key = `${workspace.workspace.id}\0${analyzerId}\0${generationId}`;
+    const source = sourceEvidence.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
+    source.evidenceIds.add(evidenceId); sourceEvidence.set(key, source);
+  };
+  for (const item of items) {
+    const provenance = item.provenance;
+    if (!provenance) continue;
+    if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
+      addSource(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string');
+    } else if (Array.isArray(provenance.sources)) {
+      for (const source of provenance.sources) {
+        if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+        const value = source as Record<string, unknown>;
+        const input = workspace.inputGenerations.find((candidate) => candidate.analyzerId === value.analyzerId);
+        addSource(value.analyzerId, input?.generationId, value.evidenceId, typeof value.uri === 'string');
+      }
+    }
+  }
+  return {
+    id: `impact-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence',
+    sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: items.map((item) => item.id).sort() }],
+    sourceReferences: [...sourceEvidence.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))),
+  };
+}
 function dominant(items: readonly AnalysisEvidence[]): SystemNode['level'] { return items.some((item) => item.level === 'INFERRED') ? 'INFERRED' : items.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'DIRECT'; }
 function cmp(a: Array<string | number>, b: Array<string | number>) { for (let i = 0; i < Math.min(a.length, b.length); i++) { const value = String(a[i]).localeCompare(String(b[i])); if (value) return value; } return a.length - b.length; }
 function tooLarge() { return new ImpactQueryError('IMPACT_QUERY_TOO_LARGE', 'Impact query exceeds a hard response limit; no partial result was returned.', 422); }

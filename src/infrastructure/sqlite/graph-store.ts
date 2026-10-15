@@ -63,6 +63,24 @@ export class GraphStore implements ArchitectureInputProvider {
   workspaces(): Workspace[] { return (this.db.prepare('SELECT id,path,name FROM workspaces ORDER BY name').all() as any[]).map((r) => this.workspace(r)); }
   activeWorkspacePaths() { return this.workspaces().map((w) => w.path); }
   getWorkspace(id: string) { const r = this.db.prepare('SELECT id,path,name FROM workspaces WHERE id=?').get(id) as any; return r ? this.workspace(r) : undefined; }
+  activeSourceEvidence(workspaceId: string, analyzerId: string, generationId: number, evidenceId: string) {
+    const read = this.db.transaction(() => {
+      const exact = `FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' JOIN workspaces w ON w.id=a.workspace_id
+        JOIN evidence e ON e.generation_id=a.generation_id WHERE a.workspace_id=? AND a.analyzer_id=? AND a.generation_id=? AND e.id=?
+        AND ((e.subject_kind='node' AND EXISTS (SELECT 1 FROM node_contributions n WHERE n.generation_id=e.generation_id AND n.id=e.subject_id AND n.workspace_id=a.workspace_id))
+          OR (e.subject_kind='edge' AND EXISTS (SELECT 1 FROM edge_contributions x WHERE x.generation_id=e.generation_id AND x.id=e.subject_id AND x.workspace_id=a.workspace_id)))`;
+      const metadata = this.db.prepare(`SELECT w.id AS workspace_id,w.name,w.path,a.generation_id,e.id,e.subject_kind,e.subject_id,length(CAST(e.payload_json AS BLOB)) AS payload_bytes ${exact}`).get(workspaceId, analyzerId, generationId, evidenceId) as any;
+      if (!metadata) return undefined;
+      if (Number(metadata.payload_bytes) > 64 * 1024) return { ...metadata, payloadTooLarge: true };
+      const payload = this.db.prepare(`SELECT e.payload_json ${exact} AND length(CAST(e.payload_json AS BLOB))<=?`).get(workspaceId, analyzerId, generationId, evidenceId, 64 * 1024) as { payload_json: string } | undefined;
+      return payload ? { ...metadata, payload_json: payload.payload_json, payloadTooLarge: false } : undefined;
+    });
+    return read();
+  }
+  sourceGenerationIsActive(workspaceId: string, analyzerId: string, generationId: number): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id=? AND a.generation_id=?`).get(workspaceId, analyzerId, generationId));
+  }
   ensureWorkspaces(workspaces: Workspace[]) { const now = new Date().toISOString(); const insert = this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name'); const tx = this.db.transaction(() => workspaces.forEach((workspace) => insert.run(workspace.id, workspace.path, workspace.name, now))); tx(); }
   startRun(id: string, workspaceId?: string) { this.db.prepare('INSERT INTO sync_runs(id,workspace_id,status,message,started_at) VALUES(?,?,\'running\',\'Sync started\',?)').run(id, workspaceId ?? null, new Date().toISOString()); }
   finishRun(id: string, status: 'succeeded' | 'failed', message: string) { this.db.prepare('UPDATE sync_runs SET status=?,message=?,completed_at=? WHERE id=?').run(status, message, new Date().toISOString(), id); }

@@ -40,6 +40,8 @@ export type CrossWorkspaceEvidence = {
   level: 'DERIVED' | 'INFERRED';
   type: string;
   sources: ReadonlyArray<{ workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: readonly string[] }>;
+  /** Original file evidence resolved through the selected architecture evidence provenance and its recorded input generations. */
+  sourceReferences?: ReadonlyArray<{ workspaceId: string; analyzerId: string; generationId: number; evidenceIds: readonly string[] }>;
   detail?: string;
 };
 
