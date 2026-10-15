@@ -18,18 +18,20 @@ export async function collectSqlAlchemySource(context: AnalysisContext): Promise
 export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlchemyCollectedFile[] {
   return snapshot.parsedFiles.map(({ file, parsed }) => {
     const classes = parsed.nodes.filter((node) => node.kind === 'python_class');
+    const functions = parsed.nodes.filter((node) => node.kind === 'python_function' || node.kind === 'python_async_function');
     const assignments = parsed.nodes.filter((node) => node.kind === 'python_assignment');
     const evidenceBySubject = new Map<string, AnalysisEvidence>();
     for (const evidence of parsed.evidence) if (evidence.subjectKind === 'node') evidenceBySubject.set(evidence.subjectId, evidence);
     const owners = new Map(parsed.nodes.map((node) => [node.id, node]));
     const lexicalImports: SqlAlchemyCollectedFile['lexicalImports'] = [];
+    const pythonImports: SqlAlchemyCollectedFile['pythonImports'] = [];
     for (const imported of parsed.imports) {
-      if (imported.relativeLevel) continue;
       const owner = owners.get(imported.ownerId);
       const scope = owner?.kind === 'python_class' || owner?.kind === 'python_function' || owner?.kind === 'python_async_function' ? String(owner.properties.qualifiedName ?? '') : '';
+      pythonImports.push({ scope, fact: imported });
       const local = imported.imported ? imported.alias ?? imported.imported : imported.alias ?? imported.module.split('.')[0]!;
       const canonical = imported.imported ? `${imported.module}.${imported.imported}` : imported.module;
-      lexicalImports.push({ scope, offset: imported.startOffset, local, canonical: canonical === 'sqlalchemy' || canonical.startsWith('sqlalchemy.') ? canonical : undefined });
+      lexicalImports.push({ scope, offset: imported.startOffset, local, ...(!imported.relativeLevel && (canonical === 'sqlalchemy' || canonical.startsWith('sqlalchemy.')) ? { canonical } : {}) });
     }
     for (const assignment of assignments) {
       const target = expressionName(assignment.properties.target);
@@ -45,7 +47,7 @@ export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlche
     }
     lexicalImports.sort((a, b) => a.offset - b.offset || a.scope.localeCompare(b.scope));
     const imports = importsAt(lexicalImports, '', Number.MAX_SAFE_INTEGER);
-    return { path: file.path, imports, lexicalImports, pythonImports: parsed.imports, classes, assignments, evidenceBySubject };
+    return { path: file.path, imports, lexicalImports, pythonImports, classes, functions, assignments, evidenceBySubject };
   });
 }
 
@@ -64,7 +66,8 @@ export function importsAt(bindings: SqlAlchemyCollectedFile['lexicalImports'], s
 export function canonicalSqlAlchemyName(name: string, imports: Map<string, string>): string {
   const [head, ...tail] = name.split('.');
   const canonical = imports.get(head!);
-  return canonical ? [canonical, ...tail].join('.') : name;
+  if (canonical) return [canonical, ...tail].join('.');
+  return head === 'sqlalchemy' ? `__unbound__.${name}` : name;
 }
 
 export function localAssignmentValue(assignments: GraphNode[], targetName: string, scope = ''): GraphNode | undefined {

@@ -36,14 +36,15 @@ export type SqlAlchemyModelFact = {
   constraints: SqlAlchemyConstraintFact[];
   relationships: SqlAlchemyRelationshipFact[];
 };
-export type SqlAlchemyConstraintFact = { kind: 'primary_key' | 'unique' | 'foreign_key' | 'index'; name?: string; columns: string[]; references: string[]; sourceEvidence?: AnalysisEvidence };
-export type SqlAlchemyRelationshipFact = { name: string; target?: string; targetKind: 'class' | 'literal' | 'annotation' | 'unresolved'; sourcePath: string; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence };
+export type SqlAlchemyConstraintFact = { kind: 'primary_key' | 'unique' | 'foreign_key' | 'index'; name?: string; columns: string[]; references: string[]; resolved: boolean; sourceEvidence?: AnalysisEvidence };
+export type SqlAlchemyRelationshipFact = { name: string; target?: string; targetKind: 'class' | 'literal' | 'annotation' | 'unresolved'; sourcePath: string; sourceScope: string; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence };
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
   lexicalImports: Array<{ scope: string; offset: number; local: string; canonical?: string }>;
-  pythonImports: PythonImportFact[];
+  pythonImports: Array<{ scope: string; fact: PythonImportFact }>;
   classes: GraphNode[];
+  functions: GraphNode[];
   assignments: GraphNode[];
   evidenceBySubject: Map<string, AnalysisEvidence>;
 };
