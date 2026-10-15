@@ -98,8 +98,8 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     const parsed=parseCodeGraphQuery(new URL(c.req.url).searchParams);if('error' in parsed)return c.json({error:parsed.error,code:parsed.code},400);
     try{return c.json(codeGraphQuery.query(parsed.query));}catch(error){if(error instanceof CodeGraphQueryError)return c.json({error:error.message,code:error.code},error.status);return c.json({error:'Code graph query failed.',code:'CODE_GRAPH_QUERY_FAILED'},500);}
   });
-  app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
-  app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId'), c.req.query('workspace')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
+  app.get('/api/v1/graph', (c) => { try { return c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))); } catch (error) { if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Graph response exceeds a hard size limit; no partial result was returned.', code: 'GRAPH_QUERY_TOO_LARGE' }, 422); return c.json({ error: 'Graph query failed.', code: 'GRAPH_QUERY_FAILED' }, 500); } });
+  app.get('/api/v1/nodes/:nodeId', (c) => { try { const node = store.node(c.req.param('nodeId'), c.req.query('workspace')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); } catch (error) { if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Node response exceeds a hard size limit.', code: 'GRAPH_QUERY_TOO_LARGE' }, 422); return c.json({ error: 'Node query failed.', code: 'GRAPH_QUERY_FAILED' }, 500); } });
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', serveStatic({ path: `${webRoot}/index.html` }));
   return app;

@@ -38,28 +38,34 @@ export class ArchitectureQueryService {
     if (offset >= allRoots.length && cursor) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
     const roots = allRoots.slice(offset, offset + query.limit);
     const closure = buildClosure(snapshot, roots, query.depth);
-    if (closure.nodes.length > 2000 || closure.edges.length > 4000) throw tooLarge();
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw tooLarge();
+    let projection: ReturnType<GraphStore['projectGraph']>;
+    try { projection = this.store.projectGraph(closure.nodes, closure.edges, query.includeEvidence || query.includeDiagnostics); }
+    catch (error) { if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge(); throw error; }
+    const projectionEvidence = [...projection.nodes.flatMap((node) => node.evidence ?? []), ...projection.edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
     const nodeEvidence = new Map<string, AnalysisEvidence[]>(), edgeEvidence = new Map<string, AnalysisEvidence[]>();
-    for (const item of snapshot.evidence) {
+    for (const item of projectionEvidence) {
       const target = item.subjectKind === 'node' ? nodeEvidence : edgeEvidence;
       target.set(item.subjectId, [...(target.get(item.subjectId) ?? []), item]);
     }
     const includedCount = query.includeEvidence ? closure.nodes.reduce((n, item) => n + (nodeEvidence.get(item.id)?.length ?? 0), 0) + closure.edges.reduce((n, item) => n + (edgeEvidence.get(item.id)?.length ?? 0), 0) : 0;
     if (includedCount > 5000) throw tooLarge();
-    const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, closure.nodes, closure.edges, snapshot.evidence) : undefined;
+    const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, projection.nodes, projection.edges, projectionEvidence) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + roots.length;
     const nextCursor = nextOffset < allRoots.length ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
-    return {
+    const result = {
       workspace: snapshot.workspace,
       analysis: { ...snapshot.analysis, inputGenerations: snapshot.inputGenerations ?? [], diagnostics: diagnosticCounts(snapshot.diagnostics) },
       query: { root: query.root, ...(query.node !== undefined ? { node: query.node } : {}), ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.finding !== undefined ? { finding: query.finding } : {}), depth: query.depth },
       page: { limit: query.limit, rootCount: roots.length, totalRootCount: allRoots.length, ...(nextCursor ? { nextCursor } : {}) },
       rootIds: roots.map((node) => node.id),
-      nodes: closure.nodes.map((node) => projectNode(node, nodeEvidence.get(node.id) ?? [], query.includeEvidence)),
-      edges: closure.edges.map((edge) => projectEdge(edge, edgeEvidence.get(edge.id) ?? [], query.includeEvidence)),
+      nodes: projection.nodes.map((node) => projectNode(node, nodeEvidence.get(node.id) ?? [], query.includeEvidence)),
+      edges: projection.edges.map((edge) => projectEdge(edge, edgeEvidence.get(edge.id) ?? [], query.includeEvidence)),
       ...(diagnostics ? { diagnostics } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 3 * 1_048_576) throw tooLarge();
+    return result;
   }
 }
 
@@ -116,14 +122,14 @@ function buildClosure(snapshot: Snapshot, roots: GraphNode[], depth: number) {
   for (let cursor = 0; cursor < queue.length; cursor++) {
     const id = queue[cursor]!, d = distance.get(id)!;
     if (d >= depth) continue;
-    for (const item of adjacency.get(id) ?? []) if (!distance.has(item.id)) { distance.set(item.id, d + 1); queue.push(item.id); if (queue.length > 2000) throw tooLarge(); }
+    for (const item of adjacency.get(id) ?? []) if (!distance.has(item.id)) { distance.set(item.id, d + 1); queue.push(item.id); if (queue.length > 250) throw tooLarge(); }
   }
   const selectedEdges = snapshot.edges.filter((edge) => EDGE_ALLOWLIST.has(edge.kind) && distance.has(edge.sourceId) && distance.has(edge.targetId));
-  if (selectedEdges.length > 4000) throw tooLarge();
+  if (selectedEdges.length > 200) throw tooLarge();
   return { nodes: [...distance.keys()].map((id) => byId.get(id)!).sort((a, b) => cmp([a.kind, a.id], [b.kind, b.id])), edges: selectedEdges.sort((a, b) => cmp([a.kind, a.sourceId, a.targetId, a.id], [b.kind, b.sourceId, b.targetId, b.id])) };
 }
-function projectNode(node: GraphNode, evidence: AnalysisEvidence[], include: boolean) { const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...node, level: dominant(sorted), evidenceCount: sorted.length, ...(include ? { evidence: sorted } : {}) }; }
-function projectEdge(edge: GraphEdge, evidence: AnalysisEvidence[], include: boolean) { const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...edge, level: dominant(sorted), evidenceCount: sorted.length, ...(include ? { evidence: sorted } : {}) }; }
+function projectNode(node: GraphNode, evidence: AnalysisEvidence[], include: boolean) { const { evidence: _evidence, ...base } = node; const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...base, level: node.level ?? dominant(sorted), evidenceCount: node.evidenceCount ?? sorted.length, ...(include ? { evidence: sorted } : {}) }; }
+function projectEdge(edge: GraphEdge, evidence: AnalysisEvidence[], include: boolean) { const { evidence: _evidence, ...base } = edge; const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...base, level: edge.level ?? dominant(sorted), evidenceCount: edge.evidenceCount ?? sorted.length, ...(include ? { evidence: sorted } : {}) }; }
 function dominant(items: AnalysisEvidence[]): 'DIRECT' | 'DERIVED' | 'INFERRED' { return items.some((x) => x.level === 'DIRECT') ? 'DIRECT' : items.some((x) => x.level === 'DERIVED') ? 'DERIVED' : 'INFERRED'; }
 function relevantDiagnostics(items: StoredAnalysisDiagnostic[], nodes: GraphNode[], edges: GraphEdge[], evidence: AnalysisEvidence[]): AnalysisDiagnostic[] {
   const ids = new Set([...nodes.map((n) => n.id), ...edges.map((e) => e.id)]);
