@@ -65,7 +65,6 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
   const rootVariables = new Set<string>();
   const rootClasses = new Set<string>();
   const abstractClasses = new Set<string>();
-  const registryVariables = new Set<string>();
   for (const file of files) {
     for (const assignment of file.assignments) {
       const target = expressionName(assignment.properties.target);
@@ -74,10 +73,8 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const directCall = asExpression(assignment.properties.value);
       const imports = importsFor(file, String(assignment.properties.scope ?? ''), file.evidenceBySubject.get(assignment.id)?.startOffset);
       const canonicalValue = directCall?.kind === 'call' && typeof directCall.name === 'string' ? canonicalSqlAlchemyName(directCall.name, imports) : undefined;
-      if (canonicalValue === 'sqlalchemy.orm.registry') registryVariables.add(`${moduleForAssignment(assignment)}.${target}`);
       if (canonicalValue === 'sqlalchemy.orm.declarative_base' || canonicalValue === 'sqlalchemy.ext.declarative.declarative_base') rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
-      if (valueName?.endsWith('.generate_base') && registryVariables.has(`${moduleForAssignment(assignment)}.${valueName.slice(0, -'.generate_base'.length)}`)) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
-      if (directCall && isRegistryGenerateBase(directCall, imports, registryVariables, moduleForAssignment(assignment), calls(assignment))) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
+      if (directCall && isRegistryGenerateBase(directCall, file, String(assignment.properties.scope ?? ''), file.evidenceBySubject.get(assignment.id)?.startOffset ?? 0)) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
       if (canonicalValue === 'sqlalchemy.orm.declarative_base' || canonicalValue === 'sqlalchemy.ext.declarative.declarative_base') rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
     }
     for (const klass of file.classes) {
@@ -86,7 +83,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const decorators = Array.isArray(klass.properties.decorators) ? klass.properties.decorators as Array<{name?: string}> : [];
       const isMappedDecorator = decorators.some(({ name }) => {
         if (!name) return false;
-        return [...registryVariables].some((registry) => registry === `${String(klass.properties.module)}.${name.split('.')[0]}` && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!));
+        return isRegistryMappedDecorator(file, name, String(klass.properties.qualifiedName ?? ''), file.evidenceBySubject.get(klass.id)?.startOffset ?? 0);
       });
       if (!tableAssignment && !isMappedDecorator && classBases(klass).some((base) => canonicalSqlAlchemyName(base, importsFor(file, String(klass.properties.qualifiedName ?? ''), file.evidenceBySubject.get(klass.id)?.startOffset)) === 'sqlalchemy.orm.DeclarativeBase')) rootClasses.add(key);
     }
@@ -102,7 +99,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const bases = classBases(item.node);
       const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
       const decorators = Array.isArray(item.node.properties.decorators) ? item.node.properties.decorators as Array<{name?: string}> : [];
-      const mappedDecorator = decorators.some(({ name }) => !!name && [...registryVariables].some((registry) => registry === `${item.module}.${name.split('.')[0]}` && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
+      const mappedDecorator = decorators.some(({ name }) => !!name && isRegistryMappedDecorator(item.file, name, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset ?? 0));
       const isDerived = bases.some((base) => {
         const canonical = canonicalSqlAlchemyName(base, importsFor(item.file, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset));
         const localBase = resolveLocalBaseKey(item.file, base, item.qualifiedName, item.file.evidenceBySubject.get(item.node.id)?.startOffset);
@@ -320,13 +317,38 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
 
 function classBases(node: GraphNode): string[] { return Array.isArray(node.properties.bases) ? node.properties.bases.map(expressionName).filter((name): name is string => !!name) : []; }
 function importsFor(file: SqlAlchemyCollectedFile, scope: string, offset = Number.MAX_SAFE_INTEGER) { return importsAt(file.lexicalImports, scope, offset); }
-function isRegistryGenerateBase(expression: PythonExpressionFact, imports: Map<string, string>, registryVariables: Set<string>, module: string, callFacts: CallFact[]) {
+function isRegistryGenerateBase(expression: PythonExpressionFact, file: SqlAlchemyCollectedFile, scope: string, offset: number) {
   if (expression.kind !== 'call' || !expression.name?.endsWith('.generate_base')) return false;
-  if (registryVariables.has(`${module}.${expression.name.slice(0, -'.generate_base'.length)}`)) return true;
-  return callFacts.some((call) => canonicalSqlAlchemyName(call.callee, imports) === 'sqlalchemy.orm.registry');
+  const callee = expression.callee;
+  if (callee?.kind !== 'member' || callee.property !== 'generate_base') return false;
+  const owner = callee.children?.[0];
+  if (owner?.kind === 'call') return canonicalSqlAlchemyName(owner.name ?? '', importsFor(file, scope, offset)) === 'sqlalchemy.orm.registry';
+  const ownerName = expressionName(owner);
+  return !!ownerName && isRegistryInstance(file, ownerName, scope, offset);
 }
-type CallFact = { callee: string; arguments?: Array<{ kind: 'positional' | 'keyword'; keyword?: string; expression?: PythonExpressionFact }> };
-function calls(node: GraphNode): CallFact[] { return Array.isArray(node.properties.calls) ? node.properties.calls.filter((call): call is CallFact => !!call && typeof call.callee === 'string') : []; }
+function isRegistryInstance(file: SqlAlchemyCollectedFile, name: string, scope: string, offset: number, seen = new Set<string>()): boolean {
+  const head = name.split('.')[0]!;
+  const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')).reverse() : [];
+  scopes.push('');
+  for (const current of scopes) {
+    const event = file.lexicalImports.filter((binding) => binding.scope === current && binding.local === head && binding.offset <= offset).sort((a, b) => b.offset - a.offset)[0];
+    if (!event) continue;
+    const imported = file.pythonImports.find((binding) => binding.scope === current && binding.fact.startOffset === event.offset);
+    if (imported) return false;
+    const assignment = file.assignments.find((node) => node.properties.scope === current && expressionName(node.properties.target) === head && file.evidenceBySubject.get(node.id)?.endOffset === event.offset);
+    if (!assignment || seen.has(`${current}.${head}:${event.offset}`)) return false;
+    seen.add(`${current}.${head}:${event.offset}`);
+    const value = asExpression(assignment.properties.value);
+    if (value?.kind === 'call' && value.name) return canonicalSqlAlchemyName(value.name, importsFor(file, current, file.evidenceBySubject.get(assignment.id)?.startOffset)) === 'sqlalchemy.orm.registry';
+    const alias = expressionName(value);
+    return !!alias && isRegistryInstance(file, alias, current, event.offset - 1, seen);
+  }
+  return false;
+}
+function isRegistryMappedDecorator(file: SqlAlchemyCollectedFile, name: string, scope: string, offset: number) {
+  const parts = name.split('.');
+  return parts.length === 2 && ['mapped', 'mapped_as_dataclass'].includes(parts[1]!) && isRegistryInstance(file, parts[0]!, scope, offset);
+}
 function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   const name = expressionName(assignment.properties.target);
   if (!name || name.startsWith('__')) return undefined;
@@ -546,7 +568,7 @@ function resolveLocalBaseKey(file: SqlAlchemyCollectedFile, name: string, scope 
       const value = asExpression(assignment.properties.value);
       const assignmentImports = importsFor(file, current, file.evidenceBySubject.get(assignment.id)?.startOffset);
       const canonical = value?.kind === 'call' && typeof value.name === 'string' ? canonicalSqlAlchemyName(value.name, assignmentImports) : '';
-      const verifiedFactory = canonical === 'sqlalchemy.orm.declarative_base' || canonical === 'sqlalchemy.ext.declarative.declarative_base' || canonical === 'sqlalchemy.orm.registry' || (!!value && isRegistryGenerateBase(value, assignmentImports, new Set(), String(assignment.properties.module), calls(assignment)));
+      const verifiedFactory = canonical === 'sqlalchemy.orm.declarative_base' || canonical === 'sqlalchemy.ext.declarative.declarative_base' || canonical === 'sqlalchemy.orm.registry' || (!!value && isRegistryGenerateBase(value, file, current, file.evidenceBySubject.get(assignment.id)?.startOffset ?? 0));
       if (verifiedFactory) return `${String(assignment.properties.module)}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
       const alias = expressionName(assignment.properties.value);
       return alias && alias !== name ? resolveLocalBaseKey(file, alias, current, event.offset - 1) : null;
