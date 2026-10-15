@@ -8,6 +8,7 @@ const identity = new GraphIdentityFactory();
 /** Resolves only against files in this scan. Everything else stays visibly unresolved. */
 export function resolvePythonImports(workspace: Workspace, imports: PythonImportFact[], nodes: GraphNode[]): { nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[] } {
   const modulesByPath = new Map<string, GraphNode>();
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const modulesByName = new Map<string, GraphNode[]>();
   const symbolsByName = new Map<string, GraphNode[]>();
   for (const node of nodes) {
@@ -23,7 +24,7 @@ export function resolvePythonImports(workspace: Workspace, imports: PythonImport
   const evidence: AnalysisEvidence[] = [];
   const edgesById = new Map<string, GraphEdge>();
   for (const imported of imports) {
-    const source = modulesByPath.get(imported.file);
+    const source = nodesById.get(imported.ownerId) ?? modulesByPath.get(imported.file);
     if (!source) continue;
     const moduleName = absoluteImportName(imported);
     const symbolName = imported.imported ? `${moduleName}.${imported.imported}` : undefined;
