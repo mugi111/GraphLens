@@ -1,4 +1,5 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
+import type { SourceCatalogReader } from './source-identity.js';
 
 /** IDs owned by GraphLens itself and unavailable to installed packages. */
 export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi', 'builtin.frontend-http', 'builtin.architecture'] as const;
@@ -25,6 +26,8 @@ export type AnalysisContext = {
   config: Record<string, JsonValue>;
   /** Optional read-only access to active, workspace-scoped analyzer generations. */
   architectureInputProvider?: ArchitectureInputReader;
+  /** Bounded read-only access to the active CodeGraph source catalog for this workspace. */
+  sourceCatalogReader?: SourceCatalogReader;
   signal?: { aborted: boolean };
 };
 

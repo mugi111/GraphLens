@@ -6,6 +6,9 @@ import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type Ana
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import type { CrossWorkspaceSnapshot, WorkspaceArchitectureSnapshot } from '../../domain/federation.js';
+import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
+import { normalizeRelativeSourcePath } from '../../core/source-path.js';
+import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
@@ -382,6 +385,46 @@ export class GraphStore implements ArchitectureInputProvider {
       return deepFreeze({ workspaceId: workspace, generations, missingAnalyzerIds: missing });
     }).deferred;
     return read(workspaceId, analyzerIds);
+  }
+  sourceCatalog(workspaceId: string, maxItems = 9000): SourceCatalogSnapshot | undefined {
+    if (!Number.isSafeInteger(maxItems) || maxItems < 1 || maxItems > 9000) throw new Error('Source catalog limit must be between 1 and 9000.');
+    const read = this.db.transaction((workspace: string, limit: number) => {
+      if (!this.getWorkspace(workspace)) throw new Error(`Workspace '${workspace}' was not found.`);
+      const active = this.db.prepare(`SELECT g.id AS generation_id,r.analyzer_version,r.source_revision FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.codegraph'`).get(workspace) as { generation_id: number; analyzer_version: string; source_revision: string | null } | undefined;
+      if (!active || active.analyzer_version !== '1.6.2') return undefined;
+      const generationId = Number(active.generation_id);
+      const identity = new GraphIdentityFactory();
+      const repository = this.db.prepare("SELECT id,properties_json FROM node_contributions WHERE generation_id=? AND workspace_id=? AND kind='repository'").get(generationId, workspace) as { id: string; properties_json: string } | undefined;
+      if (!repository || repository.id !== identity.repository(workspace, 'root')) return undefined;
+      const repositoryProperties = JSON.parse(repository.properties_json) as Record<string, unknown>;
+      if (repositoryProperties.repositoryKey !== 'root' || repositoryProperties.scope !== 'workspace-source-root') return undefined;
+      const counts = this.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM node_contributions WHERE generation_id=? AND kind='file') files,
+        (SELECT COUNT(*) FROM node_contributions WHERE generation_id=? AND json_extract(properties_json,'$.codegraphId') IS NOT NULL AND json_extract(properties_json,'$.filePath') IS NOT NULL) symbols,
+        (SELECT COALESCE(SUM(length(CAST(properties_json AS BLOB))),0) FROM node_contributions WHERE generation_id=? AND (kind='file' OR (json_extract(properties_json,'$.codegraphId') IS NOT NULL AND json_extract(properties_json,'$.filePath') IS NOT NULL))) bytes`).get(generationId, generationId, generationId) as { files: number; symbols: number; bytes: number };
+      if (Number(counts.files) + Number(counts.symbols) > limit) throw new Error('Source catalog exceeds its item limit.');
+      if (Number(counts.bytes) > 16 * 1024 * 1024) throw new Error('Source catalog exceeds its byte limit.');
+      const fileRows = this.db.prepare("SELECT id,label,properties_json FROM node_contributions WHERE generation_id=? AND workspace_id=? AND kind='file' ORDER BY id LIMIT ?").all(generationId, workspace, limit + 1) as any[];
+      const symbolRows = this.db.prepare("SELECT id,kind,label,properties_json FROM node_contributions WHERE generation_id=? AND workspace_id=? AND json_extract(properties_json,'$.codegraphId') IS NOT NULL AND json_extract(properties_json,'$.filePath') IS NOT NULL ORDER BY id LIMIT ?").all(generationId, workspace, limit + 1) as any[];
+      if (fileRows.length !== Number(counts.files) || symbolRows.length !== Number(counts.symbols)) throw new Error('Source catalog changed while reading the snapshot.');
+      const files = fileRows.map((row) => {
+        const properties = JSON.parse(row.properties_json) as Record<string, unknown>;
+        const relativePath = normalizeRelativeSourcePath(String(properties.path ?? row.label));
+        const contentHash = properties.contentHash;
+        if (row.id !== identity.file(workspace, 'root', relativePath) || typeof contentHash !== 'string' || !/^[a-f0-9]{64}$/i.test(contentHash)) throw new Error('CodeGraph source catalog contains an unsupported file identity or digest.');
+        return { fileId: row.id, repositoryKey: 'root', relativePath, contentDigest: { algorithm: 'sha256' as const, encoding: 'utf8-text' as const, value: contentHash, providerVersion: active.analyzer_version } };
+      });
+      const symbols = symbolRows.map((row) => {
+        const properties = JSON.parse(row.properties_json) as Record<string, unknown>;
+        const upstreamId = properties.codegraphId;
+        const relativePath = normalizeRelativeSourcePath(String(properties.filePath));
+        if (typeof upstreamId !== 'string' || row.id !== identity.sourceSymbol(workspace, 'root', 'codegraph', upstreamId)) throw new Error('CodeGraph source catalog contains an unsupported symbol identity.');
+        const coordinate = (name: string) => { const value = properties[name]; if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`CodeGraph source catalog has an invalid ${name} coordinate.`); return Number(value); };
+        return { nodeId: row.id, upstreamId, kind: row.kind, relativePath, name: row.label, startLine: coordinate('startLine'), startColumn: coordinate('startColumn'), endLine: coordinate('endLine'), endColumn: coordinate('endColumn') };
+      });
+      return deepFreeze({ workspaceId: workspace, input: { analyzerId: 'builtin.codegraph' as const, generationId, ...(active.source_revision ? { sourceRevision: active.source_revision } : {}) }, repositoryKey: 'root', files, symbols });
+    }).deferred;
+    return read(workspaceId, maxItems);
   }
   pluginInventory(): PluginInventoryItem[] {
     return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, packageName: plugin.packageName, version: plugin.version, apiVersion: plugin.apiVersion, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt, errorCode: plugin.errorCode })).sort((a, b) => a.id.localeCompare(b.id));
