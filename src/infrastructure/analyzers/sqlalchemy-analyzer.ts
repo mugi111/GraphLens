@@ -112,7 +112,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       });
       const abstract = localAssignmentValue(item.file.assignments, '__abstract__', item.qualifiedName);
       if (abstract && literalBoolean(abstract.properties.value) === true) {
-        if (isDerived || mappedDecorator) { abstractClasses.add(key); changed = true; }
+        if ((isDerived || mappedDecorator) && !abstractClasses.has(key)) { abstractClasses.add(key); changed = true; }
         continue;
       }
       const isMapped = mappedDecorator || isDerived;
