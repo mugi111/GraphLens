@@ -108,7 +108,7 @@ export function canonicalFastApiName(name: string, file: FastApiFile, scope = ''
   return head === 'fastapi' ? `__unbound__.${name}` : name;
 }
 
-export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER): string | undefined {
+export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER, resolving = new Set<string>()): string | undefined {
   const head = name.split('.')[0]!;
   const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')).reverse() : [];
   scopes.push('');
@@ -125,6 +125,14 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
       if (parts[0] !== moduleParts[0] || moduleParts.some((part, index) => parts[index] !== part)) return undefined;
       const suffix = parts.slice(moduleParts.length);
       return `${absoluteModule(file.path, imported)}${suffix.length ? `.${suffix.join('.')}` : ''}`;
+    }
+    const assignment = event.sourceNodeId ? file.assignments.find((node) => node.id === event.sourceNodeId) : undefined;
+    if (assignment) {
+      const cycleKey = `${file.path}\u0000${current}\u0000${head}\u0000${event.offset}`;
+      if (resolving.has(cycleKey)) return undefined;
+      resolving.add(cycleKey);
+      const alias = expressionName(assignment.properties.value);
+      return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving) : undefined;
     }
     const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
     return existsSymbol(files, local) ? local : undefined;
