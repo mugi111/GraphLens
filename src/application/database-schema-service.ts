@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { DatabaseSchemaSnapshot, GraphStore, StoredAnalysisDiagnostic } from '../infrastructure/sqlite/graph-store.js';
@@ -26,14 +26,13 @@ export class DatabaseSchemaError extends Error {
 }
 
 export class DatabaseSchemaService {
-  private readonly cursorKey = randomBytes(32);
   constructor(private readonly store: GraphStore) {}
 
   query(query: DatabaseSchemaQuery) {
     const workspace = this.store.getWorkspace(query.workspace);
     if (!workspace) throw new DatabaseSchemaError('WORKSPACE_NOT_FOUND', `Workspace '${query.workspace}' was not found.`);
     const filters = filterKey(query);
-    const filterHash = createHmac('sha256', this.cursorKey).update(filters).digest('base64url');
+    const filterHash = createHash('sha256').update(filters).digest('base64url');
     const cursor = query.cursor !== undefined ? this.decodeCursor(query.cursor) : undefined;
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.sqlalchemy' || cursor.filters !== filterHash)) {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
@@ -69,21 +68,17 @@ export class DatabaseSchemaService {
   }
 
   private encodeCursor(payload: CursorPayload) {
-    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const signature = createHmac('sha256', this.cursorKey).update(body).digest('base64url');
-    return `${body}.${signature}`;
+    return Buffer.from(JSON.stringify(payload)).toString('base64url');
   }
 
   private decodeCursor(value: string): CursorPayload {
-    if (value.length > 4096) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400);
-    const [body, signature, extra] = value.split('.');
-    if (!body || !signature || extra !== undefined || !/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]+$/.test(signature)) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400);
-    const expected = createHmac('sha256', this.cursorKey).update(body).digest();
-    let actual: Buffer;
-    try { actual = Buffer.from(signature, 'base64url'); } catch { throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400);
+    if (!value || value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400);
     let parsed: unknown;
-    try { parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch { throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
+    try {
+      const decoded = Buffer.from(value, 'base64url');
+      if (decoded.toString('base64url') !== value) throw new Error('Non-canonical base64url.');
+      parsed = JSON.parse(decoded.toString('utf8'));
+    } catch { throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
     if (!isCursor(parsed)) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor is invalid.', 400);
     return parsed;
   }
@@ -91,7 +86,8 @@ export class DatabaseSchemaService {
 
 function isCursor(value: unknown): value is CursorPayload {
   if (!isRecord(value)) return false;
-  return value.v === 1 && typeof value.workspace === 'string' && value.analyzerId === 'builtin.sqlalchemy' && Number.isSafeInteger(value.generationId) && typeof value.filters === 'string' && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
+  const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'v', 'workspace'];
+  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && value.analyzerId === 'builtin.sqlalchemy' && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
 }
 function filterKey(query: DatabaseSchemaQuery) {
   return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
