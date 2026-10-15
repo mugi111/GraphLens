@@ -375,7 +375,11 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   const positional = args.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression);
   const namedColumn = staticString(kwargs.get('name'));
   const explicitName = namedColumn ?? (recognizedFactory && staticString(positional[0]) ? staticString(positional[0]) : undefined);
-  const typeExpression = recognizedFactory && staticString(positional[0]) ? positional[1] : positional[0];
+  const positionalType = (recognizedFactory && staticString(positional[0]) ? positional.slice(1) : positional).find((candidate) => {
+    if (!candidate || staticString(candidate)) return false;
+    return !(candidate.kind === 'call' && ['sqlalchemy.ForeignKey', 'sqlalchemy.schema.ForeignKey'].includes(canonicalCallName(candidate.name ?? '')));
+  });
+  const typeExpression = kwargs.get('type_') ?? kwargs.get('type') ?? positionalType;
   const typeName = unsupportedInitializer ? undefined : expressionName(typeExpression) ?? mappedType;
   const foreignKeys = [] as SqlAlchemyModelFact['columns'][number]['foreignKeys'];
   let dynamicForeignKey = false;
@@ -387,7 +391,7 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   }
   const dynamicValue = unsupportedInitializer;
   const diagnostic = dynamicFlags.length ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_COLUMN_OPTION', `Could not statically resolve ${dynamicFlags.join(', ')} for column '${name}'.`, file.evidenceBySubject.get(assignment.id)) : dynamicForeignKey ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_FOREIGN_KEY', `Could not statically resolve foreign key target for '${name}'.`, file.evidenceBySubject.get(assignment.id)) : dynamicValue ? sourceDiagnostic('SQLALCHEMY_DYNAMIC_COLUMN', `Could not statically resolve the mapped value for column '${name}'.`, file.evidenceBySubject.get(assignment.id)) : undefined;
-  return { pythonName: name, name: explicitName ?? name, targetId: assignment.id, assignmentId: assignment.id, typeName, primaryKey, nullable, unique: unsupportedInitializer ? null : explicitOrDefault('unique', false), index: unsupportedInitializer ? null : explicitOrDefault('index', false), foreignKeys, relationships: [], sourceEvidence: file.evidenceBySubject.get(assignment.id), ...(diagnostic ? { diagnostic } : {}) };
+  return { pythonName: name, name: explicitName ?? name, targetId: assignment.id, assignmentId: assignment.id, typeName, primaryKey, nullable, nullableExplicit: kwargs.has('nullable'), unique: unsupportedInitializer ? null : explicitOrDefault('unique', false), index: unsupportedInitializer ? null : explicitOrDefault('index', false), foreignKeys, relationships: [], sourceEvidence: file.evidenceBySubject.get(assignment.id), ...(diagnostic ? { diagnostic } : {}) };
 }
 
 function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile): { fact: SqlAlchemyModelFact['relationships'][number]; diagnostic?: AnalysisDiagnostic } | undefined {
@@ -481,7 +485,7 @@ function tableConstraints(assignments: GraphNode[], scope: string, file: SqlAlch
     result.push({ kind, ...(name ? { name } : {}), columns: resolved ? localColumns : [], references: resolved ? references : [], resolved, sourceEvidence });
     if (!resolved) diagnostics.push(sourceDiagnostic('SQLALCHEMY_DYNAMIC_CONSTRAINT', `Could not statically resolve all ${kind} columns in __table_args__.`, sourceEvidence));
     if (!resolved) continue;
-    if (kind === 'primary_key') for (const column of columns) if (localColumns.includes(column.name)) { column.primaryKey = true; column.nullable = false; }
+    if (kind === 'primary_key') for (const column of columns) if (localColumns.includes(column.name)) { column.primaryKey = true; if (!column.nullableExplicit) column.nullable = false; }
     if (kind === 'unique' && localColumns.length === 1) for (const column of columns) if (localColumns.includes(column.name)) column.unique = true;
     if (kind === 'index' && localColumns.length === 1) for (const column of columns) if (localColumns.includes(column.name)) column.index = true;
     if (kind === 'foreign_key') for (let i = 0; i < localColumns.length; i++) { const column = columns.find((candidate) => candidate.name === localColumns[i]); if (column) column.foreignKeys.push({ target: references[i]!, sourceEvidence }); }
@@ -491,7 +495,7 @@ function tableConstraints(assignments: GraphNode[], scope: string, file: SqlAlch
 function literalStringList(value: PythonExpressionFact | undefined): string[] | undefined {
   if (!value) return undefined;
   if (value.literalKind === 'string' && typeof value.value === 'string') return [value.value];
-  if (value.kind !== 'TupleExpression' && value.kind !== 'ListExpression') return undefined;
+  if (value.kind !== 'TupleExpression' && value.kind !== 'ListExpression' && value.kind !== 'ArrayExpression') return undefined;
   const children = value.children ?? [];
   if (!children.length || children.some((item) => item.literalKind !== 'string' || typeof item.value !== 'string')) return undefined;
   return children.map((item) => item.value as string);
@@ -511,7 +515,7 @@ function applyMapperPrimaryKey(assignments: GraphNode[], scope: string, columns:
     for (const child of expression.children ?? []) visit(child);
   };
   if (value) visit(value);
-  for (const column of columns) if (names.has(column.pythonName) || names.has(column.name)) { column.primaryKey = true; column.nullable = false; }
+  for (const column of columns) if (names.has(column.pythonName) || names.has(column.name)) { column.primaryKey = true; if (!column.nullableExplicit) column.nullable = false; }
 }
 function staticString(value: unknown): string | undefined { return literalString(value); }
 function literalStrings(value: unknown): string[] { if (!isObject(value)) return []; if (value.literalKind === 'string' && typeof value.value === 'string') return [value.value]; if (Array.isArray(value.children)) return value.children.flatMap(literalStrings); return []; }
