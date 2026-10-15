@@ -13,16 +13,16 @@ export type ArchitectureGenerationRef = {
 export type WorkspaceArchitectureSnapshot = {
   workspace: { id: string; name: string };
   generation: ArchitectureGenerationRef;
-  inputGenerations: Array<{ analyzerId: string; generationId: number }>;
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  evidence: AnalysisEvidence[];
-  diagnostics: AnalysisDiagnostic[];
+  inputGenerations: ReadonlyArray<{ analyzerId: string; generationId: number }>;
+  nodes: readonly GraphNode[];
+  edges: readonly GraphEdge[];
+  evidence: readonly AnalysisEvidence[];
+  diagnostics: readonly AnalysisDiagnostic[];
 };
 
 export type CrossWorkspaceSnapshot = {
   snapshotId: string;
-  requestedWorkspaceIds: string[];
-  generations: WorkspaceArchitectureSnapshot[];
-  missingArchitectureWorkspaceIds: string[];
+  requestedWorkspaceIds: readonly string[];
+  generations: readonly WorkspaceArchitectureSnapshot[];
+  missingArchitectureWorkspaceIds: readonly string[];
 };
