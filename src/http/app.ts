@@ -9,8 +9,9 @@ import { DatabaseSchemaError, type DatabaseSchemaQuery, type DatabaseSchemaServi
 import { ArchitectureQueryError, parseArchitectureQuery, type ArchitectureQueryService } from '../application/architecture-query-service.js';
 import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceQueryService } from '../application/cross-workspace-query-service.js';
 import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
+import { parseWorkspaceGraphQuery, WorkspaceGraphError, type WorkspaceQueryService } from '../application/workspace-query-service.js';
 
-export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspacePaths: string[], webRoot: string) {
+export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string) {
   const app = new Hono();
   app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: await adapter.status() }));
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
@@ -63,6 +64,12 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
       if (error instanceof ImpactQueryError) return c.json({ error: error.message, code: error.code }, error.status);
       return c.json({ error: 'Impact query failed.', code: 'IMPACT_QUERY_FAILED' }, 500);
     }
+  });
+  app.get('/api/v1/workspace-graph', (c) => {
+    const parsed = parseWorkspaceGraphQuery(new URL(c.req.url).searchParams);
+    if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
+    try { return c.json(workspaceQuery.query(parsed.query)); }
+    catch (error) { if (error instanceof WorkspaceGraphError) return c.json({ error: error.message, code: error.code }, error.status); return c.json({ error: 'Workspace graph query failed.', code: 'WORKSPACE_GRAPH_QUERY_FAILED' }, 500); }
   });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
   app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
