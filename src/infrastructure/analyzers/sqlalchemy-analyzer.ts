@@ -63,7 +63,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
       const tableName = literalString(tableAssignment?.properties.value);
       if (!isDerived) {
-        if (tableAssignment) diagnostics.push(sourceDiagnostic('SQLALCHEMY_DYNAMIC_BASE', `Could not statically resolve SQLAlchemy base for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
+        if (tableAssignment && (item.file.imports.size > 0 || item.file.pythonImports.some((imp) => !!imp.imported))) diagnostics.push(sourceDiagnostic('SQLALCHEMY_DYNAMIC_BASE', `Could not statically resolve SQLAlchemy base for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
         continue;
       }
       if (tableAssignment && !tableName) {
@@ -207,7 +207,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
       const sourceFile = files.find((candidate) => candidate.path === model.path)!;
       const candidates = targetName ? resolveRelationshipCandidates(models, sourceFile, model, targetName) : [];
       const resolved = candidates.length === 1 ? projectedModels.get(`${candidates[0]!.module}.${candidates[0]!.qualifiedName}`) : undefined;
-      const key = `relationship/${model.qualifiedName}.${relation.name}`;
+      const key = `relationship/${model.schema ? `${model.schema}.` : ''}${model.tableName}.${relation.name}`;
       const relationship = addNode(model.path, 'sqlalchemy_relationship', relation.name, key, { target: targetName ?? null, backPopulates: relation.backPopulates ?? null, backref: relation.backref ?? null, uselist: relation.uselist ?? null, resolved: !!resolved, ambiguous: candidates.length > 1 }, relation.sourceEvidence, 'sqlalchemy.relationship');
       addEdge(source, relationship, 'contains', relation.sourceEvidence, key, 'DIRECT');
       let destination = resolved;
@@ -225,7 +225,9 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
   }
   if (nodes.length + edges.length > 9000) throw new Error('SQLAlchemy contributions exceed the combined limit (9000).');
   if (evidence.length > 10_000) throw new Error('SQLAlchemy evidence exceeds the result limit (10000).');
-  return { sourceRevision, nodes, edges, evidence, diagnostics };
+  if (diagnostics.length > 10_000) throw new Error('SQLAlchemy diagnostics exceed the result limit (10000).');
+  const uniqueDiagnostics = [...new Map(diagnostics.map((item) => [`${item.code ?? ''}\u0000${item.uri ?? ''}\u0000${item.line ?? ''}\u0000${item.message}`, item])).values()];
+  return { sourceRevision, nodes, edges, evidence, diagnostics: uniqueDiagnostics };
 }
 
 function classBases(node: GraphNode): string[] { return Array.isArray(node.properties.bases) ? node.properties.bases.map(expressionName).filter((name): name is string => !!name) : []; }
