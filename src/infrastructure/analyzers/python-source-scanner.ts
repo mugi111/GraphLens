@@ -117,7 +117,7 @@ async function readBounded(handle: Awaited<ReturnType<typeof open>>, limit: numb
     offset += bytesRead;
   }
   if (offset > limit) throw new Error(`Python source exceeds maxFileBytes (${limit}) while being read.`);
-  return buffer.subarray(0, offset);
+  return Buffer.from(buffer.subarray(0, offset));
 }
 
 function sameStat(a: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }, b: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }) { return a.dev === b.dev && a.ino === b.ino && Number(a.size) === Number(b.size) && a.mtimeMs === b.mtimeMs; }
