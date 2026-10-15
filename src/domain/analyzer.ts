@@ -1,7 +1,7 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
 
 /** IDs owned by GraphLens itself and unavailable to installed packages. */
-export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi'] as const;
+export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi', 'builtin.architecture'] as const;
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -24,7 +24,7 @@ export type AnalysisContext = {
   sourceRevision?: string;
   config: Record<string, JsonValue>;
   /** Optional read-only access to active, workspace-scoped analyzer generations. */
-  architectureInputProvider?: ArchitectureInputProvider;
+  architectureInputProvider?: ArchitectureInputReader;
   signal?: { aborted: boolean };
 };
 
@@ -40,6 +40,10 @@ export type ArchitectureInputSnapshot = { workspaceId: string; generations: read
 export type ArchitectureInputProvider = {
   /** Reads only the requested active generations in one workspace-scoped snapshot. */
   snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot;
+};
+/** Workspace-bound read-only view exposed to analyzer implementations. */
+export type ArchitectureInputReader = {
+  snapshot(analyzerIds: readonly string[]): ArchitectureInputSnapshot;
 };
 
 export type EvidenceLevel = 'DIRECT' | 'DERIVED' | 'INFERRED';
@@ -101,7 +105,10 @@ export type AnalysisErrorCode =
   | 'PROCESS_INTERRUPTED'
   | 'ANALYZER_FAILED'
   | 'INVALID_RESULT'
-  | 'PERSISTENCE_FAILED';
+  | 'PERSISTENCE_FAILED'
+  | 'INPUT_GENERATION_UNAVAILABLE'
+  | 'INPUT_GENERATION_CHANGED'
+  | 'INPUT_GENERATION_CYCLE';
 
 export class AnalysisError extends Error {
   constructor(public readonly code: AnalysisErrorCode, message: string, public readonly diagnostics: AnalysisDiagnostic[] = []) {

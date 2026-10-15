@@ -250,7 +250,8 @@ export const analysisGenerationInputsMigration: SchemaMigration = {
         generation_id INTEGER NOT NULL,
         input_generation_id INTEGER NOT NULL,
         input_analyzer_id TEXT NOT NULL,
-        PRIMARY KEY(generation_id, input_generation_id),
+        PRIMARY KEY(generation_id, input_analyzer_id),
+        UNIQUE(generation_id, input_generation_id),
         CHECK(generation_id <> input_generation_id),
         FOREIGN KEY(generation_id) REFERENCES analysis_generations(id) ON DELETE CASCADE,
         FOREIGN KEY(input_generation_id) REFERENCES analysis_generations(id)
