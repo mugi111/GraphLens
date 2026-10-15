@@ -72,6 +72,18 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
 
 The default bounds are 5,000 files, 2 MiB per file, and 64 MiB total. Configurable ceilings are 5,000 files, 10 MiB per file, and 256 MiB total. Traversal also stops with an error above 100,000 directory entries, 20,000 directories, or depth 64. The analyzer fails instead of truncating when a bound is exceeded, the workspace changes during scanning, a file cannot be decoded, or graph output exceeds 9,000 combined nodes and edges. Evidence locations include UTF-16 source offsets and one-based line and column ranges.
 
+### SQLAlchemy analyzer
+
+`builtin.sqlalchemy` uses the same bounded Python snapshot and parser directly; it does not require a `builtin.python-source` generation. It never imports workspace modules, starts Python, or runs SQLAlchemy. The analyzer recognizes statically declared declarative bases and local inheritance, model table names and schemas, `Mapped`/`mapped_column` and legacy `Column` declarations, primary keys, nullable/unique/index flags, literal table constraints, foreign keys, and `relationship()` declarations. It emits model, table, column, constraint, and relationship graph nodes with source evidence. Composite table constraints remain explicit constraint nodes and link to each statically identified column.
+
+The analyzer accepts the Python scanner options (`includeStubs`, `excludes`, `maxFiles`, `maxFileBytes`, and `maxTotalBytes`) plus `databaseNamespace`, a stable 1–128 character identifier used to scope database graph identities. The namespace defaults to `default` and does not change the content-derived Python `sourceRevision`. Unknown or dynamic declaration values remain `null` or unresolved graph references with warning diagnostics; the analyzer does not guess from runtime behavior. Foreign key and relationship targets resolve only against statically indexed declarations in the workspace.
+
+```sh
+curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
+  -H 'content-type: application/json' \
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.sqlalchemy","config":{"databaseNamespace":"production","includeStubs":true,"excludes":["generated/**"]}}'
+```
+
 Use the additive analyzer endpoints to run and poll an analyzer:
 
 ```sh
