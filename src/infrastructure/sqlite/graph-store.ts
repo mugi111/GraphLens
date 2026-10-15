@@ -3,12 +3,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AnalysisDiagnostic, AnalysisEvidence, AnalysisResult, AnalyzerDescriptor } from '../../domain/analyzer.js';
-import type { Evidence, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
+import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import { analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
+export type DatabaseSchemaSnapshot = {
+  workspace: { id: string; name: string };
+  analysis: { analyzerId: string; analyzerVersion: string; generationId: number; runId: string; sourceRevision?: string; completedAt: string };
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  evidence: AnalysisEvidence[];
+  diagnostics: StoredAnalysisDiagnostic[];
+};
 export type StoredPlugin = GraphLensPluginManifest & { packageName: string; packagePath: string; enabled: boolean; analyzerIds: string[]; installedAt: string; installationId?: string; lockHash?: string; errorCode?: string };
 
 export class GraphStore {
@@ -90,6 +98,26 @@ export class GraphStore {
   }
   analysisRuns(workspaceId?: string, limit = 50): AnalysisRun[] { const sql = `SELECT * FROM analysis_runs ${workspaceId ? 'WHERE workspace_id=?' : ''} ORDER BY started_at DESC LIMIT ?`; const params = workspaceId ? [workspaceId, limit] : [limit]; return (this.db.prepare(sql).all(...params) as any[]).map((row) => this.parseAnalysisRun(row)); }
   analysisRun(id: string): AnalysisRun | undefined { const row = this.db.prepare('SELECT * FROM analysis_runs WHERE id=?').get(id) as any; return row ? this.parseAnalysisRun(row) : undefined; }
+  databaseSchemaSnapshot(workspaceId: string): DatabaseSchemaSnapshot | undefined {
+    const read = this.db.transaction((id: string) => {
+      const active = this.db.prepare(`SELECT w.id AS workspace_id,w.name,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at
+        FROM active_analysis_generations a
+        JOIN workspaces w ON w.id=a.workspace_id
+        JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+        WHERE a.workspace_id=? AND a.analyzer_id='builtin.sqlalchemy'`).get(id) as any;
+      if (!active) return undefined;
+      const generationId = Number(active.generation_id);
+      const nodes = (this.db.prepare(`SELECT id,workspace_id,kind,label,properties_json FROM node_contributions
+        WHERE generation_id=? AND (kind LIKE 'sqlalchemy_%' OR kind='python_class') ORDER BY id`).all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
+      const edges = (this.db.prepare(`SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions
+        WHERE generation_id=? ORDER BY id`).all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
+      const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
+      const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[]).map((row) => ({ sequence: row.sequence, generationId: row.generation_id ?? undefined, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
+      return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics } satisfies DatabaseSchemaSnapshot;
+    });
+    return read(workspaceId);
+  }
   pluginInventory(): PluginInventoryItem[] {
     return this.enabledPlugins(true).map((plugin) => ({ id: plugin.id, packageName: plugin.packageName, version: plugin.version, apiVersion: plugin.apiVersion, enabled: plugin.enabled, analyzers: plugin.analyzerIds, installedAt: plugin.installedAt, errorCode: plugin.errorCode })).sort((a, b) => a.id.localeCompare(b.id));
   }
