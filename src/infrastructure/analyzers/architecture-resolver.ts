@@ -121,12 +121,28 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const key = rawOperationKey(node);
     return key && fastOperationCounts.get(key) === 1 && specOperationCounts.get(key) === 1 ? key : undefined;
   }, 'operation_id', pushMatch);
-  if (config.allowPathShapeInference) matchUnique(unmatchedFast, unmatchedSpec, (node) => {
+  if (config.allowPathShapeInference) {
+    const rawShapeKey = (node: GraphNode) => {
     const namespace = stringProperty(node, 'namespace'); const method = stringProperty(node, 'method'); const shape = stringProperty(node, 'pathShape');
     return namespace && method && shape ? `${namespace}\u0000${method}\u0000${shape}` : undefined;
-  }, 'path_shape', pushMatch, 'INFERRED', 0.8, (kind, candidates) => {
-    for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'Path-shape candidates are ambiguous; no match was inferred.'); }
-  });
+    };
+    const countKeys = (items: GraphNode[]) => {
+      const counts = new Map<string, number>();
+      for (const node of items) { const key = rawShapeKey(node); if (key) counts.set(key, (counts.get(key) ?? 0) + 1); }
+      return counts;
+    };
+    const fastShapeCounts = countKeys(allFastEndpoints); const specShapeCounts = countKeys(allSpecEndpoints);
+    for (const [map, ownCounts] of [[unmatchedFast, fastShapeCounts], [unmatchedSpec, specShapeCounts]] as const) for (const node of [...map.values()]) {
+      const key = rawShapeKey(node);
+      if (!key || (fastShapeCounts.get(key) ?? 0) === 0 || (specShapeCounts.get(key) ?? 0) === 0) continue;
+      if (fastShapeCounts.get(key) === 1 && specShapeCounts.get(key) === 1) continue;
+      ambiguousEndpointIds.add(node.id); addIssue(node, 'ambiguous', 'Path-shape inference is not unique across the complete input generations.'); map.delete(node.id);
+    }
+    matchUnique(unmatchedFast, unmatchedSpec, (node) => {
+      const key = rawShapeKey(node);
+      return key && fastShapeCounts.get(key) === 1 && specShapeCounts.get(key) === 1 ? key : undefined;
+    }, 'path_shape', pushMatch, 'INFERRED', 0.8);
+  }
   const endpointInputTruncated = allFastEndpoints.length + allSpecEndpoints.length > fastEndpoints.length + specEndpoints.length;
   if (sources.fastApi && sources.openApi && !endpointInputTruncated && !outputLimitReached) {
     for (const endpoint of unmatchedFast.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
