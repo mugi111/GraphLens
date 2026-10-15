@@ -4,6 +4,7 @@ import type { CrossWorkspaceEvidence, CrossWorkspaceSnapshot, SystemEdge, System
 import type { GraphNode } from '../domain/graph.js';
 import { CrossWorkspaceResolutionError, MAX_CONTRACT_NAMESPACE_LENGTH, MAX_CONTRACT_PATH_LENGTH, resolveCrossWorkspace } from './cross-workspace-resolver.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type ImpactDirection = 'dependents' | 'dependencies' | 'both';
 export type ImpactQuery = { workspaces: string[]; node: string; direction: ImpactDirection; depth: number; limit: number; includeInferred: boolean; includeEvidence: boolean; includeDiagnostics: boolean };
@@ -24,6 +25,7 @@ export class ImpactQueryService {
     let snapshot: CrossWorkspaceSnapshot;
     try { snapshot = this.store.crossWorkspaceArchitectureSnapshot(workspaceIds); }
     catch (error) {
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
       const message = error instanceof Error ? error.message : String(error);
       if (/^Workspace not found:/.test(message)) throw new ImpactQueryError('WORKSPACE_NOT_FOUND', message, 404);
       throw new ImpactQueryError('IMPACT_QUERY_FAILED', 'Could not read the cross-workspace architecture snapshot.', 500);

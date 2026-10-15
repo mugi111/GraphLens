@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { DatabaseSchemaSnapshot, GraphStore, StoredAnalysisDiagnostic } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type ArchitectureRoot = 'endpoint' | 'handler' | 'model' | 'table' | 'finding';
 export type ArchitectureQuery = { workspace: string; root: ArchitectureRoot; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; cursor?: string; includeEvidence: boolean; includeDiagnostics: boolean };
-type Cursor = { v: 1; workspace: string; analyzerId: 'builtin.architecture'; generationId: number; filters: string; offset: number };
+type Cursor = { v: 1; workspace: string; analyzerId: 'builtin.architecture'; generationId: number; projectionSnapshotId: string; filters: string; offset: number };
 type Snapshot = DatabaseSchemaSnapshot & { inputGenerations?: Array<{ analyzerId: string; generationId: number }> };
 const EDGE_ALLOWLIST = new Set(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model', 'http_request']);
 
@@ -21,12 +22,16 @@ export class ArchitectureQueryService {
     const filterHash = createHash('sha256').update(filters).digest('base64url');
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.architecture' || cursor.filters !== filterHash)) throw new ArchitectureQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
-    const snapshot = this.store.architectureSnapshot(query.workspace) as Snapshot | undefined;
+    let snapshot: Snapshot | undefined;
+    try { snapshot = this.store.architectureSnapshot(query.workspace) as Snapshot | undefined; } catch (error) {
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
+      throw error;
+    }
     if (!snapshot) {
       if (cursor) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
       throw new ArchitectureQueryError('ARCHITECTURE_ANALYSIS_NOT_FOUND', 'No active architecture analysis exists for this workspace.');
     }
-    if (cursor && cursor.generationId !== snapshot.analysis.generationId) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
+    if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
     const allRoots = selectRoots(snapshot, query);
     if (query.node !== undefined && allRoots.length === 0) throw new ArchitectureQueryError('ARCHITECTURE_NODE_NOT_FOUND', `Node '${query.node}' was not found in the active architecture snapshot.`);
     const offset = cursor?.offset ?? 0;
@@ -44,7 +49,7 @@ export class ArchitectureQueryService {
     const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, closure.nodes, closure.edges, snapshot.evidence) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + roots.length;
-    const nextCursor = nextOffset < allRoots.length ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, filters: filterHash, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < allRoots.length ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     return {
       workspace: snapshot.workspace,
       analysis: { ...snapshot.analysis, inputGenerations: snapshot.inputGenerations ?? [], diagnostics: diagnosticCounts(snapshot.diagnostics) },
@@ -131,7 +136,7 @@ function encodeCursor(cursor: Cursor) { return Buffer.from(JSON.stringify(cursor
 function decodeCursor(raw: string): Cursor {
   if (!raw || raw.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
   let value: unknown; try { const bytes = Buffer.from(raw, 'base64url'); if (bytes.toString('base64url') !== raw) throw new Error(); value = JSON.parse(bytes.toString('utf8')); } catch { throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
-  if (!record(value) || Object.keys(value).sort().join(',') !== 'analyzerId,filters,generationId,offset,v,workspace' || value.v !== 1 || value.analyzerId !== 'builtin.architecture' || typeof value.workspace !== 'string' || value.workspace.length < 1 || value.workspace.length > 256 || typeof value.filters !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.filters) || !Number.isSafeInteger(value.generationId) || Number(value.generationId) < 1 || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
+  if (!record(value) || Object.keys(value).sort().join(',') !== 'analyzerId,filters,generationId,offset,projectionSnapshotId,v,workspace' || value.v !== 1 || value.analyzerId !== 'builtin.architecture' || typeof value.workspace !== 'string' || value.workspace.length < 1 || value.workspace.length > 256 || typeof value.filters !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.filters) || typeof value.projectionSnapshotId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.projectionSnapshotId) || !Number.isSafeInteger(value.generationId) || Number(value.generationId) < 1 || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
   return value as Cursor;
 }
 function tooLarge() { return new ArchitectureQueryError('ARCHITECTURE_QUERY_TOO_LARGE', 'Architecture query exceeds a hard response limit; no partial result was returned.', 422); }

@@ -57,6 +57,9 @@ export type AnalysisEvidence = {
   id: string;
   subjectKind: EvidenceSubjectKind;
   subjectId: string;
+  /** Exact active contribution owner attached by GraphLens storage projections. */
+  analyzerId?: string;
+  generationId?: number;
   level: EvidenceLevel;
   type: string;
   uri?: string;

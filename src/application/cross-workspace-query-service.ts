@@ -4,6 +4,7 @@ import type { ArchitectureEdgeKind, CrossWorkspaceEvidence, CrossWorkspaceResolu
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import { CrossWorkspaceResolutionError, resolveCrossWorkspace } from './cross-workspace-resolver.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type CrossWorkspaceRoot = 'contract' | 'endpoint';
 export type CrossWorkspaceArchitectureQuery = {
@@ -87,6 +88,7 @@ export class CrossWorkspaceQueryService {
   private readSnapshot(workspaceIds: string[]): CrossWorkspaceSnapshot {
     try { return this.store.crossWorkspaceArchitectureSnapshot(workspaceIds); }
     catch (error) {
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
       const message = error instanceof Error ? error.message : String(error);
       if (/^Workspace not found:/.test(message)) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', message, 404);
       throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not read the cross-workspace architecture snapshot.', 500);

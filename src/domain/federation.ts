@@ -14,6 +14,7 @@ export type WorkspaceArchitectureSnapshot = {
   workspace: { id: string; name: string };
   generation: ArchitectureGenerationRef;
   inputGenerations: ReadonlyArray<{ analyzerId: string; generationId: number }>;
+  activeGenerations: ReadonlyArray<{ analyzerId: string; generationId: number }>;
   nodes: readonly GraphNode[];
   edges: readonly GraphEdge[];
   evidence: readonly AnalysisEvidence[];
@@ -30,7 +31,7 @@ export type CrossWorkspaceSnapshot = {
 export type ApiContractKey = { namespace: string; method: string; path: string };
 
 export type SystemNode =
-  | { scope: 'workspace'; workspaceId: string; id: string; kind: string; label: string; properties: Record<string, unknown>; level: 'DIRECT' | 'DERIVED' | 'INFERRED' }
+  | { scope: 'workspace'; workspaceId: string; id: string; kind: string; label: string; properties: Record<string, unknown>; level: 'DIRECT' | 'DERIVED' | 'INFERRED'; contributors?: GraphNode['contributors']; propertySources?: GraphNode['propertySources']; propertyConflicts?: GraphNode['propertyConflicts'] }
   | { scope: 'global'; id: string; kind: 'api_contract'; label: string; properties: ApiContractKey; level: 'DERIVED' };
 
 export type CrossWorkspaceEvidence = {

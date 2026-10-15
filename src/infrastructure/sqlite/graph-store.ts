@@ -21,6 +21,8 @@ export type DatabaseSchemaSnapshot = {
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
   diagnostics: StoredAnalysisDiagnostic[];
+  projectionSnapshotId?: string;
+  activeGenerations?: Array<{ workspaceId: string; analyzerId: string; generationId: number }>;
 };
 export type StoredPlugin = GraphLensPluginManifest & { packageName: string; packagePath: string; enabled: boolean; analyzerIds: string[]; installedAt: string; installationId?: string; lockHash?: string; errorCode?: string };
 
@@ -276,13 +278,16 @@ export class GraphStore implements ArchitectureInputProvider {
         WHERE a.workspace_id=? AND a.analyzer_id='builtin.sqlalchemy'`).get(id) as any;
       if (!active) return undefined;
       const generationId = Number(active.generation_id);
-      const nodes = (this.db.prepare(`SELECT id,workspace_id,kind,label,properties_json FROM node_contributions
-        WHERE generation_id=? AND (kind LIKE 'sqlalchemy_%' OR kind='python_class') ORDER BY id`).all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
-      const edges = (this.db.prepare(`SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions
-        WHERE generation_id=? ORDER BY id`).all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
-      const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
+      const nodeKeys = (this.db.prepare(`SELECT workspace_id,id FROM node_contributions WHERE generation_id=? AND (kind LIKE 'sqlalchemy_%' OR kind='python_class') ORDER BY id`).all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+      const edgeKeys = (this.db.prepare('SELECT workspace_id,id FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+      const projection = this.unifiedPage(nodeKeys, edgeKeys, true);
+      const nodes = projection.nodes;
+      const edges = projection.edges;
+      const evidence = [...nodes.flatMap((node) => node.evidence ?? []), ...edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
+      const activeGenerations = this.activeGenerationVector([id]);
+      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
       const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[]).map((row) => ({ sequence: row.sequence, generationId: row.generation_id ?? undefined, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
-      return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics } satisfies DatabaseSchemaSnapshot;
+      return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics, activeGenerations, projectionSnapshotId } satisfies DatabaseSchemaSnapshot;
     });
     return read(workspaceId);
   }
@@ -296,16 +301,18 @@ export class GraphStore implements ArchitectureInputProvider {
         WHERE a.workspace_id=? AND a.analyzer_id='builtin.architecture'`).get(id) as any;
       if (!active) return undefined;
       const generationId = Number(active.generation_id);
-      const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-        .map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
-      const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-        .map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
-      const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-        .map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
+      const nodeKeys = (this.db.prepare('SELECT workspace_id,id FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+      const edgeKeys = (this.db.prepare('SELECT workspace_id,id FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+      const projection = this.unifiedPage(nodeKeys, edgeKeys, true);
+      const nodes = projection.nodes;
+      const edges = projection.edges;
+      const evidence = [...nodes.flatMap((node) => node.evidence ?? []), ...edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
+      const activeGenerations = this.activeGenerationVector([id]);
+      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
       const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[])
         .map((row) => ({ sequence: row.sequence, generationId: row.generation_id ?? undefined, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
       const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(generationId) as any[]).map((row) => ({ analyzerId: row.analyzerId, generationId: Number(row.generationId) }));
-      return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics, inputGenerations } satisfies DatabaseSchemaSnapshot & { inputGenerations: Array<{ analyzerId: string; generationId: number }> };
+      return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics, inputGenerations, activeGenerations, projectionSnapshotId } satisfies DatabaseSchemaSnapshot & { inputGenerations: Array<{ analyzerId: string; generationId: number }> };
     });
     return read(workspaceId);
   }
@@ -330,14 +337,21 @@ export class GraphStore implements ArchitectureInputProvider {
         ORDER BY a.workspace_id`).all(...requested) as any[];
       const activeIds = new Set(activeRows.map((row) => row.workspace_id as string));
       const missingArchitectureWorkspaceIds = requested.filter((id) => !activeIds.has(id));
+      const generationVector = this.activeGenerationVector(requested);
+      let projectedOwners = 0; let projectedEvidence = 0; let projectedPropertyBytes = 0; let projectedEvidenceBytes = 0;
       const generations: WorkspaceArchitectureSnapshot[] = activeRows.map((active) => {
         const generationId = Number(active.generation_id);
-        const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
-        const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
-        const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
+        const nodeKeys = (this.db.prepare('SELECT workspace_id,id FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+        const edgeKeys = (this.db.prepare('SELECT workspace_id,id FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ workspaceId: row.workspace_id, id: row.id }));
+        const projection = this.unifiedPage(nodeKeys, edgeKeys, true);
+        const nodes = projection.nodes;
+        const edges = projection.edges;
+        const evidence = [...nodes.flatMap((node) => node.evidence ?? []), ...edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
+        projectedOwners += [...nodes, ...edges].reduce((sum, item) => sum + (item.contributors?.length ?? 1), 0);
+        projectedEvidence += evidence.length;
+        projectedPropertyBytes += Buffer.byteLength(JSON.stringify([...nodes.map((item) => item.properties), ...edges.map((item) => item.properties)]), 'utf8');
+        projectedEvidenceBytes += Buffer.byteLength(JSON.stringify(evidence), 'utf8');
+        if (projectedOwners > 5000 || projectedEvidence > 1000 || projectedPropertyBytes > 1_048_576 || projectedEvidenceBytes > 1_048_576) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
         const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[])
           .map((row) => ({ code: row.code ?? undefined, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as AnalysisDiagnostic));
         const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(generationId) as any[])
@@ -346,17 +360,26 @@ export class GraphStore implements ArchitectureInputProvider {
           workspace: { id: active.workspace_id, name: active.name },
           generation: { workspaceId: active.workspace_id, analyzerId: 'builtin.architecture', generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at },
           inputGenerations,
+          activeGenerations: generationVector.filter((item) => item.workspaceId === active.workspace_id).map(({ analyzerId, generationId: activeGenerationId }) => ({ analyzerId, generationId: activeGenerationId })),
           nodes: nodes as WorkspaceArchitectureSnapshot['nodes'],
           edges: edges as WorkspaceArchitectureSnapshot['edges'],
           evidence: evidence as WorkspaceArchitectureSnapshot['evidence'],
           diagnostics: diagnostics as WorkspaceArchitectureSnapshot['diagnostics'],
         };
       });
-      const vector = generations.map(({ generation }) => `${generation.workspaceId}\t${generation.generationId}`).join('\n');
-      const snapshotId = createHash('sha256').update(`graphlens-cross-workspace-v1\n${vector}`).digest('hex');
-      return { snapshotId, requestedWorkspaceIds, generations, missingArchitectureWorkspaceIds } satisfies CrossWorkspaceSnapshot;
+      const snapshotId = createHash('sha256').update(JSON.stringify({ requested, generationVector })).digest('hex');
+      const result = { snapshotId, requestedWorkspaceIds, generations, missingArchitectureWorkspaceIds } satisfies CrossWorkspaceSnapshot;
+      if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 3 * 1_048_576) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+      return result;
     });
     return read.deferred(requestedWorkspaceIds);
+  }
+  private activeGenerationVector(workspaceIds: readonly string[]) {
+    if (!workspaceIds.length) return [];
+    const placeholders = workspaceIds.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT a.workspace_id,a.analyzer_id,a.generation_id FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id IN (${placeholders}) ORDER BY a.workspace_id,a.analyzer_id LIMIT 257`).all(...workspaceIds) as any[];
+    if (rows.length > 256) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+    return rows.map((row) => ({ workspaceId: row.workspace_id as string, analyzerId: row.analyzer_id as string, generationId: Number(row.generation_id) }));
   }
   snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot {
     if (!Array.isArray(analyzerIds) || analyzerIds.length > 32 || new Set(analyzerIds).size !== analyzerIds.length || analyzerIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) throw new Error('Architecture input analyzer scope is invalid.');
