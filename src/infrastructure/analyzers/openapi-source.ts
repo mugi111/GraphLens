@@ -7,29 +7,33 @@ const FIXED_EXCLUDES = new Set(['.git', '.hg', '.svn', 'node_modules', 'build', 
 const MAX_ENTRIES = 100_000;
 const MAX_DIRECTORIES = 20_000;
 const MAX_DEPTH = 64;
-const HARD = { files: 5000, fileBytes: 10 * 1024 * 1024, totalBytes: 256 * 1024 * 1024 };
+const HARD = { files: 500, fileBytes: 10 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 };
 
-export type OpenApiConfig = { apiNamespace: string; include: string[]; excludes: string[]; maxFiles: number; maxFileBytes: number; maxTotalBytes: number };
+export type OpenApiConfig = { apiNamespace: string; specFiles: string[]; discover: boolean; maxSpecFiles: number; maxFileBytes: number; maxTotalBytes: number };
 export type OpenApiSourceFile = { path: string; bytes: Buffer; source: string; hash: string; absolute: string; size: number; ino: number; mtimeMs: number };
 export type OpenApiSnapshot = { sourceRevision: string; files: OpenApiSourceFile[] };
 type Entry = { path: string; absolute: string; size: number; ino: number; mtimeMs: number };
 
 export function openApiConfig(input: Record<string, unknown>): OpenApiConfig {
-  const allowed = new Set(['apiNamespace', 'include', 'excludes', 'maxFiles', 'maxFileBytes', 'maxTotalBytes']);
+  const allowed = new Set(['apiNamespace', 'specFiles', 'discover', 'maxSpecFiles', 'maxFileBytes', 'maxTotalBytes']);
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw new Error(`Unsupported OpenAPI option '${key}'.`);
   const apiNamespace = input.apiNamespace ?? 'default';
   if (typeof apiNamespace !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(apiNamespace)) throw new Error('apiNamespace must be 1 to 128 letters, digits, dots, underscores, or hyphens.');
-  const patterns = (value: unknown, name: string) => {
+  const paths = (value: unknown, name: string) => {
     if (value === undefined) return [];
-    if (!Array.isArray(value) || value.length > 256 || value.some((item) => typeof item !== 'string' || item.length < 1 || item.length > 512 || item.startsWith('/') || item.includes('\\') || item.split('/').includes('..'))) throw new Error(`${name} must be safe relative path patterns.`);
-    return [...new Set(value as string[])].sort();
+    if (!Array.isArray(value) || value.length > 64 || value.some((item) => typeof item !== 'string' || item.length < 1 || item.length > 512 || item.startsWith('/') || item.includes('\\') || item.split('/').some((part) => part === '..' || part === '.' || part === '') || !['.json', '.yaml', '.yml'].includes(extname(item).toLowerCase()))) throw new Error(`${name} must contain at most 64 safe relative JSON/YAML file paths.`);
+    return [...new Set((value as string[]).map((item) => item.normalize('NFC')))].sort();
   };
   const bounded = (value: unknown, fallback: number, max: number, name: string) => {
     if (value === undefined) return fallback;
     if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > max) throw new Error(`${name} must be an integer between 1 and ${max}.`);
     return Number(value);
   };
-  return { apiNamespace, include: patterns(input.include, 'include'), excludes: patterns(input.excludes, 'excludes'), maxFiles: bounded(input.maxFiles, 1000, HARD.files, 'maxFiles'), maxFileBytes: bounded(input.maxFileBytes, 5 * 1024 * 1024, HARD.fileBytes, 'maxFileBytes'), maxTotalBytes: bounded(input.maxTotalBytes, 32 * 1024 * 1024, HARD.totalBytes, 'maxTotalBytes') };
+  const discover = input.discover ?? true;
+  if (typeof discover !== 'boolean') throw new Error('discover must be a boolean.');
+  const specFiles = paths(input.specFiles, 'specFiles');
+  if (!discover && !specFiles.length) throw new Error('specFiles is required when discovery is disabled.');
+  return { apiNamespace, specFiles, discover, maxSpecFiles: bounded(input.maxSpecFiles, 100, HARD.files, 'maxSpecFiles'), maxFileBytes: bounded(input.maxFileBytes, 5 * 1024 * 1024, HARD.fileBytes, 'maxFileBytes'), maxTotalBytes: bounded(input.maxTotalBytes, 20 * 1024 * 1024, HARD.totalBytes, 'maxTotalBytes') };
 }
 
 export async function readOpenApiSnapshot(rootInput: string, config: OpenApiConfig, requestedRevision?: string): Promise<OpenApiSnapshot> {
@@ -38,6 +42,9 @@ export async function readOpenApiSnapshot(rootInput: string, config: OpenApiConf
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error('OpenAPI workspace root must be a real directory, not a symlink.');
   const root = await realpath(rootPath);
   const initial = await inventory(root, config);
+  const found = new Set(initial.map((item) => item.path));
+  const missing = config.specFiles.filter((path) => !found.has(path));
+  if (missing.length) throw new Error(`Explicit OpenAPI specFiles not found: ${missing.join(', ')}.`);
   const files: OpenApiSourceFile[] = [];
   let total = 0;
   for (const item of initial) {
@@ -69,8 +76,7 @@ export async function readOpenApiSnapshot(rootInput: string, config: OpenApiConf
 async function inventory(root: string, config: OpenApiConfig): Promise<Entry[]> {
   const entries: Entry[] = [];
   const seen = new Set<string>();
-  const includes = config.include.map(glob);
-  const excludes = config.excludes.map(glob);
+  const explicit = new Set(config.specFiles);
   let entryCount = 0;
   let directoryCount = 0;
   let totalBytes = 0;
@@ -89,14 +95,15 @@ async function inventory(root: string, config: OpenApiConfig): Promise<Entry[]> 
       if (FIXED_EXCLUDES.has(name)) continue;
       const absolute = join(directory, name);
       const path = relative(root, absolute).split(sep).join('/').normalize('NFC');
-      if (excludes.some((pattern) => pattern.test(path))) continue;
       const info = await lstat(absolute);
       if (info.isSymbolicLink()) continue;
       const canonical = await realpath(absolute);
       contained(root, canonical, path);
       if (info.isDirectory()) { await visit(canonical, depth + 1); continue; }
       if (!info.isFile() || !['.json', '.yaml', '.yml'].includes(extname(name).toLowerCase())) continue;
-      if (includes.length && !includes.some((pattern) => pattern.test(path))) continue;
+      const isSpecFile = explicit.has(path);
+      const discovered = config.discover && isDefaultSpec(path);
+      if (!isSpecFile && !discovered) continue;
       if (seen.has(path)) throw new Error(`OpenAPI paths collide after NFC normalization: '${path}'.`);
       seen.add(path);
       const verified = await checked(absolute, root, false);
@@ -104,7 +111,7 @@ async function inventory(root: string, config: OpenApiConfig): Promise<Entry[]> 
       totalBytes += verified.size;
       if (totalBytes > config.maxTotalBytes) throw new Error(`OpenAPI sources exceed maxTotalBytes (${config.maxTotalBytes}).`);
       entries.push({ path, absolute, size: verified.size, ino: verified.ino, mtimeMs: verified.mtimeMs });
-      if (entries.length > config.maxFiles) throw new Error(`OpenAPI document count exceeds maxFiles (${config.maxFiles}).`);
+      if (entries.length > config.maxSpecFiles) throw new Error(`OpenAPI document count exceeds maxSpecFiles (${config.maxSpecFiles}).`);
     }
     const after = await checked(directory, root, true);
     if (!same(before, after)) throw new Error('OpenAPI workspace directory changed during analysis.');
@@ -132,6 +139,6 @@ async function checked(path: string, root: string, directory: boolean) {
 function contained(root: string, path: string, label: string) { const rel = relative(root, path); if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(`OpenAPI source '${label}' escapes workspace root.`); }
 function same(a: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }, b: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }) { return a.dev === b.dev && a.ino === b.ino && Number(a.size) === Number(b.size) && a.mtimeMs === b.mtimeMs; }
 function sameEntry(a: Entry, b: Entry | undefined) { return !!b && a.path === b.path && a.size === b.size && a.ino === b.ino && a.mtimeMs === b.mtimeMs; }
-function glob(pattern: string) { let regex = '^'; for (let i = 0; i < pattern.length; i++) { const c = pattern[i]!; if (c === '*' && pattern[i + 1] === '*') { regex += '.*'; i++; } else if (c === '*') regex += '[^/]*'; else if (c === '?') regex += '[^/]'; else regex += c.replace(/[|\\{}()[\]^$+?.]/g, '\\$&'); } return new RegExp(`${regex}$`); }
+function isDefaultSpec(path: string) { const base = path.split('/').at(-1)!.toLowerCase(); return ['openapi.json', 'openapi.yaml', 'openapi.yml'].includes(base) || /\.openapi\.(json|ya?ml)$/.test(base); }
 function revision(config: OpenApiConfig, files: OpenApiSourceFile[]) { const hash = createHash('sha256'); const frame = (value: string | Buffer) => { const data = typeof value === 'string' ? Buffer.from(value, 'utf8') : value; const length = Buffer.alloc(4); length.writeUInt32BE(data.length); hash.update(length).update(data); }; frame('openapi-source-v1'); frame(JSON.stringify(config)); for (const file of files) { frame(file.path); frame(String(file.size)); frame(file.hash); } return `openapi-source-v1:${hash.digest('hex')}`; }
 function lexical(a: string, b: string) { return a < b ? -1 : a > b ? 1 : 0; }
