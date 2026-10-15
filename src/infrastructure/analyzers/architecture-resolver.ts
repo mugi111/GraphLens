@@ -159,6 +159,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     if (fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
     if (specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
     if (fastBodies.length === 1 && specBodies.length === 1 && typeof fastBodies[0]!.properties.required === 'boolean' && typeof specBodies[0]!.properties.required === 'boolean' && fastBodies[0]!.properties.required !== specBodies[0]!.properties.required) addMismatch('request_body_required', { implementationRequired: fastBodies[0]!.properties.required, contractRequired: specBodies[0]!.properties.required });
+    if (fastBodies.length === 1 && specBodies.length === 1) {
+      const mediaByInput: Record<string, string[]> = { body: ['application/json'], form: ['application/x-www-form-urlencoded'], file: ['multipart/form-data'] };
+      const inputKind = fastBodies[0]!.properties.in;
+      const implementationMedia = typeof inputKind === 'string' ? mediaByInput[inputKind] : undefined;
+      const contractMedia = Array.isArray(specBodies[0]!.properties.contentTypes) ? specBodies[0]!.properties.contentTypes.filter((value): value is string => typeof value === 'string') : [];
+      if (implementationMedia && contractMedia.length && !implementationMedia.some((type) => contractMedia.includes(type))) addMismatch('request_body_media', { implementationMedia, contractMedia: [...new Set(contractMedia)].sort() });
+    }
     const responseStatuses = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'returns').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_response').map((node) => node.properties.statusCode ?? node.properties.status).filter((status) => typeof status === 'string' || typeof status === 'number').map(String);
     const fastStatus = responseStatuses(sources.fastApi, fast); if (!fastStatus.length) fastStatus.push('200');
     const specStatus = responseStatuses(sources.openApi, spec);
