@@ -155,9 +155,9 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
 
 ### OpenAPI document analyzer
 
-`builtin.openapi` scans bounded `.json`, `.yaml`, and `.yml` files in the workspace and statically projects OpenAPI 3.0, 3.1, and 3.2 documents. It does not execute code, fetch URLs, or read files referenced by a document. JSON/YAML syntax and duplicate mapping keys are checked strictly; YAML aliases and custom tags are rejected. Only local JSON Pointers are considered, and unresolved or external references remain explicit with diagnostics.
+`builtin.openapi` discovers `openapi.json`, `openapi.yaml`, `openapi.yml`, and `*.openapi.json|yaml|yml` files, or reads explicit `specFiles`, and statically projects OpenAPI 3.0, 3.1, and 3.2 documents. It does not execute code, fetch URLs, or read files referenced by a document. JSON/YAML syntax and duplicate mapping keys are checked strictly; YAML aliases and custom tags are rejected. Only supported same-document component JSON Pointers are linked; unresolved or external references remain explicit with diagnostics.
 
-The graph includes shared `api_endpoint` identities, parameters, request and response bodies, schema/property nodes, and security requirements/schemes. Supported configuration is `apiNamespace` (default `default`), `include`, `excludes`, `maxFiles` (default 1000), `maxFileBytes` (default 5 MiB), and `maxTotalBytes` (default 32 MiB). Hard limits are 5000 files, 10 MiB per file, and 256 MiB total. The source revision includes the normalized scan configuration and document hashes.
+The graph includes shared `api_endpoint` identities, parameters, request and response bodies, schema/property nodes, document and operation tags, servers, and security requirements/schemes. Supported configuration is `apiNamespace` (default `default`), `specFiles` (up to 64 safe relative paths), `discover` (default `true`), `maxSpecFiles` (default and maximum 64), `maxFileBytes` (default 5 MiB, maximum 10 MiB), and `maxTotalBytes` (default 20 MiB, maximum 64 MiB). Explicitly selected missing or unsupported documents fail the analysis; empty discovery succeeds. The source revision includes the normalized scan configuration and document hashes.
 
 ```sh
 curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
