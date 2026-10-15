@@ -4,6 +4,9 @@ export { CodeGraphAdapter } from './infrastructure/codegraph/adapter.js';
 export { GraphIdentityFactory, canonicalUri } from './core/graph-identity.js';
 export { AnalyzerRegistry } from './application/analyzer-registry.js';
 export { AnalyzerRunner } from './application/analyzer-runner.js';
+export { CrossWorkspaceQueryService, CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
+export type { CrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
+export { CrossWorkspaceResolutionError, resolveCrossWorkspace } from './application/cross-workspace-resolver.js';
 export { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 export { architectureAnalyzer } from './infrastructure/analyzers/architecture-analyzer.js';
 export { architectureConfig, resolveArchitecture } from './infrastructure/analyzers/architecture-resolver.js';
@@ -15,3 +18,4 @@ export type { Analyzer, AnalyzerCapability, AnalyzerDescriptor, AnalysisContext,
 export { PLUGIN_API_VERSION } from './domain/plugin.js';
 export type { GraphLensPluginFactory, GraphLensPluginManifest, PluginInventoryItem } from './domain/plugin.js';
 export type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from './domain/graph.js';
+export type { ApiContractKey, ArchitectureGenerationRef, CrossWorkspaceEvidence, CrossWorkspaceResolution, CrossWorkspaceSnapshot, SystemEdge, SystemNode, WorkspaceArchitectureSnapshot } from './domain/federation.js';
