@@ -34,7 +34,14 @@ export function collectSqlAlchemyFiles(snapshot: PythonSourceSnapshot): SqlAlche
     for (const assignment of assignments) {
       const target = expressionName(assignment.properties.target);
       if (!target || target.includes('.')) continue;
-      lexicalImports.push({ scope: String(assignment.properties.scope ?? ''), offset: evidenceBySubject.get(assignment.id)?.startOffset ?? Number.MAX_SAFE_INTEGER, local: target });
+      lexicalImports.push({ scope: String(assignment.properties.scope ?? ''), offset: evidenceBySubject.get(assignment.id)?.endOffset ?? Number.MAX_SAFE_INTEGER, local: target });
+    }
+    for (const declaration of parsed.nodes) {
+      if (!['python_class', 'python_function', 'python_async_function'].includes(declaration.kind)) continue;
+      const qualifiedName = String(declaration.properties.qualifiedName ?? '');
+      const pieces = qualifiedName.split('.');
+      const local = pieces.pop();
+      if (local) lexicalImports.push({ scope: pieces.join('.'), offset: evidenceBySubject.get(declaration.id)?.endOffset ?? Number.MAX_SAFE_INTEGER, local });
     }
     lexicalImports.sort((a, b) => a.offset - b.offset || a.scope.localeCompare(b.scope));
     const imports = importsAt(lexicalImports, '', Number.MAX_SAFE_INTEGER);
