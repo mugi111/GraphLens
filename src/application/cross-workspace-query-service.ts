@@ -139,7 +139,7 @@ function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWor
     if (!edgeAllowlist.has(edge.kind as ArchitectureEdgeKind)) continue;
     const items = sourceEvidence.get(`${workspace.workspace.id}\0edge\0${edge.id}`) ?? [];
     const id = systemEdgeKey(workspace.workspace.id, edge.id);
-    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: dominant(items), properties: edge.properties, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, edge.id, 'edge', items)] : [] });
+    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: dominant(items), properties: edge.properties, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
   }
   for (const node of resolution.nodes) nodes.set(node.scope === 'global' ? `global\0${node.id}` : systemNodeKey(node.workspaceId, node.id), node);
   for (const edge of resolution.edges) {
@@ -173,7 +173,7 @@ function selectRoots(nodes: SystemNode[], edges: SystemEdge[], query: CrossWorks
     return true;
   }).sort((a, b) => query.root === 'contract'
     ? cmp([String(a.properties.namespace), String(a.properties.method), String(a.properties.path), a.id], [String(b.properties.namespace), String(b.properties.method), String(b.properties.path), b.id])
-    : cmp([a.scope === 'workspace' ? workspaceNames.get(a.workspaceId) ?? '' : '', a.scope === 'workspace' ? a.workspaceId : '', String(a.properties.namespace ?? ''), String(a.properties.method ?? ''), String(a.properties.path ?? ''), a.id], [b.scope === 'workspace' ? workspaceNames.get(b.workspaceId) ?? '' : '', b.scope === 'workspace' ? b.workspaceId : '', String(b.properties.namespace ?? ''), String(b.properties.method ?? ''), String(b.properties.path ?? ''), b.id]));
+    : cmp([a.scope === 'workspace' ? a.workspaceId : '', a.scope === 'workspace' ? workspaceNames.get(a.workspaceId) ?? '' : '', String(a.properties.namespace ?? ''), String(a.properties.method ?? ''), String(a.properties.path ?? ''), a.id], [b.scope === 'workspace' ? b.workspaceId : '', b.scope === 'workspace' ? workspaceNames.get(b.workspaceId) ?? '' : '', String(b.properties.namespace ?? ''), String(b.properties.method ?? ''), String(b.properties.path ?? ''), b.id]));
 }
 function buildClosure(allNodes: SystemNode[], allEdges: SystemEdge[], roots: SystemNode[], maxDepth: number) {
   const byId = new Map(allNodes.map((node) => [systemNodeKey(node.scope === 'workspace' ? node.workspaceId : 'global', node.id), node]));
