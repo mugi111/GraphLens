@@ -414,7 +414,11 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
   const node = addNode('api_security_scheme', schemeName, declarationFile.path, `security/${declarationFile.path}/${assignment?.id ?? canonical}`, publicProperties, assignmentEvidence, 'api.security_scheme');
   const scopes = strictStringsFromExpression(scopeExpression);
   if (scopeExpression && !scopes) { addDiagnostic('FASTAPI_DYNAMIC_SECURITY_SCOPES', `Security requirement for '${schemeName}' has dynamic scopes.`, source); return undefined; }
-  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${key}/${schemeName}`, { scheme: schemeName, scopes: scopes ?? [], alternativeGroup: key, mode: 'alternative' }, source, 'api.security_requirement');
+  // FastAPI evaluates every declared dependency for an endpoint. Treat schemes
+  // collected from those dependencies as jointly required; there is no static
+  // OR construct in the supported source patterns, so don't imply alternatives.
+  const requirementGroup = `${key}/${endpoint.id}`;
+  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${requirementGroup}/${schemeName}`, { scheme: schemeName, scopes: scopes ?? [], requirementGroup, mode: 'joint' }, source, 'api.security_requirement');
   addEdge(endpoint, requirement, 'secured_by', `${key}:security:${schemeName}`, source, {}, 'DIRECT');
   addEdge(requirement, node, 'uses_scheme', `${key}:uses-scheme:${schemeName}`, source, {}, 'DIRECT');
   return node;
