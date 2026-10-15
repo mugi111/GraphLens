@@ -62,6 +62,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const processedClosures = new Set<string>();
   const matchedPairs: Array<{ fast: GraphNode; spec: GraphNode; match: string }> = [];
   const ambiguousEndpointIds = new Set<string>();
+  let totalVisits = 0;
+  let outputLimitReached = false;
   const evidenceId = (subjectId: string, key: string) => ids.node(sources.workspaceId, `architecture-evidence://${subjectId}/${encodeURIComponent(key)}`, 'evidence');
   // The resolver works only from bounded projections of the supplied generations.
   const endpointNodes = (generation: ArchitectureInputGeneration | undefined) => (generation?.nodes ?? []).filter((node) => node.kind === 'api_endpoint');
@@ -73,28 +75,34 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const openApiEndpointIds = new Set(specEndpoints.map(({ id }) => id));
   const pushMatch = (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => {
     const id = ids.edge(sources.workspaceId, fast.id, spec.id, `architecture_${method}`);
-    if (edges.some((item) => item.id === id)) return;
+    if (edges.some((item) => item.id === id)) return true;
+    if (nodes.length + edges.length + 1 > 9000 || evidence.length + 1 > 10000) {
+      outputLimitReached = true;
+      if (diagnostics.length < 10000) diagnostics.push({ code: 'ARCHITECTURE_OUTPUT_LIMIT', severity: 'warning', message: 'Architecture projection reached the configured result bounds; remaining matches were skipped.' });
+      return false;
+    }
     edges.push({ id, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: spec.id, kind: 'implements_contract', properties: { matchMethod: method, confidence } });
     matchedPairs.push({ fast, spec, match: method });
-    projectClosure(sources.fastApi, fast);
-    projectClosure(sources.openApi, spec);
     const fastSource = evidenceFor(sources.fastApi, fast.id);
     const specSource = evidenceFor(sources.openApi, spec.id);
     const item: AnalysisEvidence = {
       id: evidenceId(id, `architecture.${method}`), subjectKind: 'edge', subjectId: id, level,
-      type: `architecture.${method}`, confidence,
+      type: `architecture.${method}`,
+      ...(level === 'INFERRED' ? { confidence } : {}),
       provenance: { sources: [sourceProvenance(sources.fastApi, fastSource), sourceProvenance(sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`),
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
+    projectClosure(sources.fastApi, fast);
+    projectClosure(sources.openApi, spec);
+    return true;
   };
   const unmatchedFast = new Map(fastEndpoints.map((node) => [node.id, node]));
   const unmatchedSpec = new Map(specEndpoints.map((node) => [node.id, node]));
   for (const fast of fastEndpoints) {
     const spec = unmatchedSpec.get(fast.id);
     if (!spec) continue;
-    unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id);
-    pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1);
+    if (pushMatch(fast, spec, 'endpoint_id', 'DERIVED', 1)) { unmatchedFast.delete(fast.id); unmatchedSpec.delete(spec.id); }
   }
   matchUnique(unmatchedFast, unmatchedSpec, (node) => { const id = stringProperty(node, 'operationId'); const namespace = stringProperty(node, 'namespace'); return id && namespace ? `${namespace}\u0000${id}` : undefined; }, 'operation_id', pushMatch, 'DERIVED', 1, (kind, candidates) => {
     for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'operationId does not identify a unique endpoint in both inputs.'); }
@@ -105,7 +113,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   }, 'path_shape', pushMatch, 'INFERRED', 0.8, (kind, candidates) => {
     for (const endpoint of candidates) { ambiguousEndpointIds.add(endpoint.id); addIssue(endpoint, kind, 'Path-shape candidates are ambiguous; no match was inferred.'); }
   });
-  if (sources.fastApi && sources.openApi) {
+  const endpointInputTruncated = allFastEndpoints.length + allSpecEndpoints.length > fastEndpoints.length + specEndpoints.length;
+  if (sources.fastApi && sources.openApi && !endpointInputTruncated && !outputLimitReached) {
     for (const endpoint of unmatchedFast.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No OpenAPI operation could be matched to this FastAPI endpoint.');
     for (const endpoint of unmatchedSpec.values()) if (!ambiguousEndpointIds.has(endpoint.id)) addIssue(endpoint, 'gap', 'No FastAPI endpoint could be matched to this OpenAPI operation.');
   }
@@ -113,9 +122,10 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   for (const pair of matchedPairs) compareContract(pair.fast, pair.spec, pair.match);
   function addIssue(endpoint: GraphNode, kind: 'ambiguous' | 'unresolved' | 'gap', message: string) {
     const id = ids.node(sources.workspaceId, `architecture://${kind}/${endpoint.id}`, `architecture_contract_${kind}`);
-    if (issueIds.has(id) || nodes.length + edges.length + 2 > 9000 || evidence.length >= 10000 || diagnostics.length >= 10000) return;
-    issueIds.add(id);
+    if (issueIds.has(id)) return;
     projectClosure(openApiEndpointIds.has(endpoint.id) ? sources.openApi : sources.fastApi, endpoint);
+    if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) return;
+    issueIds.add(id);
     nodes.push({ id, workspaceId: sources.workspaceId, kind: `architecture_contract_${kind}`, label: `${kind}: ${endpoint.label}`, properties: { sourceEndpointId: endpoint.id } });
     const edgeId = ids.edge(sources.workspaceId, endpoint.id, id, 'architecture_contract_finding');
     edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: endpoint.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: `ARCHITECTURE_${kind.toUpperCase()}` } });
@@ -128,25 +138,33 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`), detail: message,
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
+    const edgeEvidenceId = evidenceId(edgeId, `architecture.${kind}.finding`);
+    if (!evidenceIds.has(edgeEvidenceId) && evidence.length < 10000) {
+      evidenceIds.add(edgeEvidenceId);
+      evidence.push({ id: edgeEvidenceId, subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: `architecture.${kind}.finding`, provenance: { sourceEvidenceId: source?.id ?? null, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+    }
   }
   function compareContract(fast: GraphNode, spec: GraphNode, match: string) {
     if (!sources.fastApi || !sources.openApi) return;
     const relations = (generation: ArchitectureInputGeneration, endpoint: GraphNode, kind: string) => generation.edges.filter((edge) => edge.sourceId === endpoint.id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
     const nodeById = (generation: ArchitectureInputGeneration, id: string) => generation.nodes.find((node) => node.id === id);
+    const operationId = sources.openApi.edges.find((edge) => edge.targetId === spec.id && edge.kind === 'exposes')?.sourceId;
+    const specOwner = operationId ? nodeById(sources.openApi, operationId) ?? spec : spec;
     const addMismatch = (dimension: string, detail: Record<string, unknown>) => {
       const id = ids.node(sources.workspaceId, `architecture://mismatch/${fast.id}/${dimension}`, 'architecture_contract_mismatch');
       if (issueIds.has(id)) return;
-      if (nodes.length + edges.length >= 9000 || evidence.length >= 10000 || diagnostics.length >= 10000) return;
+      if (nodes.length + edges.length + 2 > 9000 || evidence.length + 2 > 10000 || diagnostics.length >= 10000) return;
       issueIds.add(id);
       nodes.push({ id, workspaceId: sources.workspaceId, kind: 'architecture_contract_mismatch', label: `Contract mismatch: ${dimension}`, properties: { fastApiEndpointId: fast.id, openApiEndpointId: spec.id, dimension, ...detail } });
       const edgeId = ids.edge(sources.workspaceId, fast.id, id, 'architecture_contract_finding');
       edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: 'ARCHITECTURE_CONTRACT_MISMATCH', dimension } });
       const fastEvidence = evidenceFor(sources.fastApi, fast.id); const specEvidence = evidenceFor(sources.openApi, spec.id);
       evidence.push({ id: evidenceId(id, 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      if (evidence.length < 10000) evidence.push({ id: evidenceId(edgeId, 'architecture.contract_mismatch.finding'), subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: 'architecture.contract_mismatch.finding', provenance: { sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
       diagnostics.push({ code: 'ARCHITECTURE_CONTRACT_MISMATCH', severity: 'warning', message: `Provable ${dimension} contract mismatch for '${fast.label}'.`, detail: { dimension, fastApiEndpointId: fast.id, openApiEndpointId: spec.id } });
     };
     const fastParams = relations(sources.fastApi, fast, 'accepts').map(({ targetId }) => nodeById(sources.fastApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
-    const specParams = relations(sources.openApi, spec, 'accepts').map(({ targetId }) => nodeById(sources.openApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
+    const specParams = relations(sources.openApi, specOwner, 'accepts').map(({ targetId }) => nodeById(sources.openApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
     const pkey = (node: GraphNode) => { const loc = node.properties.in; const name = node.properties.alias ?? node.properties.name; return typeof loc === 'string' && typeof name === 'string' ? `${loc}\u0000${name}` : undefined; };
     const fastByParam = new Map(fastParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
     const specByParam = new Map(specParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
@@ -156,7 +174,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (typeof impl.properties.required === 'boolean' && typeof contract.properties.required === 'boolean' && impl.properties.required !== contract.properties.required) addMismatch('parameter_required', { parameter: key.replace('\u0000', ':'), implementationRequired: impl.properties.required, contractRequired: contract.properties.required });
     }
     const bodies = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'accepts').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_request_body');
-    const fastBodies = bodies(sources.fastApi, fast); const specBodies = bodies(sources.openApi, spec);
+    const fastBodies = bodies(sources.fastApi, fast); const specBodies = bodies(sources.openApi, specOwner);
     if (fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
     if (specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
     if (fastBodies.length === 1 && specBodies.length === 1 && typeof fastBodies[0]!.properties.required === 'boolean' && typeof specBodies[0]!.properties.required === 'boolean' && fastBodies[0]!.properties.required !== specBodies[0]!.properties.required) addMismatch('request_body_required', { implementationRequired: fastBodies[0]!.properties.required, contractRequired: specBodies[0]!.properties.required });
@@ -168,13 +186,15 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (implementationMedia && contractMedia.length && !implementationMedia.some((type) => contractMedia.includes(type))) addMismatch('request_body_media', { implementationMedia, contractMedia: [...new Set(contractMedia)].sort() });
     }
     const responseStatuses = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'returns').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_response').map((node) => node.properties.statusCode ?? node.properties.status).filter((status) => typeof status === 'string' || typeof status === 'number').map(String);
-    const fastStatus = responseStatuses(sources.fastApi, fast); if (!fastStatus.length) fastStatus.push('200');
-    const specStatus = responseStatuses(sources.openApi, spec);
+    const fastStatus = responseStatuses(sources.fastApi, fast);
+    const fastRouteId = sources.fastApi.edges.find((edge) => edge.targetId === fast.id && edge.kind === 'exposes')?.sourceId;
+    const fastRoute = fastRouteId ? nodeById(sources.fastApi, fastRouteId) : undefined;
+    if (!fastStatus.length && typeof fastRoute?.properties.statusCode === 'number') fastStatus.push(String(fastRoute.properties.statusCode));
+    else if (!fastStatus.length && typeof fastRoute?.properties.statusCode === 'string' && /^\d{3}$/.test(fastRoute.properties.statusCode)) fastStatus.push(fastRoute.properties.statusCode);
+    const specStatus = responseStatuses(sources.openApi, specOwner);
     const covered = (status: string) => specStatus.includes(status) || specStatus.includes('default') || specStatus.some((item) => /^([1-5])XX$/i.test(item) && item[0] === status[0]);
     if (specStatus.length && fastStatus.some((status) => /^\d{3}$/.test(status) && !covered(status))) addMismatch('response_status', { implementationStatuses: [...new Set(fastStatus)].sort(), contractStatuses: [...new Set(specStatus)].sort() });
-    const specOperationId = sources.openApi.edges.find((edge) => edge.targetId === spec.id && edge.kind === 'exposes')?.sourceId;
-    const specOperation = specOperationId ? nodeById(sources.openApi, specOperationId) : undefined;
-    const specMode = specOperation ? stringProperty(specOperation, 'securityMode') : undefined;
+    const specMode = stringProperty(specOwner, 'securityMode');
     const fastHasSecurity = relations(sources.fastApi, fast, 'secured_by').length > 0;
     if (specMode === 'disabled' && fastHasSecurity) addMismatch('security_disabled', { implementationHasSecurity: true, contractSecurityMode: specMode });
     const securityFacts = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'secured_by').map((edge) => {
@@ -188,10 +208,9 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const scopes = Array.isArray(rawScopes) ? rawScopes.filter((value): value is string => typeof value === 'string').sort() : undefined;
       return tuple && scopes ? { tuple, scopes } : undefined;
     }).filter((fact): fact is { tuple: string; scopes: string[] } => !!fact);
-    const fastSecurity = securityFacts(sources.fastApi, fast); const specSecurity = securityFacts(sources.openApi, spec);
+    const fastSecurity = securityFacts(sources.fastApi, fast); const specSecurity = securityFacts(sources.openApi, specOwner);
     if (fastSecurity.length === 1 && specSecurity.length === 1 && (fastSecurity[0]!.tuple !== specSecurity[0]!.tuple || JSON.stringify(fastSecurity[0]!.scopes) !== JSON.stringify(specSecurity[0]!.scopes))) addMismatch('security_scheme', { implementationScheme: fastSecurity[0]!.tuple, contractScheme: specSecurity[0]!.tuple, implementationScopes: fastSecurity[0]!.scopes, contractScopes: specSecurity[0]!.scopes });
   }
-  let totalVisits = 0;
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
     if (!generation || processedClosures.has(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`)) return;
     processedClosures.add(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`);
@@ -290,10 +309,10 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       }
     }
   }
-  return { nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)), edges: edges.sort((a, b) => a.id.localeCompare(b.id)), evidence: evidence.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? '')).slice(0, 10000), diagnostics: diagnostics.slice(0, 10000), inputGenerations };
+  return { nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)), edges: edges.sort((a, b) => a.id.localeCompare(b.id)), evidence: evidence.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? '')), diagnostics: diagnostics.slice(0, 10000), inputGenerations };
 }
 
-function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => void, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
+function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>, keyOf: (node: GraphNode) => string | undefined, method: 'operation_id' | 'path_shape', add: (fast: GraphNode, spec: GraphNode, method: 'endpoint_id' | 'operation_id' | 'path_shape', level: 'DERIVED' | 'INFERRED', confidence: number) => boolean, level: 'DERIVED' | 'INFERRED' = 'DERIVED', confidence = 1, ambiguous?: (kind: 'ambiguous', candidates: GraphNode[]) => void) {
   const group = (nodes: Iterable<GraphNode>) => {
     const groups = new Map<string, GraphNode[]>();
     for (const node of nodes) { const key = keyOf(node); if (key) groups.set(key, [...(groups.get(key) ?? []), node]); }
@@ -306,7 +325,7 @@ function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>,
       if (targets?.length) ambiguous?.('ambiguous', [...candidates, ...targets]);
       continue;
     }
-    add(candidates[0]!, targets[0]!, method, level, confidence);
+    if (!add(candidates[0]!, targets[0]!, method, level, confidence)) continue;
     fast.delete(candidates[0]!.id); spec.delete(targets[0]!.id);
   }
 }
