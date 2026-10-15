@@ -96,6 +96,8 @@ The response includes workspace identity and name (never its filesystem path), a
 
 Roots use deterministic ordering. `nextCursor` is opaque and bound to the workspace, query filters, and active SQLAlchemy generation; `limit` may change between pages. Reusing a cursor after the active generation changes returns `DATABASE_SNAPSHOT_CHANGED` (409). Other machine-readable errors are `WORKSPACE_REQUIRED`, `INVALID_CURSOR`, `CURSOR_QUERY_MISMATCH`, `WORKSPACE_NOT_FOUND`, `DATABASE_ANALYSIS_NOT_FOUND`, and `DATABASE_QUERY_FAILED`.
 
+The **Database** view presents paged table roots as an ER diagram and table list. Selecting a table shows its columns, primary/foreign-key flags, and constraints; composite foreign keys retain their ordered column mapping. Referenced tables included only as query context are marked separately and are not counted as page roots. ORM models link to their mapped class and source evidence when those facts are present. Repository exploration is not available until the graph contains Repository nodes and ORM-to-Repository relationships.
+
 Use the additive analyzer endpoints to run and poll an analyzer:
 
 ```sh
