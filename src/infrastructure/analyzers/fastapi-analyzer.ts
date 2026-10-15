@@ -225,7 +225,7 @@ function collectIncludes(files: FastApiFile[], resolveObject: (file: FastApiFile
       const owner = resolveObject(file, ownerName, scope, offset);
       if (!owner) return;
       const positional = call.arguments.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression);
-      const childName = expressionName(positional[0]);
+      const childName = expressionName(positional[0] ?? keywordArgs(call.arguments).get('router'));
       const child = childName ? resolveObject(file, childName, scope, offset) : undefined;
       if (!child) { addDiagnostic('FASTAPI_UNRESOLVED_ROUTER', `Could not resolve router passed to '${call.callee}'.`, file.evidenceBySubject.get(node.id)); }
       const keywords = keywordArgs(call.arguments);
@@ -253,7 +253,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       const owner = resolveObject(file, ownerName, scope, offset);
       if (!owner) continue;
       const { positional, keywords } = decoratorArguments(decorator);
-      const path = expressionString(positional[0]);
+      const path = expressionString(positional[0] ?? keywords.get('path'));
       if (path === undefined) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_PATH', `Route '${scope}' has a non-literal path and was not exposed.`, source); continue; }
       const methodList = strictStringsFromExpression(keywords.get('methods'));
       if (last === 'api_route' && keywords.has('methods') && !methodList) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${scope}' has dynamic methods and was not exposed.`, source); continue; }
@@ -362,7 +362,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
   for (const fact of dependencies) for (const dep of dependencyExpressions(fact.expression)) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
     if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
-    const targetExpr = dep.arguments?.find((arg) => arg.kind === 'positional')?.expression;
+    const targetExpr = dependencyTarget(dep);
     if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
     const targetName = expressionName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
@@ -456,7 +456,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     for (const parameter of inspectCurrentParameters ? parameters : []) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
       const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
-      const target = dependency.arguments?.find((argument) => argument.kind === 'positional')?.expression;
+      const target = dependencyTarget(dependency);
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = expressionName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
@@ -509,9 +509,13 @@ function canonicalCall(expression: PythonExpressionFact | undefined, file: FastA
 function findParameterMarker(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number): PythonExpressionFact | undefined {
   if (!expression) return undefined;
   if (expression.kind === 'call' && (PARAMETER_NAMES.has(canonicalFastApiName(expression.name ?? '', file, scope, offset)) || DEPENDENCY_NAMES.has(canonicalFastApiName(expression.name ?? '', file, scope, offset)))) return expression;
-  for (const child of expression.children ?? []) { const found = findParameterMarker(child, file, scope, offset); if (found) return found; }
-  for (const argument of expression.arguments ?? []) { const found = findParameterMarker(argument.expression, file, scope, offset); if (found) return found; }
+  if (expression.kind === 'subscript' && expression.children?.length && ['typing.Annotated', 'typing_extensions.Annotated', 'Annotated'].includes(canonicalFastApiName(expressionName(expression.children[0]!) ?? '', file, scope, offset))) {
+    for (const child of expression.children.slice(2)) if (child.kind === 'call' && (PARAMETER_NAMES.has(canonicalFastApiName(child.name ?? '', file, scope, offset)) || DEPENDENCY_NAMES.has(canonicalFastApiName(child.name ?? '', file, scope, offset)))) return child;
+  }
   return undefined;
+}
+function dependencyTarget(expression: PythonExpressionFact) {
+  return expression.arguments?.find((argument) => argument.kind === 'positional')?.expression ?? expression.arguments?.find((argument) => argument.kind === 'keyword' && argument.keyword === 'dependency')?.expression;
 }
 function scalarAnnotation(expression: unknown): boolean { const name = expressionName(expression); return !!name && /^(str|int|float|bool|bytes|UUID|date|datetime)$/.test(name.split('.').at(-1)!); }
 
@@ -595,9 +599,9 @@ function parameterRequired(marker: PythonExpressionFact | undefined, hasDefault:
   if (!marker) return !hasDefault;
   const args = argsOf(marker);
   const explicit = keywordArgs(args).get('default') ?? args.find((arg) => arg.kind === 'positional')?.expression;
-  if (!explicit) return true;
+  if (!explicit) return !hasDefault;
   if (explicit.kind === 'Ellipsis') return true;
-  if (['string', 'number', 'boolean', 'none'].includes(explicit.literalKind ?? '')) return explicit.literalKind === 'none' ? false : false;
+  if (['string', 'number', 'boolean', 'none'].includes(explicit.literalKind ?? '')) return false;
   return null;
 }
 function dependencyExpressions(expression: PythonExpressionFact | undefined): PythonExpressionFact[] {
