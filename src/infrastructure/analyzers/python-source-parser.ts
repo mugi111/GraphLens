@@ -30,6 +30,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
     const id = identity.node(workspace.id, `python://${file.path}#${uri}`, kind);
     const existing = nodesById.get(id);
     if (existing) return existing;
+    if (nodes.length + edges.length >= 9000) throw new Error('Python source contributions exceed the combined limit (9000).');
     const node = { id, workspaceId: workspace.id, kind, label, properties: { path: file.path, ...properties } };
     nodesById.set(id, node);
     nodes.push(node);
@@ -39,6 +40,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   const addEdge = (source: GraphNode, target: GraphNode, kind: string, range: Range, properties: Record<string, unknown> = {}) => {
     const id = identity.edge(workspace.id, source.id, target.id, kind);
     if (edgesById.has(id)) return;
+    if (nodes.length + edges.length >= 9000) throw new Error('Python source contributions exceed the combined limit (9000).');
     edgesById.add(id);
     edges.push({ id, workspaceId: workspace.id, sourceId: source.id, targetId: target.id, kind, properties: { path: file.path, ...properties } });
     evidence.push(sourceEvidence('edge', id, file.path, 'python.source', range, offsets));
@@ -97,6 +99,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
     }
     if (node.name === 'ImportStatement') {
       if (!intersectsDamage({ from: node.from, to: node.to }, errorRegions)) parseImport(node, file, offsets, imports);
+      if (imports.length > 10_000) throw new Error('Python source import facts exceed the result limit (10000).');
       return;
     }
     for (const child of children(node)) visit(child, scope, parent);
