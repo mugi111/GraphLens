@@ -57,7 +57,7 @@ export class ImpactQueryService {
     if (evidence) {
       const edgeEvidenceCount = result.edges.reduce((count, edge) => count + edge.evidence.length, 0);
       const confirmed = confirmSourceReferences(evidence, this.store, 5000);
-      evidence = confirmed.slice(0, confirmed.length - edgeEvidenceCount);
+      evidence = confirmed;
       const confirmedEdges = confirmed.slice(confirmed.length - edgeEvidenceCount);
       let offset = 0;
       outputEdges = result.edges.map((edge) => {
