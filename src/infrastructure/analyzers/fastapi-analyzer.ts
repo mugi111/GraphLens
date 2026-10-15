@@ -22,7 +22,7 @@ const SECURITY_NAMES = new Set([
 type DependencyFact = { expression: PythonExpressionFact; file: FastApiFile; scope: string; offset: number; ordinal?: string; source?: AnalysisEvidence };
 type ResponseFact = { status: string; description?: string; model?: string; source?: AnalysisEvidence; file?: FastApiFile; scope?: string; offset?: number };
 type RouterObject = { key: string; logicalKey: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; node: GraphNode };
-type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence; occurrence: number };
+type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; operationFile: FastApiFile; operationScope: string; operationOffset: number; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence; occurrence: number };
 type IncludeSpec = { key: string; ownerKey: string; childKey?: string; childSourceNodeId?: string; file: FastApiFile; scope: string; offset: number; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence };
 type FastApiCallArgument = { kind: 'positional' | 'keyword'; keyword?: string; expression: PythonExpressionFact };
 
@@ -262,7 +262,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       methods = methods.map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${scope}' has no supported statically known methods.`, source); continue; }
       const operation = operationFacts(keywords, file, scope, offset, addDiagnostic, source);
-      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence });
+      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence });
     }
   }
   for (const file of files) for (const sourceNode of file.nodes) {
@@ -291,7 +291,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       if (keywords.has('methods') && !methodList) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has dynamic methods and was not exposed.`, source); return; }
       methods = (methodList ?? methods).map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has no supported statically known methods.`, source); return; }
-      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: callIndex });
+      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: callIndex });
     });
   }
   return routes;
@@ -347,12 +347,16 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     }
   }
   const responseName = typeof route.operation.responseModel === 'string' ? route.operation.responseModel : undefined;
-  const returnAnnotation = expressionName(route.handler.properties.returnAnnotation);
+  const returnAnnotationFact = asExpression(route.handler.properties.returnAnnotation);
+  const returnAnnotation = returnAnnotationFact ? schemaName(returnAnnotationFact) : undefined;
   const response = responseName ?? returnAnnotation;
   if (response) {
     const node = addNode('api_response', `${route.methods[0]} ${route.path} response`, route.file.path, `${routeKey}/response`, { model: response }, source, 'api.response', responseName ? 'DIRECT' : 'DERIVED');
     addEdge(endpoint, node, 'returns', `${routeKey}:response`, source, {}, responseName ? 'DIRECT' : 'DERIVED');
-    addSchemaReference(response, route.handlerFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files);
+    const responseFile = responseName ? route.operationFile : route.handlerFile;
+    const responseScope = responseName ? route.operationScope : String(route.handler.properties.qualifiedName ?? '');
+    const responseOffset = responseName ? route.operationOffset : route.handlerFile.evidenceBySubject.get(route.handler.id)?.startOffset ?? 0;
+    addSchemaReference(response, responseFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files, responseScope, responseOffset);
   }
   for (const responseFact of route.responses) {
     const status = responseFact.status;
@@ -477,7 +481,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     for (const ref of refs) {
       const referenceName = expressionName(ref);
       if (!referenceName) continue;
-      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
+      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       const candidates = symbol ? files.flatMap((item) => [...item.functions, ...item.classes].filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol)) : [];
       const target = candidates.length === 1 ? candidates[0] : undefined;
       if (candidates.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_REFERENCE', `Source reference '${referenceName}' has multiple declarations.`, source);
