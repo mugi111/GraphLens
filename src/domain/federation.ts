@@ -43,7 +43,7 @@ export type CrossWorkspaceEvidence = {
   detail?: string;
 };
 
-export type ArchitectureEdgeKind = 'implements_contract' | 'architecture_contract_finding' | 'exposes' | 'handled_by' | 'depends_on' | 'calls' | 'references' | 'accepts' | 'returns' | 'uses_schema' | 'secured_by' | 'uses_scheme' | 'maps_to' | 'contains' | 'accesses_model';
+export type ArchitectureEdgeKind = 'implements_contract' | 'architecture_contract_finding' | 'exposes' | 'handled_by' | 'depends_on' | 'calls' | 'references' | 'accepts' | 'returns' | 'uses_schema' | 'secured_by' | 'uses_scheme' | 'maps_to' | 'contains' | 'accesses_model' | 'http_request';
 
 export type SystemEdge = {
   id: string;

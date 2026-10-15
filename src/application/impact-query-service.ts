@@ -14,7 +14,7 @@ export class ImpactQueryError extends Error {
   constructor(public readonly code: 'WORKSPACES_REQUIRED' | 'INVALID_IMPACT_QUERY' | 'WORKSPACE_NOT_FOUND' | 'IMPACT_TARGET_NOT_FOUND' | 'INSUFFICIENT_ACTIVE_ARCHITECTURE_WORKSPACES' | 'IMPACT_QUERY_TOO_LARGE' | 'IMPACT_QUERY_FAILED', message: string, public readonly status: 400 | 404 | 409 | 422 | 500) { super(message); }
 }
 
-const dependencyKinds = new Set(['handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'accesses_model', 'maps_to', 'contains', 'implements_contract', 'provides_contract', 'defines_contract', 'consumes_contract']);
+const dependencyKinds = new Set(['handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'accesses_model', 'maps_to', 'contains', 'http_request', 'implements_contract', 'provides_contract', 'defines_contract', 'consumes_contract']);
 
 export class ImpactQueryService {
   constructor(private readonly store: GraphStore) {}
@@ -125,7 +125,9 @@ function buildGraph(snapshot: CrossWorkspaceSnapshot, resolvedNodes: readonly Sy
   const originalId = (workspaceId: string | undefined, id: string) => workspaceId && id.startsWith(`workspace\0${workspaceId}\0`) ? id.slice(`workspace\0${workspaceId}\0`.length) : id;
   for (const node of resolvedNodes) nodes.set(originalId(node.scope === 'workspace' ? node.workspaceId : undefined, node.id), node.scope === 'workspace' ? { ...node, id: originalId(node.workspaceId, node.id) } : node);
   for (const edge of resolvedEdges) {
-    if (edge.kind === 'exposes') continue;
+    // Workspace edges are already projected from the immutable architecture snapshot above.
+    // Keep only federation edges here to avoid duplicate relationships under synthetic IDs.
+    if (edge.scope !== 'cross-workspace') continue;
     const properties = typeof edge.properties.endpointId === 'string' ? { ...edge.properties, endpointId: originalId(edge.sourceWorkspaceId, edge.properties.endpointId) } : edge.properties;
     const projected = { ...edge, sourceId: originalId(edge.sourceWorkspaceId, edge.sourceId), targetId: originalId(edge.targetWorkspaceId, edge.targetId), properties, evidence: includeEvidence ? edge.evidence.map((item) => ({ ...item, subjectId: originalId(item.sources[0]?.workspaceId, item.subjectId) })) : [] };
     edges.set(projected.id, projected);
@@ -150,9 +152,6 @@ function normalizeEdge(edge: SystemEdge, nodes: Map<string, SystemNode>, ownerEn
       const id = `impact-edge://${createEdgeIdentity(edge.id, endpointId)}`;
       return { edge: { ...edge, id, sourceId: endpointId, targetId: dependency, evidence: edge.evidence.map((item) => ({ ...item, id: `impact-evidence://${createEdgeIdentity(item.id, endpointId)}`, subjectId: id })) }, dependent: endpointId, dependency };
     });
-  } else if (edge.kind === 'provides_contract') {
-    const endpointId = edge.properties.endpointId;
-    if (typeof endpointId === 'string') dependent = endpointId;
   } else if (!dependencyKinds.has(edge.kind)) return [];
   const normalized = { ...edge, sourceId: dependent, targetId: dependency };
   if (edge.kind === 'exposes' && edge.sourceWorkspaceId !== edge.targetWorkspaceId) return [];
