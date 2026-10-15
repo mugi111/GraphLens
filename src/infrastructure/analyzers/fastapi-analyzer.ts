@@ -19,7 +19,7 @@ const SECURITY_NAMES = new Set([
   'fastapi.security.OpenIdConnect',
 ]);
 
-type DependencyFact = { expression: PythonExpressionFact; file: FastApiFile; scope: string; offset: number; source?: AnalysisEvidence };
+type DependencyFact = { expression: PythonExpressionFact; file: FastApiFile; scope: string; offset: number; ordinal?: string; source?: AnalysisEvidence };
 type ResponseFact = { status: string; description?: string; model?: string; source?: AnalysisEvidence; file?: FastApiFile; scope?: string; offset?: number };
 type RouterObject = { key: string; logicalKey: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; node: GraphNode };
 type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence; occurrence: number };
@@ -359,7 +359,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
     if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope);
   }
-  for (const fact of dependencies) for (const dep of dependencyExpressions(fact.expression)) {
+  for (const fact of dependencies) for (const [depIndex, dep] of dependencyExpressions(fact.expression).entries()) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
     if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
     const targetExpr = dependencyTarget(dep);
@@ -371,7 +371,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     countDependency(symbol!, dependencyBudget, config, source);
     const dependencyFile = files.find((item) => item.functions.includes(fn))!;
     const sourceFunction = addSourceNode(dependencyFile, fn);
-    addEdge(endpoint, sourceFunction, 'depends_on', `${routeKey}:dependency:${symbol}:${fact.file.path}:${fact.offset}`, fact.source ?? source);
+    addEdge(endpoint, sourceFunction, 'depends_on', `${routeKey}:dependency:${symbol}:${fact.file.path}:${fact.scope}:${fact.ordinal ?? '0'}:${depIndex}`, fact.source ?? source);
     countDependency(symbol!, dependencyBudget, config, fact.source ?? source);
     addCallsAndReferences(sourceFunction, fn, dependencyFile, routeKey, fact.source ?? source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget);
   }
@@ -456,7 +456,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
     if (depth > config.maxDependencyDepth) throw fatalLimit('FASTAPI_DEPENDENCY_DEPTH_LIMIT', `Dependency traversal exceeded maxDependencyDepth (${config.maxDependencyDepth}).`, source);
     const currentEvidence = currentFile.evidenceBySubject.get(current.id) ?? source;
     const parameters = Array.isArray(current.properties.parameters) ? current.properties.parameters as PythonParameterFact[] : [];
-    for (const parameter of inspectCurrentParameters ? parameters : []) for (const dependency of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) {
+    for (const parameter of inspectCurrentParameters ? parameters : []) for (const [dependencyIndex, dependency] of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation)).entries()) {
       const canonical = canonicalCall(dependency, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0);
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
       const target = dependencyTarget(dependency);
@@ -467,7 +467,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
       if (!next || !nextFile) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
       countDependency(symbol!, budget, config, currentEvidence);
-      addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}`, currentEvidence, { parameter: parameter.name });
+      addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}:${parameter.name}:${dependencyIndex}`, currentEvidence, { parameter: parameter.name });
       walk(nextFile, next, depth + 1);
     }
     const refs = Array.isArray(current.properties.references) ? current.properties.references as PythonExpressionFact[] : [];
@@ -481,14 +481,14 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       const targetFile = target ? files.find((item) => [...item.functions, ...item.classes].includes(target)) : undefined;
       if (target && targetFile) addEdge(owner, addSourceNode(targetFile, target), 'references', `${key}:reference:${symbol}`, source, { name: referenceName }, 'DERIVED');
     }
-    for (const call of callsOf(current)) {
+    for (const [callIndex, call] of callsOf(current).entries()) {
       const callOffset = offsetAt(currentFile.source, call.line, call.column);
       const symbol = resolveFastApiSymbol(files, currentFile, call.callee, String(current.properties.qualifiedName ?? ''), callOffset);
       const target = symbol ? uniqueFunction(files, symbol, addDiagnostic, source) : undefined;
       const targetFile = target ? files.find((item) => item.functions.includes(target)) : undefined;
       if (!target || !targetFile) continue;
       countDependency(symbol!, budget, config, currentEvidence);
-      addEdge(current, addSourceNode(targetFile, target), 'calls', `${key}:call:${symbol}:${call.line}:${call.column}`, source, { callee: symbol });
+      addEdge(current, addSourceNode(targetFile, target), 'calls', `${key}:call:${symbol}:${callIndex}`, callEvidence(currentFile.path, call.line, call.column), { callee: symbol });
       walk(targetFile, target, depth + 1);
     }
   };
@@ -548,13 +548,13 @@ function routeDependencies(route: RouteSpec): DependencyFact[] {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id);
   const offset = source?.startOffset ?? 0;
   for (const parameter of parameters) {
-    for (const expression of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation))) result.push({ expression, file: route.handlerFile, scope, offset, source });
+    for (const [index, expression] of dependencyExpressions(parameter.default).concat(dependencyExpressions(parameter.annotation)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `${parameter.name}:${index}`, source });
   }
   return result;
 }
 
 function makeDependencyFacts(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number, source?: AnalysisEvidence): DependencyFact[] {
-  return expressionsFromList(expression).map((item) => ({ expression: item, file, scope, offset, source }));
+  return expressionsFromList(expression).map((item, index) => ({ expression: item, file, scope, offset, ordinal: String(index), source }));
 }
 
 function decoratorArguments(decorator: ReturnType<typeof decoratorsOf>[number]) {
