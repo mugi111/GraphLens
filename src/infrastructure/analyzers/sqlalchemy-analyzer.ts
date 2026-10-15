@@ -94,7 +94,11 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
         const baseKeys = bases.map((base) => resolveLocalBaseKey(item.file, base) ?? `${item.module}.${base}`);
         const inherited = [...new Map(baseKeys.map((base) => models.get(base)).filter((model): model is SqlAlchemyModelFact => !!model && !!model.tableName).map((model) => [`${model.schema ?? ''}.${model.tableName}`, model])).values()];
         if (inherited.length === 1) { models.set(key, { ...inherited[0]!, classId: item.node.id, path: item.path, module: item.module, label: item.label, qualifiedName: item.qualifiedName, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); changed = true; }
-        else if (inherited.length > 1) diagnostics.push(sourceDiagnostic('SQLALCHEMY_TABLE_UNRESOLVED', `Could not prove a single inherited table for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
+        else {
+          diagnostics.push(sourceDiagnostic('SQLALCHEMY_TABLE_UNRESOLVED', `Could not prove a single inherited table for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
+          models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName: null, tableResolved: false, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] });
+          changed = true;
+        }
         continue;
       }
       const schemaFact = tableSchema(item.file.assignments, item.qualifiedName);
