@@ -14,8 +14,8 @@ export type SqlAlchemyColumnFact = {
   nullable?: boolean | null;
   unique?: boolean | null;
   index?: boolean | null;
-  foreignKeys: Array<{ target: string; evidenceId: string }>;
-  relationships: Array<{ target?: string; backPopulates?: string; backref?: string; uselist?: boolean; evidenceId: string }>;
+  foreignKeys: Array<{ target: string; sourceEvidence?: AnalysisEvidence }>;
+  relationships: Array<{ target?: string; targetKind?: 'class' | 'literal' | 'annotation' | 'unresolved'; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence }>;
   sourceEvidence?: AnalysisEvidence;
 };
 export type SqlAlchemyModelFact = {
@@ -31,8 +31,10 @@ export type SqlAlchemyModelFact = {
   tableEvidence?: AnalysisEvidence;
   columns: SqlAlchemyColumnFact[];
   constraints: SqlAlchemyConstraintFact[];
+  relationships: SqlAlchemyRelationshipFact[];
 };
 export type SqlAlchemyConstraintFact = { kind: 'primary_key' | 'unique' | 'foreign_key' | 'index'; name?: string; columns: string[]; references: string[]; sourceEvidence?: AnalysisEvidence };
+export type SqlAlchemyRelationshipFact = { name: string; target?: string; targetKind: 'class' | 'literal' | 'annotation' | 'unresolved'; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence };
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
