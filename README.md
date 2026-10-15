@@ -147,6 +147,12 @@ An import fails without replacing the active GraphLens generation if the CodeGra
 
 GraphLens itself continues to support Node.js 20.11 and newer. The CodeGraph SDK integration requires Node.js 22.5 through 24 because CodeGraph uses the built-in `node:sqlite` API.
 
+## Code graph exploration
+
+The **Code** view queries stored code facts from the selected active workspace generations. Choose Class, Function Call, Dependency, or Import, then search or select a node to inspect its saved properties, relationship kinds, evidence levels, and source locations. Expand a node by one relationship hop or show its stored members. Source buttons open the current working file for the exact evidence generation; the working file may differ from the analyzed snapshot.
+
+The query API is `GET /api/v1/code-graph?workspaces=<id>[,<id>]&preset=class|calls|dependency|imports&mode=roots|search|neighbors|children`. Search uses `q`; node expansion requires the pair `nodeWorkspace` and `node`. Pages accept `limit` (1–100), an opaque `cursor`, and `include=evidence`. Queries support at most 16 workspaces and 256 active generations. Responses are bounded to 250 nodes, 200 relationships, 1,000 evidence records, and 3 MiB; over-limit requests fail rather than silently truncating. Cursors are bound to their query and active snapshot.
+
 ## CodeGraph MCP capability
 
 On startup, GraphLens probes the configured CodeGraph MCP server with standard MCP stdio `initialize` and `tools/list` requests, and lists its available tools for connection diagnostics:
