@@ -53,6 +53,11 @@ export class DatabaseSchemaService {
     if (offset > roots.length) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
     const pageRoots = roots.slice(offset, offset + query.limit);
     const closure = buildClosure(snapshot, pageRoots, query.root);
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
+    let projection: ReturnType<GraphStore['projectGraph']>;
+    try { projection = this.store.projectGraph(closure.nodes, closure.edges, query.includeEvidence || query.includeDiagnostics); }
+    catch (error) { if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema projection exceeds evidence or property limits.', 422); throw error; }
+    const evidence = [...projection.nodes.flatMap((node) => node.evidence ?? []), ...projection.edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
     const nextOffset = offset + pageRoots.length;
     const nextCursor = nextOffset < roots.length ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
@@ -65,10 +70,11 @@ export class DatabaseSchemaService {
       query: queryEcho(query),
       page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
       rootIds: pageRoots.map((node) => node.id),
-      nodes: projectNodes(closure.nodes, snapshot.evidence, query.includeEvidence),
-      edges: projectEdges(closure.edges, snapshot.evidence, query.includeEvidence),
-      ...(query.includeDiagnostics ? { diagnostics: relevantDiagnostics(diagnostics, closure.nodes, closure.edges, snapshot.evidence) } : {}),
+      nodes: projectNodes(projection.nodes, evidence, query.includeEvidence),
+      edges: projectEdges(projection.edges, evidence, query.includeEvidence),
+      ...(query.includeDiagnostics ? { diagnostics: relevantDiagnostics(diagnostics, projection.nodes, projection.edges, evidence) } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 3 * 1_048_576) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema response exceeds the 3 MiB response limit.', 422);
     return result;
   }
 
@@ -185,7 +191,7 @@ function buildClosure(snapshot: DatabaseSchemaSnapshot, roots: GraphNode[], root
       }
     }
   }
-  if (selectedNodes.size + selectedEdges.size > 9000) throw new DatabaseSchemaError('DATABASE_QUERY_FAILED', 'Schema closure exceeds the bounded snapshot size.', 500);
+  if (selectedNodes.size > 250 || selectedEdges.size > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
   return { nodes: [...selectedNodes.values()].sort((a, b) => compare([a.kind, a.id], [b.kind, b.id])), edges: [...selectedEdges.values()].sort((a, b) => compare([a.kind, a.sourceId, a.targetId, a.id], [b.kind, b.sourceId, b.targetId, b.id])) };
 }
 function addCompactModelContext(model: GraphNode, nodeById: Map<string, GraphNode>, incoming: Map<string, GraphEdge[]>, outgoing: Map<string, GraphEdge[]>, addNode: (id: string) => GraphNode | undefined, addEdge: (edge: GraphEdge) => void) {
@@ -196,18 +202,12 @@ function addCompactModelContext(model: GraphNode, nodeById: Map<string, GraphNod
 function projectNodes(nodes: GraphNode[], evidence: AnalysisEvidence[], include: boolean): SchemaNode[] {
   const bySubject = new Map<string, AnalysisEvidence[]>();
   for (const item of evidence) if (item.subjectKind === 'node') bySubject.set(item.subjectId, [...(bySubject.get(item.subjectId) ?? []), item]);
-  return nodes.map((node) => {
-    const items = (bySubject.get(node.id) ?? []).sort((a, b) => compare([a.id], [b.id]));
-    return { ...node, level: dominantLevel(items), evidenceCount: items.length, ...(include ? { evidence: items } : { evidence: undefined }) };
-  });
+  return nodes.map((node) => { const { evidence: _evidence, ...base } = node; const items = (bySubject.get(node.id) ?? []).sort((a, b) => compare([a.id], [b.id])); return { ...base, level: node.level ?? dominantLevel(items), evidenceCount: node.evidenceCount ?? items.length, ...(include ? { evidence: items } : {}) }; });
 }
 function projectEdges(edges: GraphEdge[], evidence: AnalysisEvidence[], include: boolean): SchemaEdge[] {
   const bySubject = new Map<string, AnalysisEvidence[]>();
   for (const item of evidence) if (item.subjectKind === 'edge') bySubject.set(item.subjectId, [...(bySubject.get(item.subjectId) ?? []), item]);
-  return edges.map((edge) => {
-    const items = (bySubject.get(edge.id) ?? []).sort((a, b) => compare([a.id], [b.id]));
-    return { ...edge, level: dominantLevel(items), evidenceCount: items.length, ...(include ? { evidence: items } : { evidence: undefined }) };
-  });
+  return edges.map((edge) => { const { evidence: _evidence, ...base } = edge; const items = (bySubject.get(edge.id) ?? []).sort((a, b) => compare([a.id], [b.id])); return { ...base, level: edge.level ?? dominantLevel(items), evidenceCount: edge.evidenceCount ?? items.length, ...(include ? { evidence: items } : {}) }; });
 }
 function dominantLevel(evidence: AnalysisEvidence[]): 'DIRECT' | 'DERIVED' | 'INFERRED' { return evidence.some((item) => item.level === 'DIRECT') ? 'DIRECT' : evidence.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'INFERRED'; }
 function diagnosticCounts(items: StoredAnalysisDiagnostic[]) { return { total: items.length, info: items.filter((item) => item.severity === 'info').length, warning: items.filter((item) => item.severity === 'warning').length, error: items.filter((item) => item.severity === 'error').length }; }
