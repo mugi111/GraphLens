@@ -12,13 +12,17 @@ const identity = new GraphIdentityFactory();
 export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFile): ParsedPythonFile {
   const tree = parser.parse(file.source);
   const offsets = lineOffsets(file.source);
+  const errorRegions = collectErrorRegions(tree.topNode);
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
   const nodesById = new Map<string, GraphNode>();
   const edgesById = new Set<string>();
   const imports: PythonImportFact[] = [];
-  const diagnostics: ParsedPythonFile['diagnostics'] = [];
+  const diagnostics: ParsedPythonFile['diagnostics'] = errorRegions.map((region) => {
+    const location = point(region.from, offsets);
+    return { code: 'PYTHON_SYNTAX_RECOVERED', severity: 'warning', message: 'Python syntax error; facts intersecting the damaged syntax were omitted.', uri: file.path, line: location.line, detail: { startOffset: region.from, endOffset: region.to } };
+  });
   const addNode = (uri: string, kind: string, label: string, range: Range, properties: Record<string, unknown> = {}) => {
     const id = identity.node(workspace.id, `python://${file.path}#${uri}`, kind);
     const existing = nodesById.get(id);
@@ -42,14 +46,13 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   addEdge(fileNode, moduleNode, 'contains', { from: 0, to: 0 });
 
   function visit(node: any, scope: string[], parent: GraphNode) {
-    if (node.name === '⚠') {
-      const location = point(node.from, offsets);
-      diagnostics.push({ code: 'PYTHON_SYNTAX_RECOVERED', severity: 'warning', message: 'Python syntax error; facts outside the recovered region were retained.', uri: file.path, line: location.line, detail: { startOffset: node.from, endOffset: node.to } });
-      return;
-    }
+    if (node.name === '⚠') return;
     if (node.name === 'ClassDefinition' || node.name === 'FunctionDefinition') {
       const nameNode = directChild(node, 'VariableName');
       if (!nameNode) return;
+      const body = directChild(node, 'Body');
+      const header = { from: node.from, to: body?.from ?? node.to };
+      if (intersectsDamage(header, errorRegions)) return;
       const name = file.source.slice(nameNode.from, nameNode.to);
       const async = node.name === 'FunctionDefinition' && childNamed(node, 'async');
       const qualified = [...scope, name];
@@ -60,7 +63,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       return;
     }
     if (node.name === 'ImportStatement') {
-      parseImport(node, file, offsets, imports);
+      if (!intersectsDamage({ from: node.from, to: node.to }, errorRegions)) parseImport(node, file, offsets, imports);
       return;
     }
     for (const child of children(node)) visit(child, scope, parent);
@@ -74,32 +77,33 @@ function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: 
   const points = range(node.from, node.to, offsets);
   if (tokens.some((child) => child.name === 'from')) {
     const importIndex = tokens.findIndex((child) => child.name === 'import');
+    if (importIndex < 0) return;
     const moduleTokens = tokens.slice(0, importIndex).filter((child) => child.name === 'VariableName');
-    const relativeLevel = tokens.slice(0, importIndex).filter((child) => child.name === '.').length;
+    const relativeLevel = tokens.slice(0, importIndex).reduce((count, child) => count + (child.name === '.' ? 1 : child.name === 'Ellipsis' ? file.source.slice(child.from, child.to).length : 0), 0);
     const module = moduleTokens.map((child) => file.source.slice(child.from, child.to)).join('.');
-    let i = importIndex + 1;
-    while (i < tokens.length) {
-      if (tokens[i].name !== 'VariableName') { i++; continue; }
-      const imported = file.source.slice(tokens[i].from, tokens[i].to);
-      const alias = tokens[i + 1]?.name === 'as' && tokens[i + 2]?.name === 'VariableName' ? file.source.slice(tokens[i + 2].from, tokens[i + 2].to) : undefined;
-      out.push({ file: file.path, module, imported, alias, relativeLevel, ...points });
-      i += alias ? 3 : 1;
+    const importedTokens = flattenImportTokens(tokens.slice(importIndex + 1));
+    for (const segment of splitImportSegments(importedTokens)) {
+      const parsed = importedName(segment, file.source);
+      if (parsed) out.push({ file: file.path, module, imported: parsed.name, alias: parsed.alias, relativeLevel, ...points });
     }
   } else {
-    const segments: any[][] = [[]];
-    for (const token of tokens) {
-      if (token.name === ',') segments.push([]);
-      else segments[segments.length - 1].push(token);
-    }
-    for (const segment of segments) {
-      const nameTokens = segment.filter((child) => child.name === 'VariableName');
-      if (!nameTokens.length) continue;
-      const imported = nameTokens.map((child) => file.source.slice(child.from, child.to)).join('.');
-      const aliasIndex = segment.findIndex((child) => child.name === 'as');
-      const alias = aliasIndex >= 0 && segment[aliasIndex + 1]?.name === 'VariableName' ? file.source.slice(segment[aliasIndex + 1].from, segment[aliasIndex + 1].to) : undefined;
-      out.push({ file: file.path, module: imported, alias, relativeLevel: 0, ...points });
+    for (const segment of splitImportSegments(tokens)) {
+      const parsed = importedName(segment, file.source);
+      if (parsed) out.push({ file: file.path, module: parsed.name, alias: parsed.alias, relativeLevel: 0, ...points });
     }
   }
+}
+
+function flattenImportTokens(tokens: any[]): any[] { return tokens.flatMap((token) => token.name === 'ImportList' ? flattenImportTokens(children(token)) : [token]); }
+function splitImportSegments(tokens: any[]) { const result: any[][] = [[]]; for (const token of tokens) { if (token.name === ',') result.push([]); else if (!['(', ')'].includes(token.name)) result[result.length - 1].push(token); } return result; }
+function importedName(segment: any[], source: string): { name: string; alias?: string } | undefined {
+  const aliasIndex = segment.findIndex((token) => token.name === 'as');
+  const nameTokens = segment.slice(0, aliasIndex < 0 ? undefined : aliasIndex).filter((token) => token.name === 'VariableName');
+  if (nameTokens.length === 0 && segment.some((token) => token.name === '*')) return { name: '*' };
+  if (nameTokens.length === 0) return undefined;
+  const name = nameTokens.map((token) => source.slice(token.from, token.to)).join('.');
+  const aliasToken = aliasIndex < 0 ? undefined : segment.slice(aliasIndex + 1).find((token) => token.name === 'VariableName');
+  return { name, alias: aliasToken ? source.slice(aliasToken.from, aliasToken.to) : undefined };
 }
 
 export function sourceEvidence(subjectKind: 'node' | 'edge', subjectId: string, uri: string, type: string, bounds: Range, lineStarts: number[]): AnalysisEvidence {
@@ -108,6 +112,8 @@ export function sourceEvidence(subjectKind: 'node' | 'edge', subjectId: string, 
 }
 
 function directChild(node: any, name: string) { return children(node).find((child) => child.name === name); }
+function collectErrorRegions(root: any) { const result: Range[] = []; function walk(node: any) { if (node.name === '⚠') result.push({ from: node.from, to: node.to }); for (const child of children(node)) walk(child); } walk(root); return result; }
+function intersectsDamage(range: Range, errors: Range[]) { return errors.some((error) => error.from === error.to ? error.from >= range.from && error.from <= range.to : range.from < error.to && error.from < range.to); }
 function childNamed(node: any, name: string) { return children(node).some((child) => child.name === name); }
 function children(node: any) { const result = []; for (let child = node.firstChild; child; child = child.nextSibling) result.push(child); return result; }
 function lineOffsets(source: string) { const result = [0]; for (let i = 0; i < source.length; i++) if (source.charCodeAt(i) === 10) result.push(i + 1); return result; }
