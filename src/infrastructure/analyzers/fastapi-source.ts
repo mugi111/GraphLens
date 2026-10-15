@@ -108,13 +108,26 @@ export function canonicalFastApiName(name: string, file: FastApiFile, scope = ''
   return head === 'fastapi' ? `__unbound__.${name}` : name;
 }
 
-export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER, resolving = new Set<string>()): string | undefined {
+export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER, resolving = new Set<string>(), allowForwardDeclarations = false): string | undefined {
   const head = name.split('.')[0]!;
   const scopes = scope ? scope.split('.').map((_, index, parts) => parts.slice(0, index + 1).join('.')).reverse() : [];
   scopes.push('');
   for (const current of scopes) {
     const event = file.bindings.filter((binding) => binding.scope === current && binding.local === head && binding.offset <= offset).sort((a, b) => b.offset - a.offset)[0];
-    if (!event) continue;
+    if (!event) {
+      if (allowForwardDeclarations) {
+        const later = file.bindings.filter((binding) => binding.scope === current && binding.local === head && binding.offset > offset);
+        if (later.length) {
+          const declarations = later.map((binding) => binding.sourceNodeId ? [...file.classes, ...file.functions].find((node) => node.id === binding.sourceNodeId) : undefined);
+          if (declarations.every((declaration): declaration is GraphNode => !!declaration)) {
+            const qualified = new Set(declarations.map((declaration) => String(declaration.properties.qualifiedName ?? '')));
+            if (qualified.size === 1) return `${file.module}.${[...qualified][0]}`;
+          }
+          return undefined;
+        }
+      }
+      continue;
+    }
     if (event.shadow) return undefined;
     if (event.imported) {
       const imported = event.imported;
@@ -134,7 +147,7 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
         if (resolving.has(cycleKey)) return undefined;
         resolving.add(cycleKey);
         const alias = expressionName(value);
-        return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving) : undefined;
+        return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving, allowForwardDeclarations) : undefined;
       }
       return undefined;
     }
