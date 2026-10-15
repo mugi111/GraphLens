@@ -227,6 +227,16 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     }
     const bodies = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'accepts').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_request_body');
     const fastBodies = bodies(sources.fastApi, fast); const specBodies = bodies(sources.openApi, specOwner);
+    const fastApiRoute = ownersFor(sources.fastApi, fast, 'fastapi_route')[0];
+    const fastApiHandlerId = typeof fastApiRoute?.properties.handlerId === 'string' ? fastApiRoute.properties.handlerId : undefined;
+    const fastApiDiagnosticUris = new Set([fast, fastApiRoute, fastApiHandlerId ? nodeById(sources.fastApi, fastApiHandlerId) : undefined]
+      .map((node) => node ? evidenceFor(sources.fastApi, node.id)?.uri : undefined)
+      .filter((uri): uri is string => typeof uri === 'string'));
+    const unresolvedFastApiBody = !fastBodies.length && sources.fastApi.diagnostics.some((item) => {
+      const code = item.code ?? '';
+      const isRelevant = /FASTAPI_(UNRESOLVED_PARAMETER|UNRESOLVED_DEPENDENCY|AMBIGUOUS_DEPENDENCY|DYNAMIC_SECURITY_SCOPES)/.test(code);
+      return isRelevant && (!item.uri || fastApiDiagnosticUris.size === 0 || fastApiDiagnosticUris.has(item.uri));
+    });
     const openApiOperationEvidence = evidenceFor(sources.openApi, specOwner.id);
     const unresolvedRequestBody = !specBodies.length && sources.openApi.diagnostics.some((item) => {
       const code = item.code ?? '';
@@ -234,14 +244,12 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       return isRelevant && (!item.uri || !openApiOperationEvidence?.uri || item.uri === openApiOperationEvidence.uri);
     });
     if (!unresolvedRequestBody && fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
-    if (specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
+    if (!unresolvedFastApiBody && specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
     if (fastBodies.length === 1 && specBodies.length === 1 && typeof fastBodies[0]!.properties.required === 'boolean' && typeof specBodies[0]!.properties.required === 'boolean' && fastBodies[0]!.properties.required !== specBodies[0]!.properties.required) addMismatch('request_body_required', { implementationRequired: fastBodies[0]!.properties.required, contractRequired: specBodies[0]!.properties.required });
     if (fastBodies.length === 1 && specBodies.length === 1) {
-      const mediaByInput: Record<string, string[]> = { body: ['application/json'], form: ['application/x-www-form-urlencoded'], file: ['multipart/form-data'] };
-      const inputKind = fastBodies[0]!.properties.in;
-      const implementationMedia = typeof inputKind === 'string' ? mediaByInput[inputKind] : undefined;
+      const implementationMedia = Array.isArray(fastBodies[0]!.properties.contentTypes) ? fastBodies[0]!.properties.contentTypes.filter((value): value is string => typeof value === 'string') : [];
       const contractMedia = Array.isArray(specBodies[0]!.properties.contentTypes) ? specBodies[0]!.properties.contentTypes.filter((value): value is string => typeof value === 'string') : [];
-      if (implementationMedia && contractMedia.length && !implementationMedia.some((type) => contractMedia.includes(type))) addMismatch('request_body_media', { implementationMedia, contractMedia: [...new Set(contractMedia)].sort() });
+      if (implementationMedia.length && contractMedia.length && !implementationMedia.some((type) => contractMedia.includes(type))) addMismatch('request_body_media', { implementationMedia: [...new Set(implementationMedia)].sort(), contractMedia: [...new Set(contractMedia)].sort() });
     }
     const responseStatuses = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'returns').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_response').map((node) => node.properties.statusCode ?? node.properties.status).filter((status) => typeof status === 'string' || typeof status === 'number').map(String);
     const fastStatus = responseStatuses(sources.fastApi, fast);
