@@ -11,10 +11,12 @@ import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type Cr
 import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
 import { parseWorkspaceGraphQuery, WorkspaceGraphError, type WorkspaceQueryService } from '../application/workspace-query-service.js';
 import { SourceNavigationError, SourceNavigationService } from '../application/source-navigation-service.js';
+import { CodeGraphQueryError, CodeGraphQueryService, parseCodeGraphQuery } from '../application/code-graph-query-service.js';
 
 export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string, codegraphSnapshot: { configured: boolean; packageVersion?: string; runtimeSupported: boolean; detail: string }) {
   const app = new Hono();
   const sourceNavigation = new SourceNavigationService(store);
+  const codeGraphQuery = new CodeGraphQueryService(store);
   app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: { mcp: await adapter.status(), snapshot: codegraphSnapshot } }));
   app.get('/api/v1/source', async (c) => {
     c.header('Cache-Control', 'no-store');
@@ -91,6 +93,10 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
     try { return c.json(workspaceQuery.query(parsed.query)); }
     catch (error) { if (error instanceof WorkspaceGraphError) return c.json({ error: error.message, code: error.code }, error.status); return c.json({ error: 'Workspace graph query failed.', code: 'WORKSPACE_GRAPH_QUERY_FAILED' }, 500); }
+  });
+  app.get('/api/v1/code-graph', (c) => {
+    const parsed=parseCodeGraphQuery(new URL(c.req.url).searchParams);if('error' in parsed)return c.json({error:parsed.error,code:parsed.code},400);
+    try{return c.json(codeGraphQuery.query(parsed.query));}catch(error){if(error instanceof CodeGraphQueryError)return c.json({error:error.message,code:error.code},error.status);return c.json({error:'Code graph query failed.',code:'CODE_GRAPH_QUERY_FAILED'},500);}
   });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
   app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
