@@ -84,10 +84,11 @@ function uniqueOwners(items: ContributionOwner[]): ContributionOwner[] {
   const values = new Map(items.map((item) => [`${item.analyzerId}:${item.generationId}`, item]));
   return [...values.values()].sort((a, b) => ownerRank(a) - ownerRank(b) || a.analyzerId.localeCompare(b.analyzerId) || a.generationId - b.generationId);
 }
-function compareContribution(a: { analyzerId?: string; generationId?: number }, b: { analyzerId?: string; generationId?: number }) {
+function compareContribution(a: { analyzerId?: string; generationId?: number; level?: 'DIRECT' | 'DERIVED' | 'INFERRED' }, b: { analyzerId?: string; generationId?: number; level?: 'DIRECT' | 'DERIVED' | 'INFERRED' }) {
   const left = owner(a), right = owner(b);
-  return ownerRank(left) - ownerRank(right) || left.analyzerId.localeCompare(right.analyzerId) || left.generationId - right.generationId;
+  return ownerRank(left) - ownerRank(right) || evidenceRank(a.level) - evidenceRank(b.level) || left.analyzerId.localeCompare(right.analyzerId) || left.generationId - right.generationId;
 }
+function evidenceRank(level: 'DIRECT' | 'DERIVED' | 'INFERRED' | undefined) { return level === 'DIRECT' ? 0 : level === 'DERIVED' ? 1 : 2; }
 function ownerRank(item: ContributionOwner) { return item.analyzerId === 'builtin.codegraph' ? 0 : 1; }
 function stable(value: unknown): string { return JSON.stringify(canonical(value)) ?? String(value); }
 function canonical(value: unknown): unknown {
