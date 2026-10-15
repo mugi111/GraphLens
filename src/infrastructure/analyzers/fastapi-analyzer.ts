@@ -322,7 +322,9 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
   for (const param of params) {
     const defaultExpr = param.default;
     const scope = String(route.handler.properties.qualifiedName ?? '');
-    const markerExpression = findParameterMarker(defaultExpr, route.handlerFile, scope, source?.startOffset ?? 0) ?? findParameterMarker(param.annotation, route.handlerFile, scope, source?.startOffset ?? 0);
+    const defaultMarker = findParameterMarker(defaultExpr, route.handlerFile, scope, source?.startOffset ?? 0);
+    const annotationMarker = findParameterMarker(param.annotation, route.handlerFile, scope, source?.startOffset ?? 0);
+    const markerExpression = defaultMarker ?? annotationMarker;
     const marker = canonicalCall(markerExpression, route.handlerFile, scope, source?.startOffset ?? 0);
     const defaultName = marker?.split('.').at(-1);
     const explicit = defaultName ? PARAMETER_NAMES.get(`fastapi.${defaultName}`) : undefined;
@@ -332,7 +334,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (!paramIn && defaultExpr) addDiagnostic('FASTAPI_UNRESOLVED_PARAMETER', `Parameter '${param.name}' has a dynamic or unsupported marker.`, source);
     if (paramIn) {
       const inputKind = paramIn === 'body' || paramIn === 'form' || paramIn === 'file';
-      const requiredState = paramIn === 'path' ? true : parameterRequired(markerExpression, param.hasDefault);
+      const requiredState = paramIn === 'path' ? true : parameterRequired(markerExpression, param.hasDefault, defaultMarker !== undefined);
       const node = addNode(inputKind ? 'api_request_body' : 'api_parameter', param.name, route.handlerFile.path, `${routeKey}/parameter/${param.name}`, {
         name: param.name, in: paramIn, required: requiredState,
         ...(param.annotation ? { annotation: schemaName(param.annotation) } : {}),
@@ -599,12 +601,13 @@ function mergeResponses(...collections: ResponseFact[][]): ResponseFact[] {
   for (const collection of collections) for (const response of collection) byStatus.set(response.status, response);
   return [...byStatus.values()].sort((a, b) => a.status.localeCompare(b.status));
 }
-function parameterRequired(marker: PythonExpressionFact | undefined, hasDefault: boolean): boolean | null {
+function parameterRequired(marker: PythonExpressionFact | undefined, hasDefault: boolean, markerIsDefault = false): boolean | null {
   if (!marker) return !hasDefault;
   const args = argsOf(marker);
   const explicit = keywordArgs(args).get('default') ?? args.find((arg) => arg.kind === 'positional')?.expression;
-  if (!explicit) return !hasDefault;
-  if (explicit.kind === 'Ellipsis') return true;
+  if (explicit?.kind === 'Ellipsis') return true;
+  if (!explicit) return markerIsDefault || !hasDefault;
+  if (hasDefault && !markerIsDefault) return false;
   if (['string', 'number', 'boolean', 'none'].includes(explicit.literalKind ?? '')) return false;
   return null;
 }
