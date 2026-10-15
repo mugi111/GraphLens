@@ -7,7 +7,7 @@ const FIXED_EXCLUDES = new Set(['.git', '.hg', '.svn', 'node_modules', 'build', 
 const MAX_ENTRIES = 100_000;
 const MAX_DIRECTORIES = 20_000;
 const MAX_DEPTH = 64;
-const HARD = { files: 500, fileBytes: 10 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 };
+const HARD = { files: 64, fileBytes: 10 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 };
 
 export type OpenApiConfig = { apiNamespace: string; specFiles: string[]; discover: boolean; maxSpecFiles: number; maxFileBytes: number; maxTotalBytes: number };
 export type OpenApiSourceFile = { path: string; bytes: Buffer; source: string; hash: string; absolute: string; size: number; ino: number; mtimeMs: number };
@@ -33,7 +33,7 @@ export function openApiConfig(input: Record<string, unknown>): OpenApiConfig {
   if (typeof discover !== 'boolean') throw new Error('discover must be a boolean.');
   const specFiles = paths(input.specFiles, 'specFiles');
   if (!discover && !specFiles.length) throw new Error('specFiles is required when discovery is disabled.');
-  return { apiNamespace, specFiles, discover, maxSpecFiles: bounded(input.maxSpecFiles, 100, HARD.files, 'maxSpecFiles'), maxFileBytes: bounded(input.maxFileBytes, 5 * 1024 * 1024, HARD.fileBytes, 'maxFileBytes'), maxTotalBytes: bounded(input.maxTotalBytes, 20 * 1024 * 1024, HARD.totalBytes, 'maxTotalBytes') };
+  return { apiNamespace, specFiles, discover, maxSpecFiles: bounded(input.maxSpecFiles, 64, HARD.files, 'maxSpecFiles'), maxFileBytes: bounded(input.maxFileBytes, 5 * 1024 * 1024, HARD.fileBytes, 'maxFileBytes'), maxTotalBytes: bounded(input.maxTotalBytes, 20 * 1024 * 1024, HARD.totalBytes, 'maxTotalBytes') };
 }
 
 export async function readOpenApiSnapshot(rootInput: string, config: OpenApiConfig, requestedRevision?: string): Promise<OpenApiSnapshot> {
