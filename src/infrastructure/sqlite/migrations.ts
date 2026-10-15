@@ -239,3 +239,38 @@ export const pluginInstallationIdentityMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Stores immutable input-generation dependencies for derived analysis generations. */
+export const analysisGenerationInputsMigration: SchemaMigration = {
+  version: 6,
+  name: 'analysis-generation-inputs',
+  up(db) {
+    db.exec(`
+      CREATE TABLE analysis_generation_inputs (
+        generation_id INTEGER NOT NULL,
+        input_generation_id INTEGER NOT NULL,
+        input_analyzer_id TEXT NOT NULL,
+        PRIMARY KEY(generation_id, input_generation_id),
+        CHECK(generation_id <> input_generation_id),
+        FOREIGN KEY(generation_id) REFERENCES analysis_generations(id) ON DELETE CASCADE,
+        FOREIGN KEY(input_generation_id) REFERENCES analysis_generations(id)
+      );
+      CREATE INDEX analysis_generation_inputs_by_input
+        ON analysis_generation_inputs(input_generation_id, generation_id);
+      CREATE TRIGGER analysis_generation_inputs_integrity
+        BEFORE INSERT ON analysis_generation_inputs
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM analysis_generations derived
+            JOIN analysis_generations input ON input.id=NEW.input_generation_id
+            JOIN analysis_runs input_run ON input_run.id=input.run_id
+            WHERE derived.id=NEW.generation_id
+              AND derived.workspace_id=input.workspace_id
+              AND derived.analyzer_id<>input.analyzer_id
+              AND input.analyzer_id=NEW.input_analyzer_id
+              AND input_run.status='succeeded'
+          ) THEN RAISE(ABORT, 'invalid analysis generation input') END;
+        END;
+    `);
+  },
+};
