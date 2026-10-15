@@ -121,7 +121,7 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
           const declarations = later.map((binding) => binding.sourceNodeId ? [...file.classes, ...file.functions].find((node) => node.id === binding.sourceNodeId) : undefined);
           if (declarations.every((declaration): declaration is GraphNode => !!declaration)) {
             const qualified = new Set(declarations.map((declaration) => String(declaration.properties.qualifiedName ?? '')));
-            if (qualified.size === 1) return `${file.module}.${[...qualified][0]}`;
+            if (qualified.size === 1) return appendReferenceSuffix(`${file.module}.${[...qualified][0]}`, name);
           }
           return undefined;
         }
@@ -151,13 +151,20 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
       }
       return undefined;
     }
-    const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
+    const declaration = event.sourceNodeId ? [...file.classes, ...file.functions].find((node) => node.id === event.sourceNodeId) : undefined;
+    const qualifiedName = declaration ? String(declaration.properties.qualifiedName ?? head) : head;
+    const local = appendReferenceSuffix(`${file.module}.${qualifiedName}`, name);
     return existsSymbol(files, local) ? local : undefined;
   }
   const hasBinding = file.bindings.some((binding) => binding.local === head && scopes.includes(binding.scope));
   if (hasBinding) return undefined;
   const sameModule = `${file.module}.${name}`;
   return existsSymbol(files, sameModule) ? sameModule : undefined;
+}
+
+function appendReferenceSuffix(base: string, name: string) {
+  const suffix = name.split('.').slice(1);
+  return `${base}${suffix.length ? `.${suffix.join('.')}` : ''}`;
 }
 
 export function resolveFastApiAssignmentSymbol(file: FastApiFile, name: string, scope = '', offset = Number.MAX_SAFE_INTEGER): string | undefined {
