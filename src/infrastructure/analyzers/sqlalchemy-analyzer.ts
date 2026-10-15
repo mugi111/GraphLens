@@ -534,7 +534,23 @@ function resolveLocalBaseKey(file: SqlAlchemyCollectedFile, name: string, scope 
     const event = file.lexicalImports.filter((binding) => binding.scope === current && binding.local === head && binding.offset <= offset).sort((a, b) => b.offset - a.offset)[0];
     if (!event) continue;
     const imported = file.pythonImports.find((binding) => binding.scope === current && binding.fact.startOffset === event.offset);
-    if (!imported) return null;
+    if (!imported) {
+      const declaration = file.classes.find((node) => {
+        const qualifiedName = String(node.properties.qualifiedName ?? '');
+        const parts = qualifiedName.split('.');
+        return parts.pop() === head && parts.join('.') === current && file.evidenceBySubject.get(node.id)?.endOffset === event.offset;
+      });
+      if (declaration) return `${String(declaration.properties.module)}.${String(declaration.properties.qualifiedName)}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
+      const assignment = file.assignments.find((node) => node.properties.scope === current && expressionName(node.properties.target) === head && file.evidenceBySubject.get(node.id)?.endOffset === event.offset);
+      if (!assignment) return null;
+      const value = asExpression(assignment.properties.value);
+      const assignmentImports = importsFor(file, current, file.evidenceBySubject.get(assignment.id)?.startOffset);
+      const canonical = value?.kind === 'call' && typeof value.name === 'string' ? canonicalSqlAlchemyName(value.name, assignmentImports) : '';
+      const verifiedFactory = canonical === 'sqlalchemy.orm.declarative_base' || canonical === 'sqlalchemy.ext.declarative.declarative_base' || canonical === 'sqlalchemy.orm.registry' || (!!value && isRegistryGenerateBase(value, assignmentImports, new Set(), String(assignment.properties.module), calls(assignment)));
+      if (verifiedFactory) return `${String(assignment.properties.module)}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
+      const alias = expressionName(assignment.properties.value);
+      return alias && alias !== name ? resolveLocalBaseKey(file, alias, current, event.offset - 1) : null;
+    }
     const fact = imported.fact;
     if (fact.imported) {
       if (head !== (fact.alias ?? fact.imported)) return null;
