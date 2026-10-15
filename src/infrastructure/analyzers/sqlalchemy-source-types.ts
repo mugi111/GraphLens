@@ -37,7 +37,7 @@ export type SqlAlchemyModelFact = {
   relationships: SqlAlchemyRelationshipFact[];
 };
 export type SqlAlchemyConstraintFact = { kind: 'primary_key' | 'unique' | 'foreign_key' | 'index'; name?: string; columns: string[]; references: string[]; sourceEvidence?: AnalysisEvidence };
-export type SqlAlchemyRelationshipFact = { name: string; target?: string; targetKind: 'class' | 'literal' | 'annotation' | 'unresolved'; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence };
+export type SqlAlchemyRelationshipFact = { name: string; target?: string; targetKind: 'class' | 'literal' | 'annotation' | 'unresolved'; sourcePath: string; backPopulates?: string; backref?: string; uselist?: boolean | null; sourceEvidence?: AnalysisEvidence };
 export type SqlAlchemyCollectedFile = {
   path: string;
   imports: SqlAlchemyImportBinding;
