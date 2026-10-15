@@ -257,8 +257,18 @@ function literalValue(node: any, source: string): string | number | boolean | nu
   if (node.name === 'False' || text === 'False') return false;
   if (node.name === 'None') return null;
   if (node.name === 'Number') { const normalized = text.replaceAll('_', ''); const value = Number(normalized); return Number.isFinite(value) && Number.isSafeInteger(value) || Number.isFinite(value) && !Number.isInteger(value) ? value : text; }
-  if (node.name === 'String') return decodeStringContent(text);
+  if (node.name === 'String') {
+    const literal = parseStringLiteral(text);
+    if (!literal || literal.prefix.includes('f')) return undefined;
+    return literal.prefix.includes('r') ? literal.content : decodeStringContent(literal.content);
+  }
   return undefined;
+}
+
+function parseStringLiteral(text: string): { prefix: string; content: string } | undefined {
+  const match = /^([rubf]*)(\"\"\"|'''|\"|')([\s\S]*)\2$/i.exec(text);
+  if (!match) return undefined;
+  return { prefix: match[1].toLowerCase(), content: match[3] };
 }
 
 function decodeStringContent(text: string): string {
