@@ -1,8 +1,8 @@
 import { Buffer } from 'node:buffer';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
-import { readCurrentSource, SourceReadError } from '../infrastructure/runtime/source-reader.js';
+import { readCurrentSource, SourceReadError, type SourceHttpStatus } from '../infrastructure/runtime/source-reader.js';
 
-export class SourceNavigationError extends Error { constructor(readonly code: string, message: string, readonly status: number) { super(message); } }
+export class SourceNavigationError extends Error { constructor(readonly code: string, message: string, readonly status: SourceHttpStatus) { super(message); } }
 export class SourceNavigationService {
   constructor(private readonly store: GraphStore) {}
   async open(input: { workspaceId: string; analyzerId: string; generationId: number; evidenceId: string }) {
