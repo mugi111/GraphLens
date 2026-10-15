@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { DatabaseSchemaSnapshot, GraphStore, StoredAnalysisDiagnostic } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type DatabaseSchemaQuery = {
   workspace: string;
@@ -16,13 +17,13 @@ export type DatabaseSchemaQuery = {
   includeDiagnostics: boolean;
 };
 
-type CursorPayload = { v: 1; workspace: string; analyzerId: 'builtin.sqlalchemy'; generationId: number; filters: string; offset: number };
+type CursorPayload = { v: 1; workspace: string; analyzerId: 'builtin.sqlalchemy'; generationId: number; projectionSnapshotId: string; filters: string; offset: number };
 type SchemaQueryFilter = Pick<DatabaseSchemaQuery, 'root' | 'namespace' | 'schema' | 'table' | 'model' | 'includeEvidence' | 'includeDiagnostics'>;
 type SchemaNode = GraphNode & { evidenceCount: number };
 type SchemaEdge = GraphEdge & { evidenceCount: number };
 
 export class DatabaseSchemaError extends Error {
-  constructor(public readonly code: 'WORKSPACE_NOT_FOUND' | 'DATABASE_ANALYSIS_NOT_FOUND' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'DATABASE_SNAPSHOT_CHANGED' | 'DATABASE_QUERY_FAILED', message: string, public readonly status: 400 | 404 | 409 | 500 = 404) { super(message); }
+  constructor(public readonly code: 'WORKSPACE_NOT_FOUND' | 'DATABASE_ANALYSIS_NOT_FOUND' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'DATABASE_SNAPSHOT_CHANGED' | 'DATABASE_QUERY_FAILED' | 'DATABASE_QUERY_TOO_LARGE', message: string, public readonly status: 400 | 404 | 409 | 422 | 500 = 404) { super(message); }
 }
 
 export class DatabaseSchemaService {
@@ -37,19 +38,23 @@ export class DatabaseSchemaService {
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.sqlalchemy' || cursor.filters !== filterHash)) {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
-    const snapshot = this.store.databaseSchemaSnapshot(query.workspace);
+    let snapshot: DatabaseSchemaSnapshot | undefined;
+    try { snapshot = this.store.databaseSchemaSnapshot(query.workspace); } catch (error) {
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', error.message, 422);
+      throw error;
+    }
     if (!snapshot) {
       if (cursor) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
       throw new DatabaseSchemaError('DATABASE_ANALYSIS_NOT_FOUND', 'No active SQLAlchemy analysis exists for this workspace.');
     }
-    if (cursor && cursor.generationId !== snapshot.analysis.generationId) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
+    if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
     const roots = selectRoots(snapshot, query);
     const offset = cursor?.offset ?? 0;
     if (offset > roots.length) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
     const pageRoots = roots.slice(offset, offset + query.limit);
     const closure = buildClosure(snapshot, pageRoots, query.root);
     const nextOffset = offset + pageRoots.length;
-    const nextCursor = nextOffset < roots.length ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, filters: filterHash, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < roots.length ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
     const result = {
       workspace: snapshot.workspace,
@@ -86,8 +91,8 @@ export class DatabaseSchemaService {
 
 function isCursor(value: unknown): value is CursorPayload {
   if (!isRecord(value)) return false;
-  const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'v', 'workspace'];
-  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
+  const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'projectionSnapshotId', 'v', 'workspace'];
+  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && typeof value.projectionSnapshotId === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.projectionSnapshotId) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
 }
 function filterKey(query: DatabaseSchemaQuery) {
   return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
