@@ -71,7 +71,12 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     return node;
   };
   const addSourceNode = (file: FastApiFile, source: GraphNode) => {
-    if (!nodesById.has(source.id)) { nodesById.set(source.id, source); nodes.push(source); }
+    if (!nodesById.has(source.id)) {
+      const safeProperties: Record<string, unknown> = {};
+      for (const key of ['module', 'qualifiedName', 'async', 'declarationOrdinal']) if (source.properties[key] !== undefined) safeProperties[key] = source.properties[key];
+      const safeNode: GraphNode = { id: source.id, workspaceId: source.workspaceId, kind: source.kind, label: source.label, properties: safeProperties };
+      nodesById.set(safeNode.id, safeNode); nodes.push(safeNode);
+    }
     const sourceEvidence = file.evidenceBySubject.get(source.id);
     if (sourceEvidence && !evidenceIds.has(sourceEvidence.id)) { evidenceIds.add(sourceEvidence.id); evidence.push(sourceEvidence); }
     return source;
