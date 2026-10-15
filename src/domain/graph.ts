@@ -30,6 +30,11 @@ export type Evidence = {
   type: string;
   uri?: string;
   line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  startOffset?: number;
+  endOffset?: number;
   detail?: string;
   level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
   provenance?: Record<string, unknown>;
