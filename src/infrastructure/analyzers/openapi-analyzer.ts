@@ -93,7 +93,20 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       const properties = safeProperties(scheme);
       for (const key of ['name', 'in', 'scheme', 'bearerFormat', 'openIdConnectUrl', 'type', 'description']) if (typeof properties[key] === 'string') { /* retained below */ }
       const safe: Record<string, unknown> = {};
-      for (const key of ['type', 'description', 'name', 'in', 'scheme', 'bearerFormat', 'openIdConnectUrl', 'flows', 'httpBearerFormat']) if (safeValue(properties[key]) || (properties[key] && typeof properties[key] === 'object' && !Array.isArray(properties[key]))) safe[key] = properties[key];
+      for (const key of ['type', 'description', 'name', 'in', 'scheme', 'bearerFormat', 'openIdConnectUrl']) if (safeValue(properties[key])) safe[key] = properties[key];
+      const flows = get(scheme, 'flows');
+      if (flows) {
+        const safeFlows: Record<string, unknown> = {};
+        for (const [flowName, flow] of mapPairs(flows)) {
+          if (!['implicit', 'password', 'clientCredentials', 'authorizationCode'].includes(flowName)) continue;
+          const output: Record<string, unknown> = {};
+          for (const key of ['authorizationUrl', 'tokenUrl', 'refreshUrl']) { const field = valueAt(flow, key); if (typeof field === 'string') output[key] = field; }
+          const scopes: Record<string, string> = {};
+          for (const [scope, description] of mapPairs(get(flow, 'scopes'))) { const text = getScalar(description); if (typeof text === 'string') scopes[scope] = text; }
+          output.scopes = scopes; safeFlows[flowName] = output;
+        }
+        safe.flows = safeFlows;
+      }
       const schemeNode = node(doc, 'api_security_scheme', `components/securitySchemes/${escapePointer(name)}`, name, safe, doc.evidence(scheme, 'security-scheme'));
       schemes.set(name, schemeNode); edge(doc, root, schemeNode, 'contains', `security-scheme:${name}`, doc.evidence(scheme, 'security-scheme'));
     }
@@ -145,9 +158,20 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       for (const [contentType, media] of mapPairs(get(body, 'content'))) { const schema = get(media, 'schema'); if (schema) addSchemaReference(schema, target, `${key}/${contentType}`); }
     }
     function addSchemaReference(schema: YamlNode, owner: GraphNode, key: string) {
-      const ref = valueAt(schema, '$ref');
-      if (typeof ref === 'string') { const target = node(doc, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, sourcePath: doc.file.path }, doc.evidence(schema, 'schema-reference')); edge(doc, owner, target, 'uses_schema', key, doc.evidence(schema, 'schema-reference')); }
-      else { const typ = valueAt(schema, 'type'); if (typeof typ === 'string') { const inline = node(doc, 'openapi_schema', `${key}/inline`, typ, safeProperties(schema), doc.evidence(schema, 'inline-schema')); edge(doc, owner, inline, 'uses_schema', key, doc.evidence(schema, 'inline-schema')); } }
+      const seen = new Set<YamlNode>();
+      const walk = (current: YamlNode, suffix: string, depth: number) => {
+        if (seen.has(current)) return;
+        seen.add(current);
+        if (depth > MAX_REF_DEPTH) { diag('OPENAPI_SCHEMA_DEPTH_LIMIT', `Schema nesting exceeds ${MAX_REF_DEPTH} at '${key}'.`, doc.file.path); return; }
+        const ref = valueAt(current, '$ref');
+        if (typeof ref === 'string') { const target = node(doc, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, sourcePath: doc.file.path }, doc.evidence(current, 'schema-reference')); edge(doc, owner, target, 'uses_schema', `${key}${suffix}`, doc.evidence(current, 'schema-reference')); }
+        const typ = valueAt(current, 'type');
+        if (depth === 0 && typeof typ === 'string' && typeof ref !== 'string') { const inline = node(doc, 'openapi_schema', `${key}/inline`, typ, safeProperties(current), doc.evidence(current, 'inline-schema')); edge(doc, owner, inline, 'uses_schema', key, doc.evidence(current, 'inline-schema')); }
+        for (const keyword of ['items', 'additionalProperties', 'not']) { const child = get(current, keyword); if (child) walk(child, `${suffix}/${keyword}`, depth + 1); }
+        for (const keyword of ['allOf', 'anyOf', 'oneOf', 'prefixItems']) for (const [index, child] of getSeq(get(current, keyword)).entries()) walk(child, `${suffix}/${keyword}/${index}`, depth + 1);
+        for (const [name, child] of mapPairs(get(current, 'properties'))) walk(child, `${suffix}/properties/${escapePointer(name)}`, depth + 1);
+      };
+      walk(schema, '', 0);
     }
     function valueAt(node: YamlNode | undefined, key: string): unknown { return safeValue(getScalar(get(node, key))) ? getScalar(get(node, key)) : undefined; }
     function safeProperties(node: YamlNode): Record<string, unknown> { const out: Record<string, unknown> = {}; for (const [key, value] of mapPairs(node)) { const v = value.toJSON(); if (safeValue(v)) out[key] = v; } return out; }
@@ -171,7 +195,7 @@ function stringAt(doc: OpenApiDocument, root: YamlNode, path: string[]) { let cu
 function valueAt(node: YamlNode, key: string) { return scalar(property(node, key)); }
 function safeValue(value: unknown): value is string | number | boolean | null | string[] { return value === null || typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) || (Array.isArray(value) && value.length <= 256 && value.every((item) => typeof item === 'string')); }
 function stringArray(value: unknown) { return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').slice(0, 256) : undefined; }
-function safeProperties(node: YamlNode) { const value = node.toJSON(); return value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([, item]) => safeValue(item))) : {}; }
+function safeProperties(node: YamlNode) { const value = node.toJSON(); const omitted = new Set(['default', 'example', 'examples', 'externalValue']); return value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter(([key, item]) => !omitted.has(key) && safeValue(item))) : {}; }
 function escapePointer(value: string) { return value.replace(/~/g, '~0').replace(/\//g, '~1'); }
 function decodePointer(value: string) { if (/~(?![01])/.test(value)) throw new Error('bad pointer'); return value.replace(/~1/g, '/').replace(/~0/g, '~'); }
 function hash(value: string) { return idsHash(value); }
