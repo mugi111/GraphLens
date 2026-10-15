@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import cytoscape, { type Core } from 'cytoscape';
 import './architecture.css';
+import { SourceEvidenceButton } from './source-viewer.js';
 
 type Workspace = { id: string; name: string; path: string };
 type Root = 'endpoint' | 'handler' | 'model' | 'table' | 'finding';
@@ -227,6 +228,16 @@ function AccessibleGraph({ items, edges, onSelect, selectedId }: { items: Item[]
 }
 
 function Inspector({ item, inputs, analysis }: { item?: Item; inputs: Result['analysis']['inputGenerations']; analysis: Result['analysis'] }) {
-  return <aside className="architecture-inspector"><details open><summary>Selection details</summary>{!item ? <p className="muted">Select a node or relationship in the graph or lists.</p> : <><p className="eyebrow">{item.kind.replaceAll('_', ' ')}</p><h3>{item.label ?? item.id}</h3><p>Evidence level: <strong>{item.level}</strong></p><p>Evidence count: {item.evidenceCount}</p>{item.sourceId && <p>Relationship: <code>{item.sourceId} → {item.targetId}</code></p>}<h3>Properties and evidence</h3><pre>{JSON.stringify({ properties: item.properties, evidence: item.evidence ?? [] }, null, 2)}</pre><h3>Analysis provenance</h3><p>Generation: {analysis.generationId}</p><p>Source revision: <code>{analysis.sourceRevision ?? 'not provided'}</code></p><ul>{inputs.map(input => <li key={input.analyzerId}><code>{input.analyzerId} #{input.generationId}</code></li>)}</ul></>}</details></aside>;
+  return <aside className="architecture-inspector"><details open><summary>Selection details</summary>{!item ? <p className="muted">Select a node or relationship in the graph or lists.</p> : <><p className="eyebrow">{item.kind.replaceAll('_', ' ')}</p><h3>{item.label ?? item.id}</h3><p>Evidence level: <strong>{item.level}</strong></p><p>Evidence count: {item.evidenceCount}</p>{item.sourceId && <p>Relationship: <code>{item.sourceId} → {item.targetId}</code></p>}<h3>Properties and evidence</h3><pre>{JSON.stringify({ properties: item.properties, evidence: item.evidence ?? [] }, null, 2)}</pre>{item.evidence?.map(entry => { const sources = architectureEvidenceSources(entry, item.workspaceId, inputs); return <p key={entry.id}><code>{entry.uri ?? 'No source location recorded'}</code><br/>{sources.length ? sources.map(source => <SourceEvidenceButton key={`${source.analyzerId}:${source.generationId}:${source.evidenceId}`} source={source}/>) : <span>Source file unavailable for this evidence.</span>}</p>; })}<h3>Analysis provenance</h3><p>Generation: {analysis.generationId}</p><p>Source revision: <code>{analysis.sourceRevision ?? 'not provided'}</code></p><ul>{inputs.map(input => <li key={input.analyzerId}><code>{input.analyzerId} #{input.generationId}</code></li>)}</ul></>}</details></aside>;
+}
+function architectureEvidenceSources(evidence: Evidence, workspaceId: string, inputs: Result['analysis']['inputGenerations']) {
+  const provenance = evidence.provenance;
+  if (provenance && typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') return [{ workspaceId, analyzerId: provenance.analyzerId, generationId: provenance.generationId, evidenceId: provenance.sourceEvidenceId }];
+  if (provenance && Array.isArray(provenance.sources)) return provenance.sources.flatMap((source) => {
+    if (!source || typeof source !== 'object') return [];
+    const value = source as Record<string, unknown>; const generation = inputs.find(input => input.analyzerId === value.analyzerId);
+    return generation && typeof value.analyzerId === 'string' && typeof value.evidenceId === 'string' ? [{ workspaceId, analyzerId: value.analyzerId, generationId: generation.generationId, evidenceId: value.evidenceId }] : [];
+  });
+  return [];
 }
 function Diagnostics({ diagnostics, counts }: { diagnostics: Diagnostic[]; counts: Result['analysis']['diagnostics'] }) { return <section className="diagnostics"><h2>Related diagnostics <span>{diagnostics.length} shown · {counts.warning} warnings, {counts.error} errors, {counts.total} generation-wide</span></h2>{diagnostics.length ? <ul>{diagnostics.map((item, i) => <li key={i}><strong>{item.severity} · {item.code ?? 'Diagnostic'}</strong><p>{item.message}</p>{item.uri && <code>{item.uri}{item.line ? `:${item.line}` : ''}</code>}</li>)}</ul> : <p className="muted">No related diagnostics for this page.</p>}</section>; }
