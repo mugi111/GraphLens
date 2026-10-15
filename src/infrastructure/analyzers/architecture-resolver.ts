@@ -148,7 +148,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const pkey = (node: GraphNode) => { const loc = node.properties.in; const name = node.properties.alias ?? node.properties.name; return typeof loc === 'string' && typeof name === 'string' ? `${loc}\u0000${name}` : undefined; };
     const fastByParam = new Map(fastParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
     const specByParam = new Map(specParams.map((node) => [pkey(node), node]).filter((entry): entry is [string, GraphNode] => !!entry[0]));
-    for (const key of new Set([...fastByParam.keys(), ...specByParam.keys()])) {
+    for (const key of fastByParam.size && specByParam.size ? new Set([...fastByParam.keys(), ...specByParam.keys()]) : []) {
       const impl = fastByParam.get(key); const contract = specByParam.get(key);
       if (!impl || !contract) { addMismatch('parameters', { parameter: key.replace('\u0000', ':') }); continue; }
       if (typeof impl.properties.required === 'boolean' && typeof contract.properties.required === 'boolean' && impl.properties.required !== contract.properties.required) addMismatch('parameter_required', { parameter: key.replace('\u0000', ':'), implementationRequired: impl.properties.required, contractRequired: contract.properties.required });
@@ -168,6 +168,19 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const specMode = specOperation ? stringProperty(specOperation, 'securityMode') : undefined;
     const fastHasSecurity = relations(sources.fastApi, fast, 'secured_by').length > 0;
     if (specMode === 'disabled' && fastHasSecurity) addMismatch('security_disabled', { implementationHasSecurity: true, contractSecurityMode: specMode });
+    const securityFacts = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'secured_by').map((edge) => {
+      const requirement = nodeById(generation, edge.targetId);
+      if (!requirement) return undefined;
+      const schemeEdge = generation.edges.filter((item) => item.sourceId === requirement.id && item.kind === 'uses_scheme').sort((a, b) => a.id.localeCompare(b.id))[0];
+      const scheme = schemeEdge ? nodeById(generation, schemeEdge.targetId) : undefined;
+      if (!scheme) return undefined;
+      const tuple = normalizeScheme(scheme);
+      const rawScopes = schemeEdge?.properties.scopes ?? requirement.properties.scopes;
+      const scopes = Array.isArray(rawScopes) ? rawScopes.filter((value): value is string => typeof value === 'string').sort() : undefined;
+      return tuple && scopes ? { tuple, scopes } : undefined;
+    }).filter((fact): fact is { tuple: string; scopes: string[] } => !!fact);
+    const fastSecurity = securityFacts(sources.fastApi, fast); const specSecurity = securityFacts(sources.openApi, spec);
+    if (fastSecurity.length === 1 && specSecurity.length === 1 && (fastSecurity[0]!.tuple !== specSecurity[0]!.tuple || JSON.stringify(fastSecurity[0]!.scopes) !== JSON.stringify(specSecurity[0]!.scopes))) addMismatch('security_scheme', { implementationScheme: fastSecurity[0]!.tuple, contractScheme: specSecurity[0]!.tuple, implementationScopes: fastSecurity[0]!.scopes, contractScopes: specSecurity[0]!.scopes });
   }
   let totalVisits = 0;
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
@@ -293,4 +306,23 @@ function stringProperty(node: GraphNode, key: string): string | undefined { cons
 function evidenceFor(generation: ArchitectureInputGeneration | undefined, subjectId: string): AnalysisEvidence | undefined { return generation?.evidence.find((item) => item.subjectKind === 'node' && item.subjectId === subjectId); }
 function sourceProvenance(generation: ArchitectureInputGeneration | undefined, evidence: AnalysisEvidence | undefined) {
   return evidence ? { analyzerId: generation?.analyzerId ?? null, evidenceId: evidence.id, type: evidence.type, level: evidence.level, uri: evidence.uri ?? null, line: evidence.line ?? null } : null;
+}
+
+function normalizeScheme(node: GraphNode): string | undefined {
+  const constructor = node.properties.constructor;
+  if (typeof constructor === 'string') {
+    if (/APIKeyHeader$/.test(constructor)) return `apiKey:${String(node.properties.in ?? 'header')}`;
+    if (/APIKeyQuery$/.test(constructor)) return `apiKey:${String(node.properties.in ?? 'query')}`;
+    if (/APIKeyCookie$/.test(constructor)) return `apiKey:${String(node.properties.in ?? 'cookie')}`;
+    if (/HTTPBearer$/.test(constructor)) return 'http:bearer';
+    if (/HTTPBasic$/.test(constructor)) return 'http:basic';
+    if (/HTTPDigest$/.test(constructor)) return 'http:digest';
+    if (/OAuth2/.test(constructor)) return 'oauth2';
+    if (/OpenIdConnect$/.test(constructor)) return 'openIdConnect';
+  }
+  if (node.properties.type === 'apiKey' && typeof node.properties.in === 'string') return `apiKey:${node.properties.in}`;
+  if (node.properties.type === 'http' && typeof node.properties.scheme === 'string') return `http:${node.properties.scheme.toLowerCase()}`;
+  if (node.properties.type === 'oauth2') return 'oauth2';
+  if (node.properties.type === 'openIdConnect') return 'openIdConnect';
+  return undefined;
 }
