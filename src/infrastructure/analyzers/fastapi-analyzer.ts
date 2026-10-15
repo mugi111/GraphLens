@@ -357,7 +357,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const responseSource = responseFact.source ?? source;
     const node = addNode('api_response', `${status} response`, route.file.path, `${routeKey}/response/${status}`, { statusCode: Number(status) || status, ...(responseFact.description ? { description: responseFact.description } : {}), ...(responseFact.model ? { model: responseFact.model } : {}) }, responseSource, 'api.response');
     addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
-    if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope);
+    if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope, responseFact.offset);
   }
   for (const fact of dependencies) for (const [depIndex, dep] of dependencyExpressions(fact.expression).entries()) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
@@ -429,12 +429,13 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
 }
 
 function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNode, owner: GraphNode, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], resolutionScope?: string) {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], resolutionScope?: string, resolutionOffset?: number) {
   const scope = resolutionScope ?? String(scopeNode.properties.qualifiedName ?? '');
   const typeNames = schemaTypeNames(name);
   for (const typeName of typeNames) {
-    const symbol = resolveFastApiSymbol(files, file, typeName, scope, source?.startOffset ?? 0);
-    const canonicalType = canonicalFastApiName(typeName, file, scope, source?.startOffset ?? 0);
+    const offset = resolutionOffset ?? source?.startOffset ?? 0;
+    const symbol = resolveFastApiSymbol(files, file, typeName, scope, offset);
+    const canonicalType = canonicalFastApiName(typeName, file, scope, offset);
     if (canonicalType.startsWith('typing.') || canonicalType.startsWith('typing_extensions.') || PARAMETER_NAMES.has(canonicalType) || DEPENDENCY_NAMES.has(canonicalType)) continue;
     const matches = symbol ? files.flatMap((item) => item.classes).filter((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : [];
     if (matches.length === 1) {
