@@ -12,6 +12,8 @@ export type CrossWorkspaceResolverOptions = {
 const defaults: CrossWorkspaceResolverOptions = { maxInputEndpoints: 5000, maxContracts: 2500, maxSyntheticEdges: 10000 };
 const hardLimits: CrossWorkspaceResolverOptions = { maxInputEndpoints: 20000, maxContracts: 10000, maxSyntheticEdges: 40000 };
 const allowedMethods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH']);
+export const MAX_CONTRACT_NAMESPACE_LENGTH = 256;
+export const MAX_CONTRACT_PATH_LENGTH = 2048;
 
 export class CrossWorkspaceResolutionError extends Error {
   constructor(public readonly code: 'INVALID_SNAPSHOT' | 'INVALID_OPTIONS' | 'CROSS_WORKSPACE_LIMIT_EXCEEDED', message: string) { super(message); }
@@ -183,7 +185,7 @@ function validateSnapshot(snapshot: CrossWorkspaceSnapshot): void {
 }
 function contractKey(node: GraphNode): ApiContractKey | undefined {
   const { namespace, method, path } = node.properties;
-  if (typeof namespace !== 'string' || !namespace || namespace === 'default' || typeof method !== 'string' || !allowedMethods.has(method) || typeof path !== 'string' || !path.startsWith('/')) return undefined;
+  if (typeof namespace !== 'string' || !namespace || namespace.length > MAX_CONTRACT_NAMESPACE_LENGTH || namespace === 'default' || namespace.includes('\0') || typeof method !== 'string' || !allowedMethods.has(method) || typeof path !== 'string' || !path.startsWith('/') || path.length > MAX_CONTRACT_PATH_LENGTH || /[\u0000-\u001f\u007f?#]/.test(path)) return undefined;
   return { namespace, method, path };
 }
 function contractKeyString(key: ApiContractKey) { return contractId(key); }

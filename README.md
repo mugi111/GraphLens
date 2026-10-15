@@ -204,3 +204,15 @@ graphlens query architecture --workspaces <workspace-id-1,workspace-id-2> --root
 ```
 
 Get workspace IDs from `GET /api/v1/workspaces`. The query command opens the existing local `.graphlens/graphlens.sqlite` database in read-only mode; it does not create the database, apply migrations, start the server, or open a browser. It reports an error if the database is missing, uninitialized, or incompatible with this GraphLens version.
+
+### Cross-workspace impact
+
+`GET /api/v1/impact?workspaces=<id1,id2>&node=<stable-node-id>` returns the directed impact neighborhood for a stable workspace node ID or global contract ID. `direction` is `dependents`, `dependencies`, or `both` (default); `depth` is 1–8 (default 4). Inferred edges are omitted unless `includeInferred=true`. `limit` sets the node ceiling from 1–2,000 (default 500). `include=evidence,diagnostics` opts into provenance and diagnostics.
+
+Impact traversal normalizes architecture relationships to dependent → dependency, then follows the requested direction. Contract findings are attached to the result and are not traversed. The response includes one deterministic shortest path for each reached node, its distance and impact role, plus snapshot generation metadata. A target outside the selected active architecture graph returns `IMPACT_TARGET_NOT_FOUND` (404); fewer than two selected active architecture generations returns `INSUFFICIENT_ACTIVE_ARCHITECTURE_WORKSPACES` (409). Results exceeding 2,000 nodes, 4,000 edges, 2,000 paths, 5,000 included evidence records, or 1,000 diagnostics return 422 without partial output.
+
+The read-only CLI supports the same query:
+
+```sh
+graphlens query impact --workspaces <workspace-id-1,workspace-id-2> --node <stable-node-id> --direction dependents --depth 4 --includeInferred false --include evidence,diagnostics
+```
