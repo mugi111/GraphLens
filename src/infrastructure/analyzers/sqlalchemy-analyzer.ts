@@ -413,6 +413,7 @@ function applyMapperPrimaryKey(assignments: GraphNode[], scope: string, columns:
   const value = mapperArgs.children[key + 1];
   const names = new Set<string>();
   const visit = (expression: PythonExpressionFact) => {
+    if (expression.literalKind === 'string' && typeof expression.value === 'string') names.add(expression.value);
     const name = expressionName(expression);
     if (name) names.add(name.split('.').at(-1)!);
     for (const child of expression.children ?? []) visit(child);
