@@ -333,7 +333,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
       const requiredState = parameterRequired(markerExpression, param.hasDefault);
       const node = addNode(inputKind ? 'api_request_body' : 'api_parameter', param.name, route.handlerFile.path, `${routeKey}/parameter/${param.name}`, {
         name: param.name, in: paramIn, required: requiredState,
-        ...(expressionName(param.annotation) ? { annotation: expressionName(param.annotation) } : {}),
+        ...(param.annotation ? { annotation: schemaName(param.annotation) } : {}),
         ...(expressionString(keywordArgs(argsOf(markerExpression)).get('alias')) ? { alias: expressionString(keywordArgs(argsOf(markerExpression)).get('alias')) } : {}),
         ...(expressionString(keywordArgs(argsOf(markerExpression)).get('description')) ? { description: expressionString(keywordArgs(argsOf(markerExpression)).get('description')) } : {}),
       }, source, 'api.parameter', explicit ? 'DIRECT' : 'DERIVED');
@@ -402,11 +402,20 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
 
 function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNode, owner: GraphNode, key: string, source: AnalysisEvidence | undefined,
   addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[]) {
-  const symbol = resolveFastApiSymbol(files, file, name.replace(/\[.*$/, ''), String(scopeNode.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
-  const matches = symbol ? files.flatMap((item) => item.classes).filter((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : [];
-  const schema = addNode(matches.length === 1 ? 'python_class' : 'api_schema_reference', name, file.path, `${key}/schema/${name}`, { qualifiedName: symbol ?? name, resolved: matches.length === 1 }, source, 'api.schema_reference', 'DERIVED');
-  const target = matches.length === 1 ? addSourceNode(files.find((item) => item.classes.includes(matches[0]!))!, matches[0]!) : schema;
-  addEdge(owner, target, 'uses_schema', `${key}:schema:${name}`, source, { resolved: matches.length === 1 }, 'DERIVED');
+  const typeNames = schemaTypeNames(name);
+  for (const typeName of typeNames) {
+    const symbol = resolveFastApiSymbol(files, file, typeName, String(scopeNode.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
+    const canonicalType = canonicalFastApiName(typeName, file, String(scopeNode.properties.qualifiedName ?? ''), source?.startOffset ?? 0);
+    if (canonicalType.startsWith('typing.') || canonicalType.startsWith('typing_extensions.') || PARAMETER_NAMES.has(canonicalType) || DEPENDENCY_NAMES.has(canonicalType)) continue;
+    const matches = symbol ? files.flatMap((item) => item.classes).filter((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : [];
+    if (matches.length === 1) {
+      const declarationFile = files.find((item) => item.classes.includes(matches[0]!))!;
+      addEdge(owner, addSourceNode(declarationFile, matches[0]!), 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: true }, 'DERIVED');
+    } else {
+      const schema = addNode('api_schema_reference', typeName, file.path, `${key}/schema/${typeName}`, { qualifiedName: symbol ?? typeName, type: name, resolved: false, ambiguous: matches.length > 1 }, source, 'api.schema_reference', 'DERIVED');
+      addEdge(owner, schema, 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: false, ambiguous: matches.length > 1 }, 'DERIVED');
+    }
+  }
 }
 
 function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFile, key: string, source: AnalysisEvidence | undefined,
@@ -570,7 +579,18 @@ function staticValue(expression: PythonExpressionFact | undefined, file: FastApi
   const assignment = file.assignments.filter((node) => node.properties.scope === '' && expressionName(node.properties.target) === name && (file.evidenceBySubject.get(node.id)?.startOffset ?? 0) < offset).sort((a, b) => (file.evidenceBySubject.get(b.id)?.startOffset ?? 0) - (file.evidenceBySubject.get(a.id)?.startOffset ?? 0))[0];
   return assignment ? expressionValue(asExpression(assignment.properties.value)) : undefined;
 }
-function schemaName(expression: PythonExpressionFact): string | null { return expressionName(expression) ?? expression.children?.map(schemaName).filter(Boolean).join('[').replace(/\[+$/, '') ?? null; }
+function schemaName(expression: PythonExpressionFact): string {
+  const direct = expressionName(expression);
+  if (direct) return direct;
+  if (expression.kind === 'SubscriptExpression' && expression.children?.length) return `${schemaName(expression.children[0]!)}[${expression.children.slice(1).map(schemaName).join(', ')}]`;
+  if (expression.kind.includes('Binary') && expression.children?.length) return expression.children.map(schemaName).join(' | ');
+  return expression.children?.map(schemaName).filter(Boolean).join(', ') ?? expression.kind;
+}
+function schemaTypeNames(type: string): string[] {
+  const names = type.match(/[A-Za-z_][A-Za-z0-9_.]*/g) ?? [];
+  const ignored = new Set(['list', 'dict', 'set', 'tuple', 'frozenset', 'Optional', 'Union', 'Annotated', 'Literal', 'Sequence', 'Mapping', 'Collection', 'Iterable', 'str', 'int', 'float', 'bool', 'bytes', 'None', 'Any', 'UUID', 'date', 'datetime', 'typing', 'typing_extensions', 'fastapi', 'Query', 'Path', 'Header', 'Cookie', 'Body', 'Form', 'File', 'Depends', 'Security']);
+  return [...new Set(names.filter((name) => !ignored.has(name.split('.').at(-1)!)))];
+}
 function dictionaryEntries(expression: PythonExpressionFact): Array<{ status: string; description?: string; model?: string }> {
   const children = expression.children ?? [];
   const entries: Array<{ status: string; description?: string; model?: string }> = [];
