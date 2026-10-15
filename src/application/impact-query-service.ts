@@ -130,7 +130,7 @@ function buildGraph(snapshot: CrossWorkspaceSnapshot, resolvedNodes: readonly Sy
     for (const node of workspace.nodes) nodes.set(node.id, projectNode(workspace, node, evidenceBySubject.get(`node\0${node.id}`) ?? []));
     for (const edge of workspace.edges) {
       const items = evidenceBySubject.get(`edge\0${edge.id}`) ?? [];
-      const projected: SystemEdge = { id: edge.id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as SystemEdge['kind'], level: edge.level ?? dominant(items), properties: edge.properties, evidence: includeEvidence && items.length ? [toEvidence(workspace, edge.sourceId, edge.id, 'edge', items)] : [] };
+      const projected: SystemEdge = { id: edge.id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as SystemEdge['kind'], level: edge.level ?? dominant(items), properties: edge.properties, contributors: edge.contributors, propertySources: edge.propertySources, propertyConflicts: edge.propertyConflicts, evidence: includeEvidence && items.length ? [toEvidence(workspace, edge.sourceId, edge.id, 'edge', items)] : [] };
       edges.set(edge.id, projected);
       if (includeEvidence && items.length) evidence.push(toEvidence(workspace, edge.sourceId, edge.id, 'edge', items));
     }

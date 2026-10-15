@@ -60,6 +60,9 @@ export type SystemEdge = {
   level: 'DIRECT' | 'DERIVED' | 'INFERRED';
   properties: Record<string, unknown>;
   evidence: readonly CrossWorkspaceEvidence[];
+  contributors?: GraphEdge['contributors'];
+  propertySources?: GraphEdge['propertySources'];
+  propertyConflicts?: GraphEdge['propertyConflicts'];
 };
 
 export type CrossWorkspaceResolution = {
