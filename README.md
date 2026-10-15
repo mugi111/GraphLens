@@ -110,6 +110,10 @@ curl http://127.0.0.1:4174/api/v1/analysis-runs/<run-id>
 
 Failed analyzers keep the prior active generation. Their machine-readable error code, message, and diagnostics remain on the failed run. On startup, runs still marked `running` are converted to `failed` with `PROCESS_INTERRUPTED`.
 
+Analyzer results may declare the exact active generations they consumed with `inputGenerations: [{ analyzerId, generationId }]` (up to 32, with at most one generation per analyzer). Evidence may identify those inputs using the canonical string key `<analyzerId>:<generationId>`; every key must be declared by the result. The host verifies that each input is still the active successful generation for the same workspace when committing, then stores immutable dependency rows in SQLite. A stale input fails the run without activating its output. Plugin API version 1 analyzers remain compatible because the result field and `AnalysisContext.architectureInputProvider` are optional additions.
+
+The read-only `architectureInputProvider` on analyzer context returns only requested active generations for one workspace in a single SQLite read transaction, with contributions in stable ID order. When an upstream generation changes or its plugin is disabled, GraphLens recursively removes active pointers for derived generations that consumed it; historical generations, run records, and evidence remain available. No historical dependencies are backfilled. Migration 6 adds the dependency table, index, foreign keys, and integrity trigger.
+
 ## CodeGraph MCP capability
 
 GraphLens does not infer a complete graph from CodeGraph search or traversal results. Publicly described MCP behavior alone does not establish that a full graph enumeration/export operation exists. On startup GraphLens sends the standard MCP stdio `initialize` and `tools/list` requests to the configured server, so it can distinguish a reachable MCP server from an unavailable one:
