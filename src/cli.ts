@@ -185,9 +185,7 @@ async function runPlugin(command: PluginCommand, dataDir?: string): Promise<void
 }
 
 async function runServer(options: ServerOptions) {
-  if (options.codegraphSdkPath && !codeGraphRuntimeSupported()) throw new Error(`--codegraph-sdk requires Node.js >=22.5 and <25; current runtime is ${process.versions.node}. GraphLens itself supports Node.js 20.`);
   if (options.codegraphSdkPath && options.demo) throw new Error('--codegraph-sdk and --demo select different graph sources; choose one for startup.');
-  if (options.codegraphSdkPath && options.workspaces.length === 0) throw new Error('--codegraph-sdk requires at least one --workspace.');
   const codegraphAnalyzer = options.codegraphSdkPath ? createCodeGraphSnapshotAnalyzer(options.codegraphSdkPath) : undefined;
   const databaseFile = resolveDatabaseFile(options.dataDir);
   const store = new GraphStore(databaseFile);
@@ -211,20 +209,14 @@ async function runServer(options: ServerOptions) {
   const workspaceQuery = new WorkspaceQueryService(store);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
   if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
-  if (options.codegraphSdkPath) {
-    const workspaceIds = [...new Set(options.workspaces.map((path) => workspaceFor(path).id))];
-    for (const workspaceId of workspaceIds) {
-      const run = analyzerRunner.start({ workspaceId, analyzerId: 'builtin.codegraph' });
-      console.log(`CodeGraph snapshot import started for ${workspaceId} (run ${run.id}).`);
-    }
-  }
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
+  const runtimeSupported = codeGraphRuntimeSupported();
   const codegraphSnapshot = options.codegraphSdkPath
-    ? { configured: true, packageVersion: '1.6.2', runtimeSupported: true, detail: 'CodeGraph SDK snapshot ingestion is enabled for the supplied workspaces.' }
-    : { configured: false, runtimeSupported: codeGraphRuntimeSupported(), detail: 'Set --codegraph-sdk to an existing CodeGraph 1.6.2 package root to enable full snapshot ingestion.' };
+    ? { configured: true, packageVersion: '1.6.2', runtimeSupported, detail: runtimeSupported ? 'CodeGraph 1.6.2 snapshot analyzer is registered; start an analysis run to import a workspace.' : `Snapshot ingestion requires Node.js >=22.5 and <25; current runtime is ${process.versions.node}. GraphLens remains available.` }
+    : { configured: false, runtimeSupported, detail: 'Set --codegraph-sdk to an existing CodeGraph 1.6.2 package root to enable explicit snapshot ingestion.' };
   const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, impactQuery, workspaceQuery, options.workspaces, webRoot, codegraphSnapshot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
