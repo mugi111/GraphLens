@@ -26,17 +26,18 @@ import { resolvePluginStorePath } from './infrastructure/plugins/package-paths.j
 import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
 import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
 import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
+import { legacyDataNotice, resolveDatabaseFile, resolveLegacyDatabaseFile } from './infrastructure/runtime/data-paths.js';
 
-type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
+type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean; dataDir?: string };
 type PluginCommand = { command: 'plugin-list'; json: boolean } | { command: 'plugin-add'; packageName: string; version: string } | { command: 'plugin-remove'; id: string };
 type ReadQueryCommand = { command: 'architecture-query'; query: CrossWorkspaceArchitectureQuery } | { command: 'impact-query'; query: ImpactQuery };
-export type CliCommand = ServerOptions | PluginCommand | ReadQueryCommand | { command: 'help'; topic?: 'plugin' | 'query' };
+export type CliCommand = (ServerOptions | PluginCommand | ReadQueryCommand | { command: 'help'; topic?: 'plugin' | 'query' }) & { dataDir?: string };
 
 /** Parses argv without starting the database, registry, listener, or browser. */
 class CliUsageError extends Error {}
 class PluginNotFoundError extends Error { readonly code = 'PLUGIN_NOT_FOUND'; }
 
-export function parseCommand(argv: string[]): CliCommand {
+function parseCommandWithoutDataDir(argv: string[]): CliCommand {
   if (argv[0] === 'query') {
     if (argv[1] === '--help' || argv[1] === '-h' || argv.length === 1) return { command: 'help', topic: 'query' };
     if (argv[1] !== 'architecture' && argv[1] !== 'impact') throw new CliUsageError('Usage: graphlens query <architecture|impact> [options]');
@@ -100,15 +101,42 @@ export function parseCommand(argv: string[]): CliCommand {
   return out;
 }
 
-function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+export function parseCommand(argv: string[]): CliCommand {
+  const args: string[] = [];
+  let dataDir: string | undefined;
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === '--codegraph-arg') {
+      args.push(arg);
+      const value = argv[++index];
+      if (value !== undefined) args.push(value);
+      continue;
+    }
+    if (arg !== '--data-dir') { args.push(arg); continue; }
+    const value = argv[++index];
+    if (!value || value.startsWith('--')) throw new CliUsageError('--data-dir requires a path');
+    if (dataDir !== undefined) throw new CliUsageError('--data-dir may be specified only once');
+    dataDir = value;
+  }
+  return { ...parseCommandWithoutDataDir(args), dataDir };
+}
 
-function queryArchitecture(query: CrossWorkspaceArchitectureQuery): void {
-  const store = new GraphStore(resolve(process.cwd(), '.graphlens/graphlens.sqlite'), { readOnly: true });
+function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json] [--data-dir <path>]\n       graphlens plugin add <package>@<exact-version> [--data-dir <path>]\n       graphlens plugin remove <plugin-id> [--data-dir <path>]\n`; if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options] [--data-dir <path>]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options] [--data-dir <path>]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --data-dir <path>              Select GraphLens database and plugin data directory\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+
+function openReadOnlyStore(databaseFile: string): GraphStore {
+  if (!existsSync(databaseFile)) {
+    const legacyHint = existsSync(resolveLegacyDatabaseFile()) ? ` ${legacyDataNotice()}` : '';
+    throw new Error(`GraphLens database not found at ${databaseFile}.${legacyHint}`);
+  }
+  return new GraphStore(databaseFile, { readOnly: true });
+}
+function queryArchitecture(query: CrossWorkspaceArchitectureQuery, databaseFile: string): void {
+  const store = openReadOnlyStore(databaseFile);
   try { console.log(JSON.stringify(new CrossWorkspaceQueryService(store).query(query), null, 2)); }
   finally { store.close(); }
 }
-function queryImpact(query: ImpactQuery): void {
-  const store = new GraphStore(resolve(process.cwd(), '.graphlens/graphlens.sqlite'), { readOnly: true });
+function queryImpact(query: ImpactQuery, databaseFile: string): void {
+  const store = openReadOnlyStore(databaseFile);
   try { console.log(JSON.stringify(new ImpactQueryService(store).query(query), null, 2)); }
   finally { store.close(); }
 }
@@ -135,8 +163,8 @@ function listPlugins(store: GraphStore, json: boolean): void {
   for (const plugin of plugins) console.log(`${plugin.enabled ? 'enabled' : 'disabled'}\t${plugin.id}\t${plugin.version}\t${plugin.packageName}\t${plugin.apiVersion}\t${plugin.analyzers.join(', ') || '(no analyzers)'}\t${plugin.errorCode ?? ''}`);
 }
 
-async function runPlugin(command: PluginCommand): Promise<void> {
-  const databaseFile = resolve(process.cwd(), '.graphlens/graphlens.sqlite');
+async function runPlugin(command: PluginCommand, dataDir?: string): Promise<void> {
+  const databaseFile = resolveDatabaseFile(dataDir);
   const store = new GraphStore(databaseFile, { recoverInterruptedRuns: false });
   try {
     const plugins = resolvePluginStorePath(databaseFile);
@@ -150,8 +178,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
 }
 
 async function runServer(options: ServerOptions) {
-  const base = process.cwd();
-  const databaseFile = resolve(base, '.graphlens/graphlens.sqlite');
+  const databaseFile = resolveDatabaseFile(options.dataDir);
   const store = new GraphStore(databaseFile);
   const adapter = new CodeGraphAdapter({ command: options.codegraphCommand, args: options.codegraphArgs });
   const graph = new GraphService(store, adapter);
@@ -186,11 +213,13 @@ async function main() {
   let command: CliCommand;
   try { command = parseCommand(process.argv.slice(2)); }
   catch (error) { throw error instanceof CliUsageError ? error : new CliUsageError(error instanceof Error ? error.message : String(error)); }
+  if (command.command !== 'help' && !command.dataDir && existsSync(resolveLegacyDatabaseFile())) console.warn(legacyDataNotice());
   if (command.command === 'help') { console.log(help(command.topic)); return; }
-  if (command.command === 'architecture-query') return queryArchitecture(command.query);
-  if (command.command === 'impact-query') return queryImpact(command.query);
+  const databaseFile = resolveDatabaseFile(command.dataDir);
+  if (command.command === 'architecture-query') return queryArchitecture(command.query, databaseFile);
+  if (command.command === 'impact-query') return queryImpact(command.query, databaseFile);
   if (command.command === 'plugin-add') console.error('Warning: installed plugin code runs with GraphLens permissions. Only install packages you trust.');
-  if (command.command !== 'server') return runPlugin(command);
+  if (command.command !== 'server') return runPlugin(command, command.dataDir);
   return runServer(command);
 }
 main().catch((error) => { const code = error instanceof PluginNotFoundError ? error.code : undefined; console.error(`GraphLens${code ? ` [${code}]` : ''}: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = error instanceof CliUsageError ? 2 : 1; });

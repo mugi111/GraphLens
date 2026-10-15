@@ -7,23 +7,21 @@ GraphLens is a local-first architecture explorer for code, APIs, data models, an
 - Node.js 20.11 or newer
 - A CodeGraph MCP server only when inspecting its connection capability
 
-## Run locally
-
-```sh
-npm install
-npm run build
-npm start -- --workspace /path/to/repository
-```
-
-The server listens on `http://127.0.0.1:4174` and opens the browser by default. Use `--no-open` in terminals without a browser.
-
-After publishing the package, the equivalent command is:
+## Run GraphLens
 
 ```sh
 npx graphlens --workspace /path/to/repository
 ```
 
-Pass `--workspace` repeatedly to set the initial workspace list. GraphLens stores persistent snapshots in `.graphlens/graphlens.sqlite` below the current directory.
+The server listens on `http://127.0.0.1:4174` and opens the browser by default. Use `--no-open` in terminals without a browser.
+
+Pass `--workspace` repeatedly to set the initial workspace list. GraphLens stores the database and plugins in the OS user data directory. macOS uses `~/Library/Application Support/GraphLens`, Windows uses `%LOCALAPPDATA%/GraphLens`, and Linux uses `$XDG_DATA_HOME/graphlens` or `~/.local/share/graphlens` when `XDG_DATA_HOME` is unset. Use `--data-dir <path>` on server, plugin, or query commands to select a different directory; relative paths are resolved from the current directory.
+
+```sh
+npx graphlens --workspace /path/to/repository --data-dir ./graphlens-data
+```
+
+If a legacy database exists at `.graphlens/graphlens.sqlite` in the current directory, GraphLens reports its location. It does not migrate or copy legacy data automatically. To continue using it, pass `--data-dir ./.graphlens`.
 
 ## Sync model
 
@@ -40,17 +38,17 @@ Each successful sync writes a new immutable generation and switches the active g
 
 GraphLens composes built-in analyzers and previously enabled package plugins at startup. Every analyzer declares a host API version (`"1"`) and its graph, evidence, and diagnostics capabilities. Duplicate analyzer IDs and incompatible descriptors are rejected before a run is created. `GET /api/v1/analyzers` lists loaded analyzers; `GET /api/v1/plugins` lists sanitized plugin inventory recorded in the selected database. Plugin management is available through the CLI; the HTTP plugin API remains read-only.
 
-Manage packages from the same working directory used to launch GraphLens; the CLI and server use `.graphlens/graphlens.sqlite` and `.graphlens/plugins/` there:
+Manage packages in the same user data directory used by the server. The database is `graphlens.db`, and plugin packages are stored in its `plugins/` subdirectory. Use the same `--data-dir` value when managing plugins and starting GraphLens:
 
 ```sh
-graphlens plugin list
-graphlens plugin add @scope/package@1.2.3
-graphlens plugin remove my-plugin
+graphlens plugin list --data-dir ./graphlens-data
+graphlens plugin add @scope/package@1.2.3 --data-dir ./graphlens-data
+graphlens plugin remove my-plugin --data-dir ./graphlens-data
 ```
 
 `add` accepts only an exact semantic version and a public npm package name. `list` does not load plugin code or interrupt live analysis. Plugin commands do not start the HTTP listener or browser. A successful `remove` disables the plugin and clears its active graph contributions before deleting package files. If file cleanup fails, the plugin remains disabled and its contributions stay cleared; rerun the same remove command to retry cleanup. The API endpoint `GET /api/v1/plugins` returns the same sanitized inventory as `plugin list`; no install/remove HTTP routes are exposed.
 
-Plugins are exact-version npm packages stored under `.graphlens/plugins/<plugin-id>` beside the selected SQLite database. Installation is staged with `--save-exact --ignore-scripts --omit=dev --no-audit --no-fund`; it does not invoke package lifecycle scripts. Packages declare a `graphlens` object in `package.json` with `id`, `apiVersion`, a package-relative `entry` module, and the expected `analyzers` descriptors (`id`, `version`, `apiVersion`, `capabilities`). That module exports `createAnalyzer()`, matching the public `GraphLensPluginFactory` contract, which returns an analyzer or an array of analyzers (synchronously or asynchronously) matching those descriptors. The host plugin API version is exported as `PLUGIN_API_VERSION` (currently `"1"`). GraphLens validates package identity, the exact npm lockfile and its saved hash, manifest compatibility, registry ID collisions, and canonical entry-path containment before importing the module or registering it in SQLite. A failed startup validation disables that plugin and invalidates its active graph contributions while allowing other plugins and the app to start.
+Plugins are exact-version npm packages stored under `<data-dir>/plugins/<plugin-id>` beside the selected SQLite database. Installation does not invoke package lifecycle scripts. Packages declare a `graphlens` object in `package.json` with `id`, `apiVersion`, a package-relative `entry` module, and the expected `analyzers` descriptors (`id`, `version`, `apiVersion`, `capabilities`). That module exports `createAnalyzer()`, matching the public `GraphLensPluginFactory` contract, which returns an analyzer or an array of analyzers (synchronously or asynchronously) matching those descriptors. The host plugin API version is exported as `PLUGIN_API_VERSION` (currently `"1"`). GraphLens validates package identity, the exact npm lockfile and its saved hash, manifest compatibility, registry ID collisions, and canonical entry-path containment before importing the module or registering it in SQLite. A failed startup validation disables that plugin and invalidates its active graph contributions while allowing other plugins and the app to start.
 
 **Security boundary:** package authors' analyzer code runs in-process with GraphLens permissions. This is not a sandbox. `--ignore-scripts` prevents npm lifecycle scripts, but it does not make imported plugin code safe; only install packages from sources you trust. GraphLens loads only packages already marked enabled in the selected database and never installs or updates packages automatically. Disabling/removing a plugin first clears its active graph contributions so they cannot remain visible after package removal.
 
@@ -131,7 +129,7 @@ The command must start an MCP server that uses line-delimited JSON-RPC over stdi
 For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
 
 ```sh
-npm start -- --workspace . --demo
+npx graphlens --workspace . --demo
 ```
 
 ### FastAPI source analyzer
@@ -204,7 +202,7 @@ The same read-only query is available from the CLI and prints JSON:
 graphlens query architecture --workspaces <workspace-id-1,workspace-id-2> --root contract --namespace payments --method GET --path /payments --depth 4 --limit 25 --include evidence,diagnostics
 ```
 
-Get workspace IDs from `GET /api/v1/workspaces`. The query command opens the existing local `.graphlens/graphlens.sqlite` database in read-only mode; it does not create the database, apply migrations, start the server, or open a browser. It reports an error if the database is missing, uninitialized, or incompatible with this GraphLens version.
+Get workspace IDs from `GET /api/v1/workspaces`. The query command opens the selected user data directory's existing `graphlens.db` in read-only mode; it does not create the database, apply migrations, start the server, or open a browser. It reports an error if the database is missing, uninitialized, or incompatible with this GraphLens version.
 
 ### Cross-workspace impact
 
