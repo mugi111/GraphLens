@@ -418,11 +418,11 @@ function relationshipFact(assignment: GraphNode, file: SqlAlchemyCollectedFile):
 function mappedTypeName(annotation: PythonExpressionFact | undefined, imports: Map<string, string>): string | undefined {
   return isMappedAnnotation(annotation, imports) ? genericTypeName(annotation!.children?.[1]) ?? annotation!.property : undefined;
 }
-function isMappedAnnotation(annotation: PythonExpressionFact | undefined, imports: Map<string, string>) { if (!annotation || annotation.kind !== 'member' || !annotation.children?.[0]) return false; const base = expressionName(annotation.children[0]); return !!base && canonicalSqlAlchemyName(base, imports) === 'sqlalchemy.orm.Mapped'; }
+function isMappedAnnotation(annotation: PythonExpressionFact | undefined, imports: Map<string, string>) { if (!annotation || !['member', 'subscript'].includes(annotation.kind) || !annotation.children?.[0]) return false; const base = expressionName(annotation.children[0]); return !!base && canonicalSqlAlchemyName(base, imports) === 'sqlalchemy.orm.Mapped'; }
 function genericTypeName(expression: PythonExpressionFact | undefined): string | undefined {
   if (!expression) return undefined;
   if (expression.literalKind === 'string' && typeof expression.value === 'string') return expression.value;
-  if (expression.kind === 'member' && expression.children?.[0]) {
+  if (['member', 'subscript'].includes(expression.kind) && expression.children?.[0]) {
     const base = expressionName(expression.children[0]);
     const nested = expression.children[1];
     if (['List', 'list', 'Sequence', 'Set', 'set', 'Optional', 'Union', 'Mapped'].includes(base ?? '') && nested) return genericTypeName(nested);
@@ -432,7 +432,7 @@ function genericTypeName(expression: PythonExpressionFact | undefined): string |
 function isNonOptionalMappedType(annotation: PythonExpressionFact | undefined) {
   const inner = annotation?.children?.[1];
   if (!inner) return false;
-  if (inner.kind === 'member' && ['Optional', 'Union'].includes(expressionName(inner.children?.[0]) ?? '')) return false;
+  if (['member', 'subscript'].includes(inner.kind) && ['Optional', 'Union'].includes(expressionName(inner.children?.[0]) ?? '')) return false;
   if (inner.kind.includes('Binary') && inner.children?.some((part) => part.kind === 'None' || part.literalKind === 'none')) return false;
   return true;
 }
