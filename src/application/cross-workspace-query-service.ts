@@ -1,0 +1,232 @@
+import { createHash } from 'node:crypto';
+import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
+import type { ArchitectureEdgeKind, CrossWorkspaceEvidence, CrossWorkspaceResolution, CrossWorkspaceSnapshot, SystemEdge, SystemNode, WorkspaceArchitectureSnapshot } from '../domain/federation.js';
+import type { GraphEdge, GraphNode } from '../domain/graph.js';
+import { CrossWorkspaceResolutionError, resolveCrossWorkspace } from './cross-workspace-resolver.js';
+import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
+
+export type CrossWorkspaceRoot = 'contract' | 'endpoint';
+export type CrossWorkspaceArchitectureQuery = {
+  workspaces: string[];
+  root: CrossWorkspaceRoot;
+  namespace?: string;
+  method?: string;
+  path?: string;
+  workspace?: string;
+  depth: number;
+  limit: number;
+  cursor?: string;
+  includeEvidence: boolean;
+  includeDiagnostics: boolean;
+};
+
+type Cursor = { v: 1; workspaces: string[]; filters: string; snapshotId: string; offset: number };
+const edgeAllowlist = new Set<ArchitectureEdgeKind>(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model']);
+const methods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH']);
+
+export class CrossWorkspaceQueryError extends Error {
+  constructor(public readonly code: 'WORKSPACES_REQUIRED' | 'INVALID_CROSS_WORKSPACE_QUERY' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'WORKSPACE_NOT_FOUND' | 'INSUFFICIENT_ACTIVE_ARCHITECTURE_WORKSPACES' | 'CROSS_WORKSPACE_SNAPSHOT_CHANGED' | 'CROSS_WORKSPACE_QUERY_TOO_LARGE' | 'CROSS_WORKSPACE_QUERY_FAILED', message: string, public readonly status: 400 | 404 | 409 | 422 | 500) { super(message); }
+}
+
+export class CrossWorkspaceQueryService {
+  constructor(private readonly store: GraphStore) {}
+
+  query(query: CrossWorkspaceArchitectureQuery) {
+    const workspaceIds = [...query.workspaces].sort();
+    const filters = filterKey(query);
+    const filterHash = createHash('sha256').update(filters).digest('base64url');
+    const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
+    if (cursor && (JSON.stringify(cursor.workspaces) !== JSON.stringify(workspaceIds) || cursor.filters !== filterHash)) throw new CrossWorkspaceQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace set and query.', 400);
+
+    const snapshot = this.readSnapshot(workspaceIds);
+    if (cursor && cursor.snapshotId !== snapshot.snapshotId) throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED', 'An active architecture generation changed while paging.', 409);
+    if (snapshot.generations.length < 2) throw new CrossWorkspaceQueryError('INSUFFICIENT_ACTIVE_ARCHITECTURE_WORKSPACES', 'At least two selected workspaces need an active architecture generation.', 409);
+
+    let resolution: CrossWorkspaceResolution;
+    try { resolution = resolveCrossWorkspace(snapshot); }
+    catch (error) {
+      if (error instanceof CrossWorkspaceResolutionError && error.code === 'CROSS_WORKSPACE_LIMIT_EXCEEDED') throw tooLarge();
+      throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not resolve the cross-workspace architecture graph.', 500);
+    }
+    const graph = buildSystemGraph(snapshot, resolution, query.includeEvidence);
+    const workspaceNames = new Map(snapshot.generations.map((item) => [item.workspace.id, item.workspace.name]));
+    const roots = selectRoots(graph.nodes, graph.edges, query, workspaceIds, workspaceNames);
+    const offset = cursor?.offset ?? 0;
+    if (cursor && offset >= roots.length) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
+    const pageRoots = roots.slice(offset, offset + query.limit);
+    const closure = buildClosure(graph.nodes, graph.edges, pageRoots, query.depth);
+    if (closure.nodes.length > 3000 || closure.edges.length > 6000) throw tooLarge();
+    const evidenceCount = closure.edges.reduce((total, edge) => total + edge.evidence.reduce((count, item) => count + 1 + item.sources.reduce((sourceCount, source) => sourceCount + source.evidenceIds.length, 0), 0), 0);
+    if (query.includeEvidence && evidenceCount > 5000) throw tooLarge();
+    const diagnostics = query.includeDiagnostics ? relevantDiagnostics(resolution.diagnostics, closure.nodes) : undefined;
+    if (diagnostics && diagnostics.length > 1000) throw tooLarge();
+    const nextOffset = offset + pageRoots.length;
+    const nextCursor = nextOffset < roots.length ? encodeCursor({ v: 1, workspaces: workspaceIds, filters: filterHash, snapshotId: snapshot.snapshotId, offset: nextOffset }) : undefined;
+    const workspaceMetadata = workspaceIds.map((id) => {
+      const active = snapshot.generations.find((item) => item.workspace.id === id);
+      const workspace = active?.workspace ?? this.store.getWorkspace(id);
+      if (!workspace) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', `Workspace '${id}' was not found.`, 404);
+      return { id: workspace.id, name: workspace.name };
+    });
+    return {
+      scope: { workspaceIds, workspaces: workspaceMetadata, missingArchitectureWorkspaceIds: [...snapshot.missingArchitectureWorkspaceIds] },
+      snapshot: {
+        id: snapshot.snapshotId,
+        generations: snapshot.generations.map((item) => item.generation),
+        inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
+      },
+      query: { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.workspace !== undefined ? { workspace: query.workspace } : {}), depth: query.depth },
+      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
+      rootIds: pageRoots.map((node) => node.id),
+      nodes: closure.nodes,
+      edges: closure.edges,
+      ...(diagnostics ? { diagnostics } : {}),
+    };
+  }
+
+  private readSnapshot(workspaceIds: string[]): CrossWorkspaceSnapshot {
+    try { return this.store.crossWorkspaceArchitectureSnapshot(workspaceIds); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^Workspace not found:/.test(message)) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', message, 404);
+      throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not read the cross-workspace architecture snapshot.', 500);
+    }
+  }
+}
+
+export function parseCrossWorkspaceArchitectureQuery(params: URLSearchParams): { query: CrossWorkspaceArchitectureQuery } | { error: string; code: 'WORKSPACES_REQUIRED' | 'INVALID_CROSS_WORKSPACE_QUERY' } {
+  const fail = (error: string) => ({ error, code: 'INVALID_CROSS_WORKSPACE_QUERY' as const });
+  const allowed = new Set(['workspaces', 'root', 'namespace', 'method', 'path', 'workspace', 'depth', 'limit', 'cursor', 'include']);
+  const values = new Map<string, string>();
+  for (const [key, value] of params) {
+    if (!allowed.has(key)) return fail(`Unknown query parameter '${key}'.`);
+    if (values.has(key)) return fail(`Query parameter '${key}' must be supplied at most once.`);
+    values.set(key, value);
+  }
+  const rawWorkspaces = values.get('workspaces');
+  if (rawWorkspaces === undefined || rawWorkspaces.length === 0) return { error: 'workspaces is required.', code: 'WORKSPACES_REQUIRED' };
+  const workspaces = rawWorkspaces.split(',');
+  if (workspaces.length < 2 || workspaces.length > 16 || workspaces.some((id) => !id || id.length > 256) || new Set(workspaces).size !== workspaces.length) return fail('workspaces must contain 2–16 unique workspace IDs.');
+  const root = values.get('root') ?? 'contract';
+  if (root !== 'contract' && root !== 'endpoint') return fail("root must be 'contract' or 'endpoint'.");
+  const namespace = values.get('namespace');
+  if (namespace !== undefined && (!namespace || namespace.length > 256 || namespace.includes('\0'))) return fail('namespace is invalid.');
+  const method = values.get('method');
+  if (method !== undefined && !methods.has(method)) return fail('method must be an uppercase HTTP method.');
+  const path = values.get('path');
+  if (path !== undefined && (!path.startsWith('/') || path.length > 2048 || /[\u0000-\u001f\u007f?#]/.test(path))) return fail('path must be an absolute route path without query, fragment, or control characters.');
+  const workspace = values.get('workspace');
+  if (workspace !== undefined && (!workspace || workspace.length > 256 || !workspaces.includes(workspace))) return fail('workspace must be one of the selected workspace IDs.');
+  const depthText = values.get('depth') ?? '4';
+  if (!/^(0|[1-8])$/.test(depthText)) return fail('depth must be an integer between 0 and 8.');
+  const limitText = values.get('limit') ?? '25';
+  if (!/^[1-9]\d*$/.test(limitText) || !Number.isSafeInteger(Number(limitText)) || Number(limitText) > 100) return fail('limit must be an integer between 1 and 100.');
+  const includeText = values.get('include');
+  const include = includeText === undefined ? [] : includeText.split(',');
+  if (includeText === '' || include.some((item) => !['evidence', 'diagnostics'].includes(item)) || new Set(include).size !== include.length) return fail('include accepts a comma-separated list of evidence and diagnostics.');
+  return { query: { workspaces, root, ...(namespace !== undefined ? { namespace } : {}), ...(method !== undefined ? { method } : {}), ...(path !== undefined ? { path } : {}), ...(workspace !== undefined ? { workspace } : {}), depth: Number(depthText), limit: Number(limitText), ...(values.has('cursor') ? { cursor: values.get('cursor')! } : {}), includeEvidence: include.includes('evidence'), includeDiagnostics: include.includes('diagnostics') } };
+}
+
+function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWorkspaceResolution, includeEvidence: boolean) {
+  const nodes = new Map<string, SystemNode>();
+  const edges = new Map<string, SystemEdge>();
+  const sourceEvidence = new Map<string, AnalysisEvidence[]>();
+  for (const workspace of snapshot.generations) {
+    for (const item of workspace.evidence) sourceEvidence.set(`${workspace.workspace.id}\0${item.subjectKind}\0${item.subjectId}`, [...(sourceEvidence.get(`${workspace.workspace.id}\0${item.subjectKind}\0${item.subjectId}`) ?? []), item]);
+    for (const node of workspace.nodes) nodes.set(systemNodeKey(workspace.workspace.id, node.id), projectSystemNode(workspace, node, sourceEvidence.get(`${workspace.workspace.id}\0node\0${node.id}`) ?? []));
+  }
+  for (const workspace of snapshot.generations) for (const edge of workspace.edges) {
+    if (!edgeAllowlist.has(edge.kind as ArchitectureEdgeKind)) continue;
+    const items = sourceEvidence.get(`${workspace.workspace.id}\0edge\0${edge.id}`) ?? [];
+    const id = systemEdgeKey(workspace.workspace.id, edge.id);
+    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: dominant(items), properties: edge.properties, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
+  }
+  for (const node of resolution.nodes) nodes.set(node.scope === 'global' ? `global\0${node.id}` : systemNodeKey(node.workspaceId, node.id), node);
+  for (const edge of resolution.edges) {
+    if (edge.scope !== 'cross-workspace') continue;
+    edges.set(`cross\0${edge.id}`, includeEvidence ? edge : { ...edge, evidence: [] });
+  }
+  return { nodes: [...nodes.values()], edges: [...edges.values()] };
+}
+
+function projectSystemNode(workspace: WorkspaceArchitectureSnapshot, node: GraphNode, items: readonly AnalysisEvidence[]): SystemNode {
+  return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(items) };
+}
+function toCrossEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
+  const ids = items.map((item) => item.id).sort();
+  return { id: `cross-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: ids }] };
+}
+function selectRoots(nodes: SystemNode[], edges: SystemEdge[], query: CrossWorkspaceArchitectureQuery, workspaceIds: string[], workspaceNames: Map<string, string>) {
+  const globalWorkspaceOwners = new Map<string, Set<string>>();
+  for (const edge of edges) if (edge.scope === 'cross-workspace') globalWorkspaceOwners.set(edge.targetId, new Set([...(globalWorkspaceOwners.get(edge.targetId) ?? []), edge.sourceWorkspaceId ?? '']));
+  return nodes.filter((node) => {
+    if (query.root === 'contract' ? node.scope !== 'global' || node.kind !== 'api_contract' : node.scope !== 'workspace' || node.kind !== 'api_endpoint') return false;
+    const properties = node.properties;
+    if (query.namespace !== undefined && properties.namespace !== query.namespace) return false;
+    if (query.method !== undefined && properties.method !== query.method) return false;
+    if (query.path !== undefined && properties.path !== query.path) return false;
+    if (query.workspace !== undefined) {
+      if (node.scope === 'workspace' && node.workspaceId !== query.workspace) return false;
+      if (node.scope === 'global' && !globalWorkspaceOwners.get(node.id)?.has(query.workspace)) return false;
+    }
+    if (node.scope === 'workspace' && !workspaceIds.includes(node.workspaceId)) return false;
+    return true;
+  }).sort((a, b) => query.root === 'contract'
+    ? cmp([String(a.properties.namespace), String(a.properties.method), String(a.properties.path), a.id], [String(b.properties.namespace), String(b.properties.method), String(b.properties.path), b.id])
+    : cmp([a.scope === 'workspace' ? a.workspaceId : '', a.scope === 'workspace' ? workspaceNames.get(a.workspaceId) ?? '' : '', String(a.properties.namespace ?? ''), String(a.properties.method ?? ''), String(a.properties.path ?? ''), a.id], [b.scope === 'workspace' ? b.workspaceId : '', b.scope === 'workspace' ? workspaceNames.get(b.workspaceId) ?? '' : '', String(b.properties.namespace ?? ''), String(b.properties.method ?? ''), String(b.properties.path ?? ''), b.id]));
+}
+function buildClosure(allNodes: SystemNode[], allEdges: SystemEdge[], roots: SystemNode[], maxDepth: number) {
+  const byId = new Map(allNodes.map((node) => [systemNodeKey(node.scope === 'workspace' ? node.workspaceId : 'global', node.id), node]));
+  const findNodeKey = (id: string, workspaceId?: string) => workspaceId !== undefined ? systemNodeKey(workspaceId, id) : byId.has(systemNodeKey('global', id)) ? systemNodeKey('global', id) : undefined;
+  const adjacency = new Map<string, Array<{ edge: SystemEdge; next: string }>>();
+  const edgeRecords: Array<{ edge: SystemEdge; source: string; target: string }> = [];
+  for (const edge of allEdges) {
+    const source = findNodeKey(edge.sourceId, edge.sourceWorkspaceId);
+    const target = findNodeKey(edge.targetId, edge.targetWorkspaceId);
+    if (!source || !target) continue;
+    edgeRecords.push({ edge, source, target });
+    adjacency.set(source, [...(adjacency.get(source) ?? []), { edge, next: target }]);
+    adjacency.set(target, [...(adjacency.get(target) ?? []), { edge, next: source }]);
+  }
+  for (const list of adjacency.values()) list.sort((a, b) => cmp([a.next, a.edge.kind, a.edge.id], [b.next, b.edge.kind, b.edge.id]));
+  const rootKeys = roots.map((node) => systemNodeKey(node.scope === 'workspace' ? node.workspaceId : 'global', node.id));
+  const distances = new Map<string, number>();
+  const queue: string[] = [];
+  for (const key of rootKeys) if (byId.has(key) && !distances.has(key)) { distances.set(key, 0); queue.push(key); }
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const key = queue[cursor]!;
+    const depth = distances.get(key)!;
+    if (depth >= maxDepth) continue;
+    for (const item of adjacency.get(key) ?? []) if (!distances.has(item.next)) {
+      distances.set(item.next, depth + 1);
+      queue.push(item.next);
+      if (queue.length > 3000) throw tooLarge();
+    }
+  }
+  const nodes = [...distances.keys()].map((key) => byId.get(key)!).sort((a, b) => cmp([a.scope, a.scope === 'workspace' ? a.workspaceId : '', a.id], [b.scope, b.scope === 'workspace' ? b.workspaceId : '', b.id]));
+  const edges = edgeRecords.filter(({ source, target }) => distances.has(source) && distances.has(target)).map(({ edge }) => edge).sort((a, b) => cmp([a.scope, a.sourceWorkspaceId ?? '', a.sourceId, a.targetId, a.kind, a.id], [b.scope, b.sourceWorkspaceId ?? '', b.sourceId, b.targetId, b.kind, b.id]));
+  return { nodes, edges };
+}
+function systemNodeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
+function systemEdgeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
+function relevantDiagnostics(items: readonly AnalysisDiagnostic[], nodes: SystemNode[]) {
+  const contracts = new Set(nodes.filter((node) => node.scope === 'global').map((node) => JSON.stringify(node.properties)));
+  return items.filter((item) => {
+    const detail = item.detail && typeof item.detail === 'object' ? item.detail as Record<string, unknown> : {};
+    const tuple = JSON.stringify({ namespace: detail.namespace, method: detail.method, path: detail.path });
+    return !detail.namespace || contracts.has(tuple);
+  }).sort((a, b) => cmp([a.code ?? '', a.message], [b.code ?? '', b.message]));
+}
+function filterKey(query: CrossWorkspaceArchitectureQuery) { return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, method: query.method ?? null, path: query.path ?? null, workspace: query.workspace ?? null, depth: query.depth, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics }); }
+function encodeCursor(cursor: Cursor) { return Buffer.from(JSON.stringify(cursor)).toString('base64url'); }
+function decodeCursor(raw: string): Cursor {
+  if (!raw || raw.length > 8192 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
+  let value: unknown;
+  try { const bytes = Buffer.from(raw, 'base64url'); if (bytes.toString('base64url') !== raw) throw new Error(); value = JSON.parse(bytes.toString('utf8')); } catch { throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
+  if (!isRecord(value) || Object.keys(value).sort().join(',') !== 'filters,offset,snapshotId,v,workspaces' || value.v !== 1 || !Array.isArray(value.workspaces) || value.workspaces.length < 2 || value.workspaces.length > 16 || value.workspaces.some((id) => typeof id !== 'string' || !id.length || id.length > 256) || new Set(value.workspaces).size !== value.workspaces.length || typeof value.filters !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.filters) || typeof value.snapshotId !== 'string' || !/^[a-f0-9]{64}$/.test(value.snapshotId) || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
+  return value as Cursor;
+}
+function dominant(items: readonly AnalysisEvidence[]): 'DIRECT' | 'DERIVED' | 'INFERRED' { return items.some((item) => item.level === 'DIRECT') ? 'DIRECT' : items.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'INFERRED'; }
+function cmp(a: readonly (string | number)[], b: readonly (string | number)[]) { for (let i = 0; i < Math.min(a.length, b.length); i++) { if (a[i]! < b[i]!) return -1; if (a[i]! > b[i]!) return 1; } return a.length - b.length; }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+function tooLarge() { return new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_TOO_LARGE', 'Cross-workspace query exceeds a hard response limit; no partial result was returned.', 422); }

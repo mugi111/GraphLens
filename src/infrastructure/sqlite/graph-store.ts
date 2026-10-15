@@ -22,15 +22,43 @@ export type StoredPlugin = GraphLensPluginManifest & { packageName: string; pack
 
 export class GraphStore implements ArchitectureInputProvider {
   private db: Database.Database;
-  constructor(file: string, options: { recoverInterruptedRuns?: boolean } = {}) {
-    mkdirSync(dirname(file), { recursive: true });
-    this.db = new Database(file);
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('journal_mode = WAL');
-    runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration]);
-    if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
+  constructor(file: string, options: { recoverInterruptedRuns?: boolean; readOnly?: boolean } = {}) {
+    if (options.readOnly) {
+      this.db = new Database(file, { readonly: true, fileMustExist: true });
+      try { this.assertReadOnlySchema(); }
+      catch (error) { this.db.close(); throw error; }
+    } else {
+      mkdirSync(dirname(file), { recursive: true });
+      this.db = new Database(file);
+      this.db.pragma('foreign_keys = ON');
+      this.db.pragma('journal_mode = WAL');
+      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration]);
+      if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
+    }
   }
   close() { this.db.close(); }
+  private assertReadOnlySchema(): void {
+    const versions = this.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
+    const applied = new Set(versions.map(({ version }) => version));
+    if (versions.some(({ version }) => version > 6) || [1, 2, 3, 4, 5, 6].some((version) => !applied.has(version))) {
+      throw new Error('Database schema is not initialized or is incompatible with this GraphLens version.');
+    }
+    const required: Record<string, string[]> = {
+      workspaces: ['id', 'path', 'name'],
+      active_analysis_generations: ['workspace_id', 'analyzer_id', 'generation_id'],
+      analysis_generations: ['id', 'run_id', 'workspace_id', 'analyzer_id'],
+      analysis_runs: ['id', 'workspace_id', 'analyzer_id', 'source_revision', 'completed_at'],
+      node_contributions: ['generation_id', 'id', 'workspace_id', 'kind', 'label', 'properties_json'],
+      edge_contributions: ['generation_id', 'id', 'workspace_id', 'source_id', 'target_id', 'kind', 'properties_json'],
+      evidence: ['generation_id', 'id', 'subject_kind', 'subject_id', 'level', 'payload_json'],
+      diagnostics: ['run_id', 'generation_id', 'sequence', 'code', 'severity', 'message', 'uri', 'line', 'detail_json'],
+      analysis_generation_inputs: ['generation_id', 'input_analyzer_id', 'input_generation_id'],
+    };
+    for (const [table, columns] of Object.entries(required)) {
+      const actual = new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name));
+      if (columns.some((column) => !actual.has(column))) throw new Error('Database schema is not initialized or is incompatible with this GraphLens version.');
+    }
+  }
   private workspace(row: any): Workspace { return { id: row.id, path: row.path, name: row.name }; }
   workspaces(): Workspace[] { return (this.db.prepare('SELECT id,path,name FROM workspaces ORDER BY name').all() as any[]).map((r) => this.workspace(r)); }
   activeWorkspacePaths() { return this.workspaces().map((w) => w.path); }
