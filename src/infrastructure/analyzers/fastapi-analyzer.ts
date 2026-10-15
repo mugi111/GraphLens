@@ -20,9 +20,9 @@ const SECURITY_NAMES = new Set([
 ]);
 
 type DependencyFact = { expression: PythonExpressionFact; file: FastApiFile; scope: string; offset: number; source?: AnalysisEvidence };
-type ResponseFact = { status: string; description?: string; model?: string };
+type ResponseFact = { status: string; description?: string; model?: string; source?: AnalysisEvidence };
 type RouterObject = { key: string; logicalKey: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; node: GraphNode };
-type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; source?: AnalysisEvidence; occurrence: number };
+type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handlerFile: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence; occurrence: number };
 type IncludeSpec = { key: string; ownerKey: string; childKey?: string; childSourceNodeId?: string; file: FastApiFile; scope: string; offset: number; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: DependencyFact[]; responses: ResponseFact[]; source?: AnalysisEvidence };
 type FastApiCallArgument = { kind: 'positional' | 'keyword'; keyword?: string; expression: PythonExpressionFact };
 
@@ -157,8 +157,9 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
         if (expandedRouteKeys.has(routeKey)) continue;
         expandedRouteKeys.add(routeKey);
         if (++effectiveRouteCount > 5000) throw fatalLimit('FASTAPI_ROUTE_LIMIT', 'FastAPI effective route count exceeds 5000.');
-        const operation = { ...route.operation, responseStatuses: mergeResponses(responses, (route.operation.responseStatuses as ResponseFact[] | undefined) ?? []) };
-        projectRoute(context, config.apiNamespace, { ...route, operation }, fullPath, mergeStrings(tags, Array.isArray(route.operation.routeTags) ? route.operation.routeTags as string[] : []), [...dependencies, ...route.dependencies, ...routeDependencies(route)], parentNode, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config);
+        const effectiveResponses = mergeResponses(responses, route.responses);
+        const operation = { ...route.operation, responseStatuses: effectiveResponses.map(({ status, description, model }) => ({ status, ...(description ? { description } : {}), ...(model ? { model } : {}) })) };
+        projectRoute(context, config.apiNamespace, { ...route, operation, responses: effectiveResponses }, fullPath, mergeStrings(tags, Array.isArray(route.operation.routeTags) ? route.operation.routeTags as string[] : []), [...dependencies, ...route.dependencies, ...routeDependencies(route)], parentNode, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config);
       }
       const nextStack = [...stack, object.key];
       for (const include of includesByOwner.get(object.key) ?? []) {
@@ -199,7 +200,7 @@ function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], ad
     if (!prefixResolved) addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', `Could not statically resolve prefix for router '${target}'.`, source);
     const tags = stringsFromExpression(keywords.get('tags'));
     const dependencies = makeDependencyFacts(keywords.get('dependencies'), file, '', offset, source);
-    const responses = responseFacts(keywords.get('responses'));
+    const responses = responseFacts(keywords.get('responses'), source);
     const logicalKey = `${file.module}.${target}`;
     const key = `${file.path}#${assignment.id}`;
     const node = addNode(kind === 'application' ? 'fastapi_application' : 'fastapi_router', target, file.path, `${key}/${logicalKey}`, { module: file.module, name: target, ...(kind === 'router' ? { prefix: prefix ?? null, prefixResolved, tags } : {}) }, source, kind === 'application' ? 'fastapi.application' : 'fastapi.router');
@@ -231,7 +232,7 @@ function collectIncludes(files: FastApiFile[], resolveObject: (file: FastApiFile
       const prefixExpression = keywords.get('prefix');
       const prefix = prefixExpression === undefined ? '' : expressionString(prefixExpression);
       const source = callEvidence(file.path, call.line, call.column);
-      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses')), source });
+      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source });
     });
   }
   return includes;
@@ -261,7 +262,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       methods = methods.map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${scope}' has no supported statically known methods.`, source); continue; }
       const operation = operationFacts(keywords, file, scope, offset, addDiagnostic, source);
-      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), source, occurrence });
+      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source, occurrence });
     }
   }
   for (const file of files) for (const sourceNode of file.nodes) {
@@ -290,7 +291,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       if (keywords.has('methods') && !methodList) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has dynamic methods and was not exposed.`, source); return; }
       methods = (methodList ?? methods).map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has no supported statically known methods.`, source); return; }
-      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), source, occurrence: callIndex });
+      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source), source, occurrence: callIndex });
     });
   }
   return routes;
@@ -302,19 +303,19 @@ function projectRoute(context: AnalysisContext, namespace: string, route: RouteS
   const routeNode = addNode('fastapi_route', route.handler.label, route.handlerFile.path, routeKey, { namespace, path, pathShape: apiPathShape(path), methods: route.methods, tags, ...route.operation, handlerId: handler.id }, source, 'fastapi.route');
   addEdge(parent, routeNode, 'contains', routeKey, source, { path, methods: route.methods });
   addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
+  const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
     for (const method of route.methods) {
     const endpoint = addNode('api_endpoint', `${method} ${path}`, apiEndpointUri(namespace, method, path), `${namespace}/${method}/${path}`, { namespace, method, path, pathShape: apiPathShape(path), tags }, source, 'api.endpoint');
     addEdge(routeNode, endpoint, 'exposes', `${routeKey}:${method}`, source, { method, path });
     if (route.operation.operationId) endpoint.properties = { ...endpoint.properties, operationId: route.operation.operationId };
-    addRouteFacts(context, namespace, route, path, endpoint, routeNode, dependencies, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config);
+    addRouteFacts(context, namespace, route, path, endpoint, routeNode, dependencies, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config, dependencyBudget);
   }
 }
 
 function addRouteFacts(context: AnalysisContext, namespace: string, route: RouteSpec, effectivePath: string, endpoint: GraphNode, routeNode: GraphNode, dependencies: DependencyFact[], routeKey: string,
   addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void,
-  addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig) {
+  addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig, dependencyBudget: DependencyBudget) {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id) ?? route.source;
-  const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
   const params = Array.isArray(route.handler.properties.parameters) ? route.handler.properties.parameters as PythonParameterFact[] : [];
   const pathNames = [...effectivePath.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]!.split(':')[0]!);
   for (const param of params) {
@@ -350,12 +351,12 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     addEdge(endpoint, node, 'returns', `${routeKey}:response`, source, {}, responseName ? 'DIRECT' : 'DERIVED');
     addSchemaReference(response, route.handlerFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files);
   }
-  const responseFacts = Array.isArray(route.operation.responseStatuses) ? route.operation.responseStatuses as Array<{ status: string; description?: string; model?: string }> : [];
-  for (const responseFact of responseFacts) {
+  for (const responseFact of route.responses) {
     const status = responseFact.status;
-    const node = addNode('api_response', `${status} response`, route.file.path, `${routeKey}/response/${status}`, { statusCode: Number(status) || status, ...(responseFact.description ? { description: responseFact.description } : {}), ...(responseFact.model ? { model: responseFact.model } : {}) }, source, 'api.response');
-    addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, source);
-    if (responseFact.model) addSchemaReference(responseFact.model, route.handlerFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files);
+    const responseSource = responseFact.source ?? source;
+    const node = addNode('api_response', `${status} response`, route.file.path, `${routeKey}/response/${status}`, { statusCode: Number(status) || status, ...(responseFact.description ? { description: responseFact.description } : {}), ...(responseFact.model ? { model: responseFact.model } : {}) }, responseSource, 'api.response');
+    addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
+    if (responseFact.model) addSchemaReference(responseFact.model, route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files);
   }
   for (const fact of dependencies) for (const dep of dependencyExpressions(fact.expression)) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
@@ -392,15 +393,28 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
   const canonical = canonicalFastApiName(value.name ?? '', declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0);
   if (!SECURITY_NAMES.has(canonical)) { if (reportMissing) addDiagnostic('FASTAPI_UNRESOLVED_SECURITY', `Security scheme '${name}' uses an unsupported constructor.`, assignmentEvidence); return undefined; }
   const args = keywordArgs(value.arguments ?? []);
+  const positional = (value.arguments ?? []).filter((argument) => argument.kind === 'positional').map((argument) => argument.expression);
   const publicProperties: Record<string, unknown> = { constructor: canonical, name };
   for (const field of ['scheme_name', 'description', 'scheme', 'bearerFormat', 'auto_error', 'tokenUrl', 'authorizationUrl', 'refreshUrl', 'openIdConnectUrl', 'scopes', 'name', 'in']) {
-    const extracted = staticValue(args.get(field), declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0);
+    if (field === 'scopes') {
+      const literalScopes = literalStringDictionary(args.get(field));
+      if (literalScopes) publicProperties.scopes = literalScopes;
+      else if (args.has(field)) addDiagnostic('FASTAPI_DYNAMIC_SECURITY_SCOPES', `Security scheme '${name}' has dynamic scopes.`, assignmentEvidence);
+      continue;
+    }
+    const position = canonical.endsWith('OAuth2PasswordBearer') && field === 'tokenUrl' ? 0
+      : canonical.endsWith('OAuth2AuthorizationCodeBearer') && field === 'authorizationUrl' ? 0
+      : canonical.endsWith('OAuth2AuthorizationCodeBearer') && field === 'tokenUrl' ? 1
+      : canonical.endsWith('OpenIdConnect') && field === 'openIdConnectUrl' ? 0 : -1;
+    const extracted = args.has(field) ? staticValue(args.get(field), declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0)
+      : position >= 0 ? expressionValue(positional[position]) : undefined;
     if (extracted !== undefined && (extracted === null || ['string', 'number', 'boolean'].includes(typeof extracted) || Array.isArray(extracted))) publicProperties[field] = extracted;
   }
   const schemeName = expressionName(assignment?.properties.target) ?? name;
   const node = addNode('api_security_scheme', schemeName, declarationFile.path, `security/${declarationFile.path}/${assignment?.id ?? canonical}`, publicProperties, assignmentEvidence, 'api.security_scheme');
-  const scopes = stringsFromExpression(scopeExpression);
-  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${key}/${schemeName}`, { scheme: schemeName, scopes }, source, 'api.security_requirement');
+  const scopes = strictStringsFromExpression(scopeExpression);
+  if (scopeExpression && !scopes) { addDiagnostic('FASTAPI_DYNAMIC_SECURITY_SCOPES', `Security requirement for '${schemeName}' has dynamic scopes.`, source); return undefined; }
+  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${key}/${schemeName}`, { scheme: schemeName, scopes: scopes ?? [], alternativeGroup: key, mode: 'alternative' }, source, 'api.security_requirement');
   addEdge(endpoint, requirement, 'secured_by', `${key}:security:${schemeName}`, source, {}, 'DIRECT');
   addEdge(requirement, node, 'uses_scheme', `${key}:uses-scheme:${schemeName}`, source, {}, 'DIRECT');
   return node;
@@ -551,7 +565,19 @@ function strictStringsFromExpression(expression: PythonExpressionFact | undefine
   const strings = values.map(expressionString);
   return strings.every((value): value is string => value !== undefined) ? strings : undefined;
 }
-function responseFacts(expression: PythonExpressionFact | undefined): ResponseFact[] { return expression?.kind === 'DictionaryExpression' ? dictionaryEntries(expression) : []; }
+function responseFacts(expression: PythonExpressionFact | undefined, source?: AnalysisEvidence): ResponseFact[] { return expression?.kind === 'DictionaryExpression' ? dictionaryEntries(expression).map((item) => ({ ...item, source })) : []; }
+function literalStringDictionary(expression: PythonExpressionFact | undefined): Record<string, string> | undefined {
+  if (!expression || expression.kind !== 'DictionaryExpression') return undefined;
+  const children = expression.children ?? [];
+  const result: Record<string, string> = {};
+  for (let index = 0; index + 1 < children.length; index += 2) {
+    const key = expressionString(children[index]);
+    const value = expressionString(children[index + 1]);
+    if (key === undefined || value === undefined) return undefined;
+    result[key] = value;
+  }
+  return result;
+}
 function mergeResponses(...collections: ResponseFact[][]): ResponseFact[] {
   const byStatus = new Map<string, ResponseFact>();
   for (const collection of collections) for (const response of collection) byStatus.set(response.status, response);
