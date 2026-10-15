@@ -3,6 +3,7 @@ import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import type { GraphEdge, GraphNode, Workspace } from '../../domain/graph.js';
 import type { AnalysisEvidence, JsonValue } from '../../domain/analyzer.js';
 import type { PythonImportFact, PythonSourceFile } from './python-source-types.js';
+import type { PythonCallFact, PythonDecoratorFact, PythonExpressionFact, PythonParameterFact } from './python-source-types.js';
 
 export type ParsedPythonFile = { nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; imports: PythonImportFact[]; diagnostics: Array<{ code: string; severity: 'warning'; message: string; uri: string; line: number; detail: Record<string, JsonValue> }> };
 type Range = { from: number; to: number };
@@ -19,6 +20,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   const nodesById = new Map<string, GraphNode>();
   const edgesById = new Set<string>();
   const declarationOccurrences = new Map<string, number>();
+  const assignmentOccurrences = new Map<string, number>();
   const imports: PythonImportFact[] = [];
   const diagnostics: ParsedPythonFile['diagnostics'] = errorRegions.map((region) => {
     const location = point(region.from, offsets);
@@ -46,8 +48,13 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
   const moduleNode = addNode(`${file.path}#module`, 'python_module', moduleName, { from: 0, to: 0 }, { module: moduleName });
   addEdge(fileNode, moduleNode, 'contains', { from: 0, to: 0 });
 
-  function visit(node: any, scope: string[], parent: GraphNode) {
+  function visit(node: any, scope: string[], parent: GraphNode, decorators: PythonDecoratorFact[] = []) {
     if (node.name === '⚠') return;
+    if (node.name === 'DecoratedStatement') {
+      const facts = children(node).filter((child) => child.name === 'Decorator').map((child) => decoratorFact(child, file.source)).filter((fact): fact is PythonDecoratorFact => !!fact);
+      for (const child of children(node)) if (child.name !== 'Decorator') visit(child, scope, parent, facts);
+      return;
+    }
     if (node.name === 'ClassDefinition' || node.name === 'FunctionDefinition') {
       const nameNode = directChild(node, 'VariableName');
       if (!nameNode) return;
@@ -63,10 +70,30 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       const declarationOrdinal = declarationOccurrences.get(occurrenceKey) ?? 0;
       declarationOccurrences.set(occurrenceKey, declarationOrdinal + 1);
       const stableName = declarationOrdinal === 0 ? qualifiedName : `${qualifiedName}#${declarationOrdinal}`;
-      const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async });
+      const args = node.name === 'ClassDefinition' ? directChild(node, 'ArgList') : undefined;
+      const bases = node.name === 'ClassDefinition' && args ? callArguments(args, file.source).filter((arg) => arg.kind === 'positional').map((arg) => arg.expression) : [];
+      const classKeywords = node.name === 'ClassDefinition' && args ? callArguments(args, file.source).filter((arg) => arg.kind === 'keyword').map((arg) => ({ name: arg.keyword, value: arg.expression })) : [];
+      const parameters = node.name === 'FunctionDefinition' ? functionParameters(directChild(node, 'ParamList'), file.source) : [];
+      const returnTypeNode = node.name === 'FunctionDefinition' ? children(node).find((child) => child.name === 'TypeDef' && file.source.slice(child.from, child.to).startsWith('->')) : undefined;
+      const bodyNode = directChild(node, 'Body');
+      const declarationFacts = bodyNode ? structuredFacts(bodyNode, file.source, offsets) : { references: [], calls: [] };
+      const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async, decorators, bases, classKeywords, parameters, ...(returnTypeNode ? { returnAnnotation: annotationFact(returnTypeNode, file.source) } : {}), references: declarationFacts.references, calls: declarationFacts.calls });
       addEdge(parent, declared, 'contains', { from: node.from, to: node.to });
       for (const child of children(node)) visit(child, qualified, declared);
       return;
+    }
+    if (node.name === 'AssignStatement' || node.name === 'AugmentedAssignStatement') {
+      const assignments = assignmentFacts(node, file.source, offsets);
+      for (const assignment of assignments) {
+        const target = expressionName(assignment.target) ?? `target-${node.from}`;
+        const occurrenceKey = `${scope.join('.')}:${target}`;
+        const ordinal = assignmentOccurrences.get(occurrenceKey) ?? 0;
+        assignmentOccurrences.set(occurrenceKey, ordinal + 1);
+        const qualified = [...scope, `assignment:${target}`].join('.');
+        const stableName = ordinal === 0 ? qualified : `${qualified}#${ordinal}`;
+        const declared = addNode(`${file.path}#${stableName}`, 'python_assignment', target, { from: node.from, to: node.to }, { module: moduleName, scope: scope.join('.'), target: assignment.target, annotation: assignment.annotation ?? null, value: assignment.value ?? null, references: assignment.references, calls: assignment.calls, assignmentOrdinal: ordinal });
+        addEdge(parent, declared, 'contains', { from: node.from, to: node.to });
+      }
     }
     if (node.name === 'ImportStatement') {
       if (!intersectsDamage({ from: node.from, to: node.to }, errorRegions)) parseImport(node, file, offsets, imports);
@@ -99,6 +126,135 @@ function parseImport(node: any, file: PythonSourceFile, offsets: number[], out: 
     }
   }
 }
+
+function decoratorFact(node: any, source: string): PythonDecoratorFact | undefined {
+  const expression = children(node).find(isExpressionNode);
+  const name = expression ? expressionName(expressionFact(expression, source)) : undefined;
+  if (!name) return undefined;
+  const args = directChild(node, 'ArgList');
+  const arguments_ = args ? callArguments(args, source).map((arg) => arg.kind === 'keyword' ? ({ kind: 'keyword', name: arg.keyword ?? '', children: [arg.expression] }) : arg.expression) : [];
+  return { name, arguments: arguments_ };
+}
+
+function callArguments(node: any, source: string): Array<{ kind: 'positional' | 'keyword'; keyword?: string; expression: PythonExpressionFact }> {
+  const result = [] as Array<{ kind: 'positional' | 'keyword'; keyword?: string; expression: PythonExpressionFact }>;
+  for (const segment of splitChildren(node)) {
+    const assign = segment.findIndex((child) => child.name === 'AssignOp');
+    const expression = (assign >= 0 ? segment.slice(assign + 1) : segment).find(isExpressionNode);
+    if (!expression) continue;
+    if (assign >= 0) {
+      const keyword = segment.slice(0, assign).find((child) => child.name === 'VariableName');
+      result.push({ kind: 'keyword', keyword: keyword ? source.slice(keyword.from, keyword.to) : '', expression: expressionFact(expression, source) });
+    } else result.push({ kind: 'positional', expression: expressionFact(expression, source) });
+  }
+  return result;
+}
+
+function functionParameters(node: any, source: string): PythonParameterFact[] {
+  if (!node) return [];
+  const result: PythonParameterFact[] = [];
+  let keywordOnly = false;
+  let positionalOnlyMarker = false;
+  for (const segment of splitChildren(node)) {
+    if (segment.some((child) => child.name === '/')) { positionalOnlyMarker = true; continue; }
+    if (segment.some((child) => child.name === '*') && !segment.some((child) => child.name === 'VariableName')) { keywordOnly = true; continue; }
+    const nameNode = segment.find((child) => child.name === 'VariableName');
+    if (!nameNode) continue;
+    const name = source.slice(nameNode.from, nameNode.to);
+    const annotation = segment.find((child) => child.name === 'TypeDef');
+    const prefix = segment.slice(0, segment.indexOf(nameNode));
+    const kind = prefix.some((child) => child.name === '**') ? 'var_keyword' : prefix.some((child) => child.name === '*') ? 'var_positional' : keywordOnly ? 'keyword_only' : 'positional_or_keyword';
+    result.push({ name, kind, ...(annotation ? { annotation: annotationFact(annotation, source) } : {}), hasDefault: segment.some((child) => child.name === 'AssignOp') });
+    if (positionalOnlyMarker) positionalOnlyMarker = false;
+  }
+  const slashBefore = splitChildren(node).some((segment) => segment.some((child) => child.name === '/'));
+  if (slashBefore) {
+    const markerIndex = splitChildren(node).findIndex((segment) => segment.some((child) => child.name === '/'));
+    const precedingNames = splitChildren(node).slice(0, markerIndex).flatMap((segment) => segment.find((child) => child.name === 'VariableName') ? [source.slice(segment.find((child) => child.name === 'VariableName').from, segment.find((child) => child.name === 'VariableName').to)] : []);
+    for (const parameter of result) if (precedingNames.includes(parameter.name) && parameter.kind === 'positional_or_keyword') parameter.kind = 'positional_only';
+  }
+  return result;
+}
+
+function annotationFact(node: any, source: string): PythonExpressionFact {
+  const expression = children(node).find(isExpressionNode);
+  return expression ? expressionFact(expression, source) : { kind: 'unknown' };
+}
+
+function assignmentFacts(node: any, source: string, offsets: number[]) {
+  const children_ = children(node);
+  const operators = children_.flatMap((child, index) => child.name === 'AssignOp' || child.name === 'AugAssignOp' ? [index] : []);
+  const isAugmented = node.name === 'AugmentedAssignStatement';
+  let targetNodes: any[] = [];
+  let valueNode: any;
+  if (operators.length) {
+    const segments: any[][] = [[]];
+    for (const child of children_) { if (child.name === 'AssignOp' || child.name === 'AugAssignOp') segments.push([]); else segments[segments.length - 1].push(child); }
+    targetNodes = isAugmented ? segments[0].filter(isExpressionNode) : segments.slice(0, -1).flatMap((segment) => segment.filter(isExpressionNode));
+    valueNode = [...segments.at(-1)!].reverse().find(isExpressionNode);
+  } else {
+    targetNodes = children_.filter((child) => child.name === 'VariableName' || child.name === 'MemberExpression' || child.name === 'TupleExpression' || child.name === 'ListExpression');
+    valueNode = [...children_].reverse().find(isExpressionNode);
+  }
+  const annotation = children_.find((child) => child.name === 'TypeDef');
+  const value = valueNode ? expressionFact(valueNode, source) : undefined;
+  const facts = valueNode ? structuredFacts(valueNode, source, offsets) : { references: [], calls: [] };
+  return targetNodes.map((target) => ({ target: expressionFact(target, source), annotation: annotation ? annotationFact(annotation, source) : undefined, value, references: facts.references, calls: facts.calls }));
+}
+
+function structuredFacts(root: any, source: string, offsets: number[]) {
+  const references = new Map<string, PythonExpressionFact>();
+  const calls: PythonCallFact[] = [];
+  function walk(node: any, isRoot = false) {
+    if (!isRoot && (node.name === 'ClassDefinition' || node.name === 'FunctionDefinition')) return;
+    if (node.name === 'CallExpression') calls.push(callFact(node, source, offsets));
+    if (node.name === 'MemberExpression' || node.name === 'VariableName') {
+      const fact = expressionFact(node, source);
+      const key = JSON.stringify(fact);
+      references.set(key, fact);
+      if (node.name === 'MemberExpression') return;
+    }
+    for (const child of children(node)) walk(child);
+  }
+  walk(root, true);
+  return { references: [...references.values()], calls };
+}
+
+function callFact(node: any, source: string, offsets: number[]): PythonCallFact {
+  const parts = children(node);
+  const calleeNode = parts.find(isExpressionNode);
+  const argsNode = directChild(node, 'ArgList');
+  const point_ = point(node.from, offsets);
+  return { callee: calleeNode ? expressionName(expressionFact(calleeNode, source)) ?? '' : '', arguments: argsNode ? callArguments(argsNode, source).map((arg) => ({ kind: arg.kind, ...(arg.keyword ? { keyword: arg.keyword } : {}), literalKind: arg.expression.literalKind ?? arg.expression.kind })) : [], line: point_.line, column: point_.column };
+}
+
+function expressionFact(node: any, source: string): PythonExpressionFact {
+  if (node.name === 'VariableName' || node.name === 'PropertyName') return { kind: 'name', name: source.slice(node.from, node.to) };
+  if (node.name === 'MemberExpression') {
+    const parts = children(node).filter(isExpressionNode);
+    const object = parts[0] ? expressionFact(parts[0], source) : { kind: 'unknown' };
+    const property = [...parts].reverse()[0];
+    return { kind: 'member', property: property ? expressionName(expressionFact(property, source)) ?? '' : '', children: [object] };
+  }
+  if (node.name === 'CallExpression') {
+    const callee = children(node).find(isExpressionNode);
+    return { kind: 'call', name: callee ? expressionName(expressionFact(callee, source)) ?? '' : '' };
+  }
+  const literalKind = ({ String: 'string', Number: 'number', Boolean: 'boolean', None: 'none' } as Record<string, string>)[node.name];
+  const parts = children(node).filter(isExpressionNode);
+  return { kind: node.name, ...(literalKind ? { literalKind } : {}), ...(parts.length ? { children: parts.map((part) => expressionFact(part, source)) } : {}) };
+}
+
+function expressionName(fact: PythonExpressionFact): string | undefined {
+  if (fact.kind === 'name') return fact.name;
+  if (fact.kind === 'member') { const base = fact.children?.[0] ? expressionName(fact.children[0]) : undefined; return base && fact.property ? `${base}.${fact.property}` : undefined; }
+  if (fact.kind === 'call') return fact.name;
+  return undefined;
+}
+
+function literalKind(node: any) { return ({ String: 'string', Number: 'number', Boolean: 'boolean', None: 'none', ListExpression: 'list', DictExpression: 'dict', SetExpression: 'set', TupleExpression: 'tuple', CallExpression: 'call', MemberExpression: 'member', VariableName: 'name' } as Record<string, string>)[node.name] ?? 'expression'; }
+function splitChildren(node: any) { const result: any[][] = [[]]; for (const child of children(node)) { if (child.name === ',') result.push([]); else result[result.length - 1].push(child); } return result; }
+function isExpressionNode(node: any) { return !['(', ')', '[', ']', '{', '}', ',', ':', '.', '...', 'AssignOp', 'AugAssignOp', 'as', '*', '**', '/'].includes(node.name) && !['TypeDef'].includes(node.name) && (node.name === 'VariableName' || node.name === 'PropertyName' || /Expression$|Literal$|^(String|Number|Boolean|None|True|False)$/.test(node.name)); }
 
 function flattenImportTokens(tokens: any[]): any[] { return tokens.flatMap((token) => token.name === 'ImportList' ? flattenImportTokens(children(token)) : [token]); }
 function splitImportSegments(tokens: any[]) { const result: any[][] = [[]]; for (const token of tokens) { if (token.name === ',') result.push([]); else if (!['(', ')'].includes(token.name)) result[result.length - 1].push(token); } return result; }
