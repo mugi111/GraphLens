@@ -128,11 +128,16 @@ export function resolveFastApiSymbol(files: FastApiFile[], file: FastApiFile, na
     }
     const assignment = event.sourceNodeId ? file.assignments.find((node) => node.id === event.sourceNodeId) : undefined;
     if (assignment) {
-      const cycleKey = `${file.path}\u0000${current}\u0000${head}\u0000${event.offset}`;
-      if (resolving.has(cycleKey)) return undefined;
-      resolving.add(cycleKey);
-      const alias = expressionName(assignment.properties.value);
-      return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving) : undefined;
+      const value = typeof assignment.properties.value === 'object' && assignment.properties.value !== null ? assignment.properties.value as PythonExpressionFact : undefined;
+      if (value && (value.kind === 'name' || value.kind === 'member')) {
+        const cycleKey = `${file.path}\u0000${current}\u0000${head}\u0000${event.offset}`;
+        if (resolving.has(cycleKey)) return undefined;
+        resolving.add(cycleKey);
+        const alias = expressionName(value);
+        return alias ? resolveFastApiSymbol(files, file, alias, current, event.offset - 1, resolving) : undefined;
+      }
+      const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
+      return existsSymbol(files, local) ? local : undefined;
     }
     const local = `${file.module}.${head}${name.includes('.') ? `.${name.split('.').slice(1).join('.')}` : ''}`;
     return existsSymbol(files, local) ? local : undefined;
