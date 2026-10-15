@@ -231,17 +231,13 @@ export class GraphStore implements ArchitectureInputProvider {
       const generationId = Number(generation.lastInsertRowid);
       const insertInput = this.db.prepare('INSERT INTO analysis_generation_inputs(generation_id,input_generation_id,input_analyzer_id) VALUES(?,?,?)');
       for (const input of inputs) insertInput.run(generationId, input.generationId, input.analyzerId);
-      const repeatedAnalyzer = this.db.prepare(`WITH RECURSIVE walk(generation_id, analyzer_path, generation_path, repeated) AS (
-        SELECT g.id, '|' || ? || '|' || g.analyzer_id || '|', '|' || g.id || '|', g.analyzer_id=?
-        FROM analysis_generation_inputs i JOIN analysis_generations g ON g.id=i.input_generation_id
-        WHERE i.generation_id=?
-        UNION ALL
-        SELECT parent.id, walk.analyzer_path || parent.analyzer_id || '|', walk.generation_path || parent.id || '|',
-          instr(walk.analyzer_path, '|' || parent.analyzer_id || '|') > 0
-        FROM walk JOIN analysis_generation_inputs i ON i.generation_id=walk.generation_id
-        JOIN analysis_generations parent ON parent.id=i.input_generation_id
-        WHERE instr(walk.generation_path, '|' || parent.id || '|') = 0
-      ) SELECT 1 FROM walk WHERE repeated LIMIT 1`).get(descriptor.id, descriptor.id, generationId);
+      const repeatedAnalyzer = this.db.prepare(`WITH RECURSIVE ancestors(generation_id) AS (
+        SELECT input_generation_id FROM analysis_generation_inputs WHERE generation_id=?
+        UNION
+        SELECT i.input_generation_id FROM analysis_generation_inputs i
+        JOIN ancestors a ON i.generation_id=a.generation_id
+      ) SELECT 1 FROM ancestors a JOIN analysis_generations g ON g.id=a.generation_id
+        WHERE g.analyzer_id=? LIMIT 1`).get(generationId, descriptor.id);
       if (repeatedAnalyzer) throw new AnalysisError('INPUT_GENERATION_CYCLE', `Input ancestry repeats analyzer '${descriptor.id}'.`);
       const node = this.db.prepare('INSERT INTO node_contributions(generation_id,id,workspace_id,kind,label,properties_json) VALUES(?,?,?,?,?,?)');
       const edge = this.db.prepare('INSERT INTO edge_contributions(generation_id,id,workspace_id,source_id,target_id,kind,properties_json) VALUES(?,?,?,?,?,?,?)');
