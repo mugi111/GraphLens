@@ -186,3 +186,7 @@ Architecture result revisions include the normalized resolver configuration and 
 ```sh
 curl 'http://127.0.0.1:4174/api/v1/architecture?workspace=<workspace-id>&root=endpoint&method=GET&path=/users&depth=2&include=evidence,diagnostics'
 ```
+
+### Cross-workspace snapshot foundation
+
+The storage layer exposes a read-only `crossWorkspaceArchitectureSnapshot` operation for 2–16 unique workspace IDs. It reads each active `builtin.architecture` generation inside one SQLite read transaction and returns a deterministic SHA-256 `snapshotId` derived from the sorted workspace/generation vector. Workspace IDs that are not registered are rejected; registered workspaces without an active architecture generation are listed separately. The response contains workspace IDs and names, generation/input metadata, and ID-sorted graph facts, evidence, and diagnostics. Workspace filesystem paths are omitted from workspace metadata; graph facts and source evidence retain their original values. This is the Phase 5.1 storage contract; the HTTP API and cross-workspace resolver are added in later phases.
