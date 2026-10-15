@@ -156,9 +156,8 @@ function functionParameters(node: any, source: string): PythonParameterFact[] {
   if (!node) return [];
   const result: PythonParameterFact[] = [];
   let keywordOnly = false;
-  let positionalOnlyMarker = false;
   for (const segment of splitChildren(node)) {
-    if (segment.some((child) => child.name === '/')) { positionalOnlyMarker = true; continue; }
+    if (segment.some((child) => child.name === '/')) continue;
     if (segment.some((child) => child.name === '*') && !segment.some((child) => child.name === 'VariableName')) { keywordOnly = true; continue; }
     const nameNode = segment.find((child) => child.name === 'VariableName');
     if (!nameNode) continue;
@@ -167,7 +166,7 @@ function functionParameters(node: any, source: string): PythonParameterFact[] {
     const prefix = segment.slice(0, segment.indexOf(nameNode));
     const kind = prefix.some((child) => child.name === '**') ? 'var_keyword' : prefix.some((child) => child.name === '*') ? 'var_positional' : keywordOnly ? 'keyword_only' : 'positional_or_keyword';
     result.push({ name, kind, ...(annotation ? { annotation: annotationFact(annotation, source) } : {}), hasDefault: segment.some((child) => child.name === 'AssignOp') });
-    if (positionalOnlyMarker) positionalOnlyMarker = false;
+    if (kind === 'var_positional') keywordOnly = true;
   }
   const slashBefore = splitChildren(node).some((segment) => segment.some((child) => child.name === '/'));
   if (slashBefore) {
