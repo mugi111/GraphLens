@@ -6,6 +6,7 @@ GraphLens is a local-first architecture explorer for code, APIs, data models, an
 
 - Node.js 20.11 or newer
 - A CodeGraph MCP server only when inspecting its connection capability
+- Node.js 22.5 through 24 and an existing CodeGraph 1.6.2 package installation only when importing CodeGraph snapshots
 
 ## Run GraphLens
 
@@ -27,7 +28,7 @@ If a legacy database exists at `.graphlens/graphlens.sqlite` in the current dire
 
 Each successful sync writes a new immutable generation and switches the active generation within one SQLite transaction. A failed sync never replaces the current graph, so the browser continues to show the last successful snapshot.
 
-`POST /api/v1/sync` starts a sync, `GET /api/v1/sync/:runId` returns its state, and the UI uses these read APIs:
+`POST /api/v1/sync` activates the local demo fixture, and `GET /api/v1/sync/:runId` returns its state. Source indexing uses the analyzer run API described below. The UI uses these read APIs:
 
 - `GET /api/v1/status`
 - `GET /api/v1/workspaces`
@@ -127,6 +128,21 @@ Analyzer results may declare the exact active generations they consumed with `in
 
 The read-only `architectureInputProvider` on analyzer context returns only requested active generations for one workspace in a single SQLite read transaction, with contributions in stable ID order. When an upstream generation changes or its plugin is disabled, GraphLens recursively removes active pointers for derived generations that consumed it; historical generations, run records, and evidence remain available. No historical dependencies are backfilled. Migration 6 adds the dependency table, index, foreign keys, and integrity trigger.
 
+## CodeGraph snapshot ingestion
+
+GraphLens can import a complete local CodeGraph snapshot through the installed CodeGraph SDK. The SDK is not bundled or installed by GraphLens. Pass the package root for an existing `@colbymchenry/codegraph` 1.6.2 installation:
+
+```sh
+graphlens --workspace /path/to/repository \
+  --codegraph-sdk /path/to/node_modules/@colbymchenry/codegraph
+```
+
+The option registers the `builtin.codegraph` snapshot analyzer; it does not start an import. Start an explicit analysis run for a registered workspace with `POST /api/v1/analysis-runs`, using `{"workspaceId":"<workspace-id>","analyzerId":"builtin.codegraph"}`. The analyzer uses CodeGraph's public `getDatabasePath`, `getCodeGraphDir`, `DatabaseConnection`, and `QueryBuilder` exports. It opens the database read-only, enforces SQLite query-only mode, and reads schema version 15 and extraction version 28 from one transaction. It rejects incomplete index states, synthesis in progress, pending references, parser initialization errors, and supported-language files with no extracted nodes. Parse errors, failed unresolved references, and warning-only skip markers are reported as diagnostics. YAML, Twig, and properties files are represented by their CodeGraph file records because these formats do not create symbol nodes.
+
+An import fails without replacing the active GraphLens generation if the CodeGraph version or completeness checks fail, another CodeGraph writer owns the lock, or the input exceeds 10,000 rows, 9,000 graph contributions, 10,000 bytes per field, or 16 MiB of serialized analyzer output. A successful run activates the complete generation atomically. `/api/v1/status` reports the MCP connection and snapshot ingestion capability separately.
+
+GraphLens itself continues to support Node.js 20.11 and newer. The CodeGraph SDK integration requires Node.js 22.5 through 24 because CodeGraph uses the built-in `node:sqlite` API.
+
 ## CodeGraph MCP capability
 
 On startup, GraphLens probes the configured CodeGraph MCP server with standard MCP stdio `initialize` and `tools/list` requests, and lists its available tools for connection diagnostics:
@@ -137,7 +153,7 @@ graphlens --workspace /repo \
   --codegraph-arg --profile=local
 ```
 
-The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens currently uses the connection and tool list for diagnostics only. It does not import CodeGraph graph snapshots, and its status and UI do not claim partial CodeGraph data is complete.
+The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens uses the connection and tool list for diagnostics only. MCP connection status is separate from the full snapshot imported by the SDK analyzer.
 
 For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
 
