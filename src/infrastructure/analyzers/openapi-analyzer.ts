@@ -81,11 +81,11 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
       props.sourcePath = doc.file.path;
       const schemaNode = node(doc, 'openapi_schema', `components/schemas/${escapePointer(name)}`, name, props, doc.evidence(schema, 'schema'));
       edge(doc, root, schemaNode, 'contains', `schema:${name}`, doc.evidence(schema, 'schema'));
+      addSchemaReference(schema, schemaNode, `schema:${name}`);
       for (const [propertyName, propertyNode] of mapPairs(get(schema, 'properties'))) {
         const property = node(doc, 'api_schema_property', `components/schemas/${escapePointer(name)}/properties/${escapePointer(propertyName)}`, propertyName, safeProperties(propertyNode), doc.evidence(propertyNode, 'schema-property'));
         edge(doc, schemaNode, property, 'contains', `schema-property:${name}:${propertyName}`, doc.evidence(propertyNode, 'schema-property'));
-        const ref = valueAt(propertyNode, '$ref');
-        if (typeof ref === 'string') { const reference = node(doc, 'api_schema_reference', `refs/${hash(ref)}`, ref, { ref, sourcePath: doc.file.path }, doc.evidence(propertyNode, 'schema-reference')); edge(doc, property, reference, 'uses_schema', `schema-ref:${name}:${propertyName}`, doc.evidence(propertyNode, 'schema-reference')); }
+        addSchemaReference(propertyNode, property, `schema-property:${name}:${propertyName}`);
       }
     }
     const schemes = new Map<string, GraphNode>();
@@ -134,7 +134,7 @@ async function analyze(context: AnalysisContext): Promise<AnalysisResult> {
     }
     function projectParameter(parameter: YamlNode, key: string, endpoint: GraphNode) {
       const name = valueAt(parameter, 'name'), location = valueAt(parameter, 'in');
-      const p = node(doc, 'api_parameter', key, typeof name === 'string' ? name : 'parameter', { ...(typeof name === 'string' ? { name } : {}), ...(typeof location === 'string' ? { in: location } : {}), required: valueAt(parameter, 'required'), description: valueAt(parameter, 'description'), style: valueAt(parameter, 'style'), explode: valueAt(parameter, 'explode') }, doc.evidence(parameter, 'parameter'));
+      const p = node(doc, 'api_parameter', key, typeof name === 'string' ? name : 'parameter', { ...(typeof name === 'string' ? { name } : {}), ...(typeof location === 'string' ? { in: location } : {}), required: location === 'path' ? true : valueAt(parameter, 'required'), description: valueAt(parameter, 'description'), style: valueAt(parameter, 'style'), explode: valueAt(parameter, 'explode') }, doc.evidence(parameter, 'parameter'));
       edge(doc, endpoint, p, 'accepts', key, doc.evidence(parameter, 'parameter'));
       const schema = get(parameter, 'schema'); if (schema) addSchemaReference(schema, p, key);
       for (const [contentType, media] of mapPairs(get(parameter, 'content'))) { const bodySchema = get(media, 'schema'); if (bodySchema) addSchemaReference(bodySchema, p, `${key}/${contentType}`); }
