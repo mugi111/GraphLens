@@ -112,7 +112,7 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     level: 'DERIVED',
     type,
     sources,
-    sourceReferences: sourceReferences(snapshot, sources),
+    ...sourceReferences(snapshot, sources),
     ...(detail ? { detail } : {}),
   });
 
@@ -197,33 +197,35 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
 
 function sourceReferences(snapshot: CrossWorkspaceSnapshot, sources: CrossWorkspaceEvidence['sources']) {
   const refs = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  let sourceLocationsUnavailable = false;
   const add = (architectureWorkspace: WorkspaceArchitectureSnapshot, analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean) => {
-    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return;
-    if (!architectureWorkspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) return;
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) { sourceLocationsUnavailable = true; return; }
+    if (!architectureWorkspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
     const key = `${architectureWorkspace.workspace.id}\0${analyzerId}\0${generationId}`;
     const ref = refs.get(key) ?? { workspaceId: architectureWorkspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
     ref.evidenceIds.add(evidenceId); refs.set(key, ref);
   };
   for (const tuple of sources) {
     const workspace = snapshot.generations.find((candidate) => candidate.workspace.id === tuple.workspaceId && candidate.generation.analyzerId === tuple.analyzerId && candidate.generation.generationId === tuple.generationId);
-    if (!workspace || tuple.analyzerId !== 'builtin.architecture') continue;
+    if (!workspace || tuple.analyzerId !== 'builtin.architecture') { sourceLocationsUnavailable = true; continue; }
     for (const evidenceId of tuple.evidenceIds) {
       const evidence = workspace.evidence.find((item) => item.id === evidenceId);
       const provenance = evidence?.provenance;
-      if (!evidence || !provenance) continue;
+      if (!evidence || !provenance) { sourceLocationsUnavailable = true; continue; }
       if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
         add(workspace, provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof evidence.uri === 'string');
       } else if (Array.isArray(provenance.sources)) {
+        if (!provenance.sources.length) sourceLocationsUnavailable = true;
         for (const value of provenance.sources) {
-          if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+          if (!value || typeof value !== 'object' || Array.isArray(value)) { sourceLocationsUnavailable = true; continue; }
           const item = value as Record<string, unknown>;
           const input = workspace.inputGenerations.find((candidate) => candidate.analyzerId === item.analyzerId);
           add(workspace, item.analyzerId, input?.generationId, item.evidenceId, typeof item.uri === 'string');
         }
-      }
+      } else sourceLocationsUnavailable = true;
     }
   }
-  return [...refs.values()].map((ref) => ({ workspaceId: ref.workspaceId, analyzerId: ref.analyzerId, generationId: ref.generationId, evidenceIds: [...ref.evidenceIds].sort() }));
+  return { sourceReferences: [...refs.values()].map((ref) => ({ workspaceId: ref.workspaceId, analyzerId: ref.analyzerId, generationId: ref.generationId, evidenceIds: [...ref.evidenceIds].sort() })), sourceLocationsUnavailable };
 }
 
 function resolverOptions(input: Partial<CrossWorkspaceResolverOptions>): CrossWorkspaceResolverOptions {
