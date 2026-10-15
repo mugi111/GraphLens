@@ -10,10 +10,30 @@ import { ArchitectureQueryError, parseArchitectureQuery, type ArchitectureQueryS
 import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceQueryService } from '../application/cross-workspace-query-service.js';
 import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
 import { parseWorkspaceGraphQuery, WorkspaceGraphError, type WorkspaceQueryService } from '../application/workspace-query-service.js';
+import { SourceNavigationError, SourceNavigationService } from '../application/source-navigation-service.js';
 
 export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string, codegraphSnapshot: { configured: boolean; packageVersion?: string; runtimeSupported: boolean; detail: string }) {
   const app = new Hono();
+  const sourceNavigation = new SourceNavigationService(store);
   app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: { mcp: await adapter.status(), snapshot: codegraphSnapshot } }));
+  app.get('/api/v1/source', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    const params = new URL(c.req.url).searchParams;
+    const allowed = new Set(['workspace', 'analyzer', 'generation', 'evidence']);
+    const values = new Map<string, string>();
+    for (const [key, value] of params) {
+      if (!allowed.has(key) || values.has(key)) return c.json({ error: 'Source requests require exactly one workspace, analyzer, generation, and evidence parameter.', code: 'INVALID_SOURCE_QUERY' }, 400);
+      values.set(key, value);
+    }
+    if (values.size !== 4 || [...values.values()].some((value) => !value || value.length > 512 || value.includes('\0'))) return c.json({ error: 'Source requests require exactly one workspace, analyzer, generation, and evidence parameter.', code: 'INVALID_SOURCE_QUERY' }, 400);
+    const generation = values.get('generation')!;
+    if (!/^[1-9]\d{0,14}$/.test(generation) || !Number.isSafeInteger(Number(generation))) return c.json({ error: 'generation must be a positive safe integer.', code: 'INVALID_SOURCE_QUERY' }, 400);
+    try { return c.json(await sourceNavigation.open({ workspaceId: values.get('workspace')!, analyzerId: values.get('analyzer')!, generationId: Number(generation), evidenceId: values.get('evidence')! })); }
+    catch (error) {
+      if (error instanceof SourceNavigationError) return c.json({ error: error.message, code: error.code }, error.status);
+      return c.json({ error: 'The current working source could not be opened.', code: 'SOURCE_FILE_UNAVAILABLE' }, 404);
+    }
+  });
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
   app.post('/api/v1/sync', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaces?: string[]; demo?: boolean };
