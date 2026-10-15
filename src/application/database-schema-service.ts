@@ -101,13 +101,27 @@ function queryEcho(query: DatabaseSchemaQuery) {
 }
 function selectRoots(snapshot: DatabaseSchemaSnapshot, query: DatabaseSchemaQuery) {
   const kind = query.root === 'table' ? 'sqlalchemy_table' : 'sqlalchemy_model';
+  const modelOwners = new Map<string, Set<string>>();
+  if (query.root === 'table' && query.model !== undefined) for (const edge of snapshot.edges) {
+    if (edge.kind !== 'contains') continue;
+    const owners = modelOwners.get(edge.targetId) ?? new Set<string>();
+    owners.add(edge.sourceId);
+    modelOwners.set(edge.targetId, owners);
+  }
   return snapshot.nodes.filter((node) => {
     if (node.kind !== kind) return false;
     const p = node.properties;
     if (query.namespace !== undefined && p.databaseNamespace !== query.namespace) return false;
     if (query.schema !== undefined && (p.schema ?? '') !== query.schema) return false;
     if (query.table !== undefined && p.tableName !== query.table) return false;
-    if (query.model !== undefined && p.qualifiedName !== query.model && `${String(p.module)}.${String(p.qualifiedName)}` !== query.model) return false;
+    if (query.model !== undefined) {
+      const candidate = (owner: GraphNode) => owner.kind === 'sqlalchemy_model' && (owner.properties.qualifiedName === query.model || `${String(owner.properties.module)}.${String(owner.properties.qualifiedName)}` === query.model);
+      if (query.root === 'model') { if (!candidate(node)) return false; }
+      else {
+        const ownerIds = modelOwners.get(node.id) ?? new Set<string>();
+        if (!snapshot.nodes.some((owner) => ownerIds.has(owner.id) && candidate(owner))) return false;
+      }
+    }
     return true;
   }).sort((a, b) => compare(rootSortKey(a, query.root), rootSortKey(b, query.root)));
 }

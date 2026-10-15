@@ -64,7 +64,7 @@ function parseDatabaseSchemaQuery(params: URLSearchParams): { query: DatabaseSch
   const table = values.get('table');
   if (table !== undefined && (!table || table.length > 255 || table.includes('\0'))) return invalid('table must be a non-empty exact name.');
   const model = values.get('model');
-  if (model !== undefined && (!model || model.length > 512 || model.includes('\0') || root !== 'model')) return invalid('model is valid only for root=model and must be a non-empty exact name.');
+  if (model !== undefined && (!model || model.length > 512 || model.includes('\0'))) return invalid('model must be a non-empty exact name.');
   const limitText = values.get('limit') ?? '25';
   if (!/^[1-9]\d*$/.test(limitText) || !Number.isSafeInteger(Number(limitText)) || Number(limitText) > 100) return invalid('limit must be an integer between 1 and 100.');
   const cursor = values.get('cursor');
