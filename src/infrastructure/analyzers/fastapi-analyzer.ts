@@ -3,7 +3,7 @@ import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { apiEndpointUri, apiPathShape } from '../../core/api-identity.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { PYTHON_SOURCE_LIMITS, type PythonExpressionFact, type PythonParameterFact } from './python-source-types.js';
-import { argsOf, callsOf, canonicalFastApiName, collectFastApiFiles, collectFastApiSource, decoratorsOf, expressionString, expressionValue, fastApiConfig, importsFor, keywordArgs, literalList, resolveFastApiSymbol, type FastApiConfig, type FastApiFile } from './fastapi-source.js';
+import { argsOf, callsOf, canonicalFastApiName, collectFastApiFiles, collectFastApiSource, decoratorsOf, expressionString, expressionValue, fastApiConfig, importsFor, keywordArgs, literalList, resolveFastApiAssignmentSymbol, resolveFastApiSymbol, type FastApiConfig, type FastApiFile } from './fastapi-source.js';
 import { expressionName } from './sqlalchemy-source-collector.js';
 
 const identity = new GraphIdentityFactory();
@@ -116,7 +116,8 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
       const exact = objects.find((object) => object.file === file && object.sourceNodeId === binding!.sourceNodeId);
       if (exact) return exact;
       const assignment = file.assignments.find((item) => item.id === binding!.sourceNodeId);
-      const alias = expressionName(assignment?.properties.value);
+      const aliasValue = asExpression(assignment?.properties.value);
+      const alias = aliasValue && (aliasValue.kind === 'name' || aliasValue.kind === 'member') ? expressionName(aliasValue) : undefined;
       const key = `${bindingScope}.${head}:${binding.offset}`;
       if (!alias || seen.has(key)) return undefined;
       seen.add(key);
@@ -278,7 +279,7 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       const positional = call.arguments.filter((arg) => arg.kind === 'positional').map((arg) => arg.expression);
       const keywords = keywordArgs(call.arguments);
       const path = expressionString(positional[0] ?? keywords.get('path'));
-      const endpointName = expressionName(positional[1] ?? keywords.get('endpoint'));
+      const endpointName = directReferenceName(positional[1] ?? keywords.get('endpoint'));
       const handlerKey = endpointName ? resolveFastApiSymbol(files, file, endpointName, scope, offset) : undefined;
       const candidates = handlerKey ? files.flatMap((item) => item.functions.filter((fn) => `${String(fn.properties.module)}.${String(fn.properties.qualifiedName)}` === handlerKey).map((fn) => ({ file: item, fn }))) : [];
       if (candidates.length > 1) { addDiagnostic('FASTAPI_AMBIGUOUS_HANDLER', `Endpoint '${endpointName}' has multiple source declarations.`, source); return; }
@@ -370,7 +371,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
     const targetExpr = dependencyTarget(dep);
     if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
-    const targetName = expressionName(targetExpr);
+    const targetName = directReferenceName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
     const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source) : undefined;
     if (!fn) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
@@ -386,9 +387,9 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
 
 function resolveSecurityScheme(expression: PythonExpressionFact | undefined, scopeExpression: PythonExpressionFact | undefined, files: FastApiFile[], file: FastApiFile, scope: string, offset: number, endpoint: GraphNode, key: string,
   source: AnalysisEvidence | undefined, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, reportMissing = true) {
-  const name = expressionName(expression);
+  const name = directReferenceName(expression);
   if (!name) return undefined;
-  const symbol = resolveFastApiSymbol(files, file, name, scope, offset);
+  const symbol = resolveFastApiSymbol(files, file, name, scope, offset) ?? resolveFastApiAssignmentSymbol(file, name, scope, offset);
   const assignments = symbol ? files.flatMap((candidate) => candidate.assignments.filter((node) => `${node.properties.module}.${expressionName(node.properties.target)}` === symbol).map((node) => ({ file: candidate, node }))) : [];
   if (assignments.length > 1) { if (reportMissing) addDiagnostic('FASTAPI_AMBIGUOUS_SECURITY', `Security scheme '${name}' has multiple declarations.`, source); return undefined; }
   const match = assignments[0];
@@ -468,7 +469,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       if (canonical !== 'fastapi.Depends' && canonical !== 'fastapi.Security') continue;
       const target = dependencyTarget(dependency);
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
-      const targetName = expressionName(target);
+      const targetName = directReferenceName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
       const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
@@ -515,6 +516,9 @@ function uniqueFunction(files: FastApiFile[], symbol: string, addDiagnostic: (co
 
 function canonicalCall(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number) {
   return expression?.kind === 'call' ? canonicalFastApiName(expression.name ?? '', file, scope, offset) : undefined;
+}
+function directReferenceName(expression: PythonExpressionFact | undefined) {
+  return expression && (expression.kind === 'name' || expression.kind === 'member') ? expressionName(expression) : undefined;
 }
 function findParameterMarker(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number): PythonExpressionFact | undefined {
   if (!expression) return undefined;
