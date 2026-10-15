@@ -4,7 +4,7 @@ import { SourceEvidenceButton } from './source-viewer.js';
 import './code-view.css';
 
 type Workspace = { id: string; name: string };
-type Evidence = { id: string; type: string; uri?: string; line?: number; level?: string; analyzerId?: string; generationId?: number };
+type Evidence = { id: string; type: string; uri?: string; line?: number; detail?: string; provenance?: Record<string, unknown>; level?: string; analyzerId?: string; generationId?: number };
 type Node = { id: string; workspaceId: string; kind: string; label: string; properties: Record<string, unknown>; analyzerId: string; generationId: number; level: string; evidenceCount: number; evidence?: Evidence[] };
 type Edge = { id: string; workspaceId: string; sourceId: string; targetId: string; kind: string; properties: Record<string, unknown>; analyzerId: string; generationId: number; level: string; evidenceCount: number; evidence?: Evidence[] };
 type Page = { snapshotId: string; page: { nextCursor?: string }; nodes: Node[]; edges: Edge[] };
@@ -45,7 +45,7 @@ export function CodeView({ workspaces }: { workspaces: Workspace[] }) {
       if (options.mode === 'search') params.set('q', query);
       if (kind && (options.mode === 'roots' || options.mode === 'search')) params.set('kind', kind);
       if (options.cursor) params.set('cursor', options.cursor);
-      if (root?.snapshotId && !options.cursor) params.set('snapshot', root.snapshotId);
+      if (root?.snapshotId && (options.cursor || options.focus)) params.set('snapshot', root.snapshotId);
       if (options.focus) { params.set('node', options.focus.id); params.set('nodeWorkspace', options.focus.workspaceId); }
       const response = await fetch(`/api/v1/code-graph?${params}`, { signal: controller.signal });
       const result = await response.json() as Page & { error?: string };
@@ -110,6 +110,7 @@ export function CodeView({ workspaces }: { workspaces: Workspace[] }) {
     void fetchPage({ mode: branchMode, focus: node });
   };
   const collapse = (node: Node, branchMode?: Branch['mode']) => {
+    request.current?.abort(); request.current = undefined; setBusy(false);
     const parent = identity(node.workspaceId, node.id);
     setBranches((current) => {
       const removed = new Set(Object.entries(current).filter(([, branch]) => branch.parent === parent && (!branchMode || branch.mode === branchMode)).map(([key]) => key));
@@ -153,6 +154,6 @@ export function CodeView({ workspaces }: { workspaces: Workspace[] }) {
       <ul>{nodes.map((node) => <li key={identity(node.workspaceId, node.id)}><button aria-pressed={selection?.type === 'node' && identity(selection.value.workspaceId, selection.value.id) === identity(node.workspaceId, node.id)} onClick={() => setSelection({ type: 'node', value: node })}>{node.label} · {node.kind} · {node.level}</button></li>)}
         {edges.map((edge) => <li key={identity(edge.workspaceId, edge.id)}><button aria-pressed={selection?.type === 'edge' && identity(selection.value.workspaceId, selection.value.id) === identity(edge.workspaceId, edge.id)} onClick={() => setSelection({ type: 'edge', value: edge })}>{edge.sourceId} → {edge.targetId} · {edge.kind} · {edge.level}</button></li>)}</ul>
       <h2>Expanded branches</h2>{Object.entries(branches).map(([key, branch]) => { const parent = nodes.find((node) => identity(node.workspaceId, node.id) === branch.parent); return <div key={key}><span>{parent?.label ?? branch.parent} · {branch.mode}</span><button onClick={() => parent && collapse(parent, branch.mode)}>Collapse branch</button>{branch.cursor && parent && <button disabled={busy} onClick={() => void fetchPage({ mode: branch.mode, focus: parent, cursor: branch.cursor })}>More in branch</button>}</div>; })}
-    </section><aside><h2>Inspector</h2>{selection ? <><h3>{selection.type === 'node' ? selection.value.label : selection.value.kind}</h3><p>{selection.type} · {selection.value.kind} · {selection.value.level} · {selection.value.workspaceId} #{selection.value.generationId}</p><pre>{JSON.stringify(selection.value.properties, null, 2)}</pre><h3>Evidence</h3>{selection.value.evidence?.map((entry) => { const source = entry.uri && entry.id && entry.analyzerId && entry.generationId ? { workspaceId: selection.value.workspaceId, analyzerId: entry.analyzerId, generationId: entry.generationId, evidenceId: entry.id } : undefined; return <p key={entry.id}><code>{entry.type} {entry.uri}{entry.line ? `:${entry.line}` : ''}</code><br/><SourceEvidenceButton source={source}/></p>; }) ?? <p>Evidence was not included.</p>}</> : <p>Select a node or relationship.</p>}</aside></div>
+    </section><aside><h2>Inspector</h2>{selection ? <><h3>{selection.type === 'node' ? selection.value.label : selection.value.kind}</h3><p>{selection.type} · {selection.value.kind} · {selection.value.level} · {selection.value.workspaceId} #{selection.value.generationId}</p><p>Analyzer: <code>{selection.value.analyzerId}</code></p><pre>{JSON.stringify(selection.value.properties, null, 2)}</pre><h3>Evidence</h3>{selection.value.evidence?.map((entry) => { const source = entry.uri && entry.id && entry.analyzerId && entry.generationId ? { workspaceId: selection.value.workspaceId, analyzerId: entry.analyzerId, generationId: entry.generationId, evidenceId: entry.id } : undefined; return <section key={entry.id}><p><strong>{entry.level ?? 'Unknown'} · {entry.type}</strong></p><p><code>{entry.uri}{entry.line ? `:${entry.line}` : ''}</code></p>{entry.detail && <p>{entry.detail}</p>}{entry.provenance && <details><summary>Provenance</summary><pre>{JSON.stringify(entry.provenance, null, 2)}</pre></details>}<SourceEvidenceButton source={source}/></section>; }) ?? <p>Evidence was not included.</p>}</> : <p>Select a node or relationship.</p>}</aside></div>
   </main>;
 }
