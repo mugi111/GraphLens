@@ -7,8 +7,9 @@ import type { CodeGraphAdapter } from '../infrastructure/codegraph/adapter.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
 import { DatabaseSchemaError, type DatabaseSchemaQuery, type DatabaseSchemaService } from '../application/database-schema-service.js';
 import { ArchitectureQueryError, parseArchitectureQuery, type ArchitectureQueryService } from '../application/architecture-query-service.js';
+import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceQueryService } from '../application/cross-workspace-query-service.js';
 
-export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, workspacePaths: string[], webRoot: string) {
+export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, workspacePaths: string[], webRoot: string) {
   const app = new Hono();
   app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: await adapter.status() }));
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
@@ -43,6 +44,15 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
     try { return c.json(architectureQuery.query(parsed.query)); }
     catch (error) { if (error instanceof ArchitectureQueryError) return c.json({ error: error.message, code: error.code }, error.status); return c.json({ error: 'Architecture query failed.', code: 'ARCHITECTURE_QUERY_FAILED' }, 500); }
+  });
+  app.get('/api/v1/cross-workspace/architecture', (c) => {
+    const parsed = parseCrossWorkspaceArchitectureQuery(new URL(c.req.url).searchParams);
+    if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
+    try { return c.json(crossWorkspaceQuery.query(parsed.query)); }
+    catch (error) {
+      if (error instanceof CrossWorkspaceQueryError) return c.json({ error: error.message, code: error.code }, error.status);
+      return c.json({ error: 'Cross-workspace architecture query failed.', code: 'CROSS_WORKSPACE_QUERY_FAILED' }, 500);
+    }
   });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
   app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });

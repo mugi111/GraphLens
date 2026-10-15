@@ -12,6 +12,7 @@ import { AnalyzerRegistry } from './application/analyzer-registry.js';
 import { AnalyzerRunner } from './application/analyzer-runner.js';
 import { DatabaseSchemaService } from './application/database-schema-service.js';
 import { ArchitectureQueryService } from './application/architecture-query-service.js';
+import { CrossWorkspaceQueryService, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
 import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { pythonSourceAnalyzer } from './infrastructure/analyzers/python-source-analyzer.js';
 import { sqlAlchemyAnalyzer } from './infrastructure/analyzers/sqlalchemy-analyzer.js';
@@ -26,13 +27,31 @@ import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 
 type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
 type PluginCommand = { command: 'plugin-list'; json: boolean } | { command: 'plugin-add'; packageName: string; version: string } | { command: 'plugin-remove'; id: string };
-export type CliCommand = ServerOptions | PluginCommand | { command: 'help'; topic?: 'plugin' };
+type ReadQueryCommand = { command: 'architecture-query'; query: CrossWorkspaceArchitectureQuery };
+export type CliCommand = ServerOptions | PluginCommand | ReadQueryCommand | { command: 'help'; topic?: 'plugin' | 'query' };
 
 /** Parses argv without starting the database, registry, listener, or browser. */
 class CliUsageError extends Error {}
 class PluginNotFoundError extends Error { readonly code = 'PLUGIN_NOT_FOUND'; }
 
 export function parseCommand(argv: string[]): CliCommand {
+  if (argv[0] === 'query') {
+    if (argv[1] === '--help' || argv[1] === '-h' || argv.length === 1) return { command: 'help', topic: 'query' };
+    if (argv[1] !== 'architecture') throw new CliUsageError('Usage: graphlens query architecture --workspaces <id1,id2> [options]');
+    const params = new URLSearchParams();
+    const allowed = new Set(['--workspaces', '--root', '--namespace', '--method', '--path', '--workspace', '--depth', '--limit', '--cursor', '--include']);
+    for (let i = 2; i < argv.length; i++) {
+      const option = argv[i]!;
+      if (option === '--help' || option === '-h') return { command: 'help', topic: 'query' };
+      if (!allowed.has(option)) throw new CliUsageError(`Unknown query option: ${option}`);
+      const value = argv[++i];
+      if (!value || value.startsWith('--')) throw new CliUsageError(`${option} requires a value`);
+      params.append(option.slice(2), value);
+    }
+    const parsed = parseCrossWorkspaceArchitectureQuery(params);
+    if ('error' in parsed) throw new CliUsageError(`${parsed.code}: ${parsed.error}`);
+    return { command: 'architecture-query', query: parsed.query };
+  }
   if (argv[0] === 'plugin') {
     const args = argv.slice(1);
     if (args.length === 0 || args[0] === '--help' || args[0] === '-h') return { command: 'help', topic: 'plugin' };
@@ -73,7 +92,13 @@ export function parseCommand(argv: string[]): CliCommand {
   return out;
 }
 
-function help(topic?: 'plugin') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; if (topic === 'query') return `GraphLens read-only architecture query\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options]\n\nOptions:\n  --root <contract|endpoint>\n  --namespace <exact namespace>\n  --method <uppercase HTTP method>\n  --path <exact route path>\n  --workspace <selected workspace ID>\n  --depth <0-8>\n  --limit <1-100>\n  --cursor <opaque cursor>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+
+function queryArchitecture(query: ReadQueryCommand['query']): void {
+  const store = new GraphStore(resolve(process.cwd(), '.graphlens/graphlens.sqlite'), { readOnly: true });
+  try { console.log(JSON.stringify(new CrossWorkspaceQueryService(store).query(query), null, 2)); }
+  finally { store.close(); }
+}
 
 async function removePlugin(manager: PluginManager, store: GraphStore, id: string): Promise<void> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)) throw new CliUsageError('Plugin id is invalid.');
@@ -128,13 +153,14 @@ async function runServer(options: ServerOptions) {
   const analyzerRunner = new AnalyzerRunner(store, registry);
   const databaseSchema = new DatabaseSchemaService(store);
   const architectureQuery = new ArchitectureQueryService(store);
+  const crossWorkspaceQuery = new CrossWorkspaceQueryService(store);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
   if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');
   const url = `http://127.0.0.1:${options.port}`;
-  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
+  const server = serve({ fetch: createApp(store, adapter, graph, analyzerRunner, databaseSchema, architectureQuery, crossWorkspaceQuery, options.workspaces, webRoot).fetch, hostname: '127.0.0.1', port: options.port });
   console.log(`GraphLens listening on ${url}`);
   if (!options.noOpen) await open(url);
   const shutdown = () => { server.close(() => store.close()); };
@@ -146,6 +172,7 @@ async function main() {
   try { command = parseCommand(process.argv.slice(2)); }
   catch (error) { throw error instanceof CliUsageError ? error : new CliUsageError(error instanceof Error ? error.message : String(error)); }
   if (command.command === 'help') { console.log(help(command.topic)); return; }
+  if (command.command === 'architecture-query') return queryArchitecture(command.query);
   if (command.command === 'plugin-add') console.error('Warning: installed plugin code runs with GraphLens permissions. Only install packages you trust.');
   if (command.command !== 'server') return runPlugin(command);
   return runServer(command);
