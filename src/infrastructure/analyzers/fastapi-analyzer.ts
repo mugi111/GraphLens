@@ -19,7 +19,7 @@ const SECURITY_NAMES = new Set([
   'fastapi.security.OpenIdConnect',
 ]);
 
-type RouterObject = { key: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: PythonExpressionFact[]; node: GraphNode };
+type RouterObject = { key: string; logicalKey: string; sourceNodeId: string; file: FastApiFile; assignment: GraphNode; kind: 'application' | 'router'; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: PythonExpressionFact[]; node: GraphNode };
 type RouteSpec = { key: string; ownerKey: string; file: FastApiFile; handler: GraphNode; path: string; methods: string[]; operation: Record<string, unknown>; source?: AnalysisEvidence; occurrence: number };
 type IncludeSpec = { key: string; ownerKey: string; childKey?: string; childSourceNodeId?: string; file: FastApiFile; scope: string; offset: number; prefix: string; prefixResolved: boolean; tags: string[]; dependencies: PythonExpressionFact[]; source?: AnalysisEvidence };
 type FastApiCallArgument = { kind: 'positional' | 'keyword'; keyword?: string; expression: PythonExpressionFact };
@@ -91,7 +91,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
 
   const objects = collectRouterObjects(context, files, addNode, addDiagnostic);
   const objectByKey = new Map<string, RouterObject[]>();
-  for (const object of objects) objectByKey.set(object.key, [...(objectByKey.get(object.key) ?? []), object]);
+  for (const object of objects) objectByKey.set(object.logicalKey, [...(objectByKey.get(object.logicalKey) ?? []), object]);
   const resolveObject = (file: FastApiFile, name: string, scope: string, offset: number, seen = new Set<string>()): RouterObject | undefined => {
     const symbol = resolveFastApiSymbol(files, file, name, scope, offset);
     const head = name.split('.')[0]!;
@@ -106,7 +106,9 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     if (binding?.shadow) return undefined;
     if (binding?.imported) {
       if (!symbol) return undefined;
-      return [...(objectByKey.get(symbol) ?? [])].sort((a, b) => (b.file.evidenceBySubject.get(b.assignment.id)?.startOffset ?? 0) - (a.file.evidenceBySubject.get(a.assignment.id)?.startOffset ?? 0))[0];
+      const matches = objectByKey.get(symbol) ?? [];
+      if (matches.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_ROUTER', `Router symbol '${symbol}' has multiple source assignments.`, file.evidenceBySubject.get(binding.sourceNodeId ?? ''));
+      return matches.length === 1 ? matches[0] : undefined;
     }
     if (binding?.sourceNodeId) {
       const exact = objects.find((object) => object.file === file && object.sourceNodeId === binding!.sourceNodeId);
@@ -118,7 +120,9 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
       seen.add(key);
       return resolveObject(file, alias, bindingScope, binding.offset - 1, seen);
     }
-    return symbol ? objectByKey.get(symbol)?.[0] : undefined;
+    const matches = symbol ? objectByKey.get(symbol) ?? [] : [];
+    if (matches.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_ROUTER', `Router symbol '${symbol}' has multiple source assignments.`);
+    return matches.length === 1 ? matches[0] : undefined;
   };
 
   const includes = collectIncludes(files, resolveObject, addDiagnostic);
@@ -129,7 +133,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
   for (const include of includes) includesByOwner.set(include.ownerKey, [...(includesByOwner.get(include.ownerKey) ?? []), include]);
 
   const appObjects = objects.filter((object) => object.kind === 'application');
-  const roots = [...appObjects, ...objects.filter((object) => object.kind === 'router')];
+  const roots = appObjects;
   let effectiveRouteCount = 0;
   const expandedRouteKeys = new Set<string>();
   for (const root of roots) {
@@ -137,14 +141,15 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     const rootDeps: PythonExpressionFact[] = [];
     const rootKey = `${root.key}/${root.sourceNodeId}`;
     const walk = (object: RouterObject, mountPrefix: string, inheritedTags: string[], inheritedDeps: PythonExpressionFact[], depth: number, stack: string[], mountKey: string, parentNode: GraphNode) => {
-      if (depth > config.maxRouterDepth) { addDiagnostic('FASTAPI_ROUTER_DEPTH_LIMIT', `Router inclusion exceeded maxRouterDepth (${config.maxRouterDepth}).`, object.file.evidenceBySubject.get(object.assignment.id)); return; }
+      if (depth > config.maxRouterDepth) throw fatalLimit('FASTAPI_ROUTER_DEPTH_LIMIT', `Router inclusion exceeded maxRouterDepth (${config.maxRouterDepth}).`, object.file.evidenceBySubject.get(object.assignment.id));
       if (stack.includes(object.key)) { addDiagnostic('FASTAPI_ROUTER_CYCLE', `Router inclusion cycle at '${object.key}' was not expanded.`, object.file.evidenceBySubject.get(object.assignment.id)); return; }
+      if (object.kind === 'router' && !object.prefixResolved) { addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', `Router '${object.logicalKey}' has an unresolved constructor prefix and was not expanded.`, object.file.evidenceBySubject.get(object.assignment.id)); return; }
       const prefix = `${mountPrefix}${object.kind === 'router' ? object.prefix : ''}`;
       const tags = mergeStrings(inheritedTags, object.tags);
       const dependencies = [...inheritedDeps, ...object.dependencies];
       for (const route of routesByOwner.get(object.key) ?? []) {
-        if (!route.path) continue;
         const fullPath = `${prefix}${route.path}`;
+        if (!fullPath) { addDiagnostic('FASTAPI_EMPTY_EFFECTIVE_PATH', 'An empty route path has no mounted prefix and was not exposed.', route.source); continue; }
         const routeKey = `${route.key}/mount:${mountKey}/path:${fullPath}`;
         if (expandedRouteKeys.has(routeKey)) continue;
         expandedRouteKeys.add(routeKey);
@@ -154,7 +159,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
       const nextStack = [...stack, object.key];
       for (const include of includesByOwner.get(object.key) ?? []) {
         if (!include.childKey) continue;
-        const child = objects.find((candidate) => candidate.key === include.childKey && candidate.sourceNodeId === include.childSourceNodeId) ?? objectByKey.get(include.childKey)?.[0];
+        const child = objects.find((candidate) => candidate.key === include.childKey && candidate.sourceNodeId === include.childSourceNodeId);
         if (!child) continue;
         if (!include.prefixResolved) { addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', 'A router inclusion with a dynamic prefix was not expanded.', include.source); continue; }
         addEdge(object.node, child.node, 'contains', include.key, include.source, { prefix: include.prefix, tags: include.tags });
@@ -190,9 +195,10 @@ function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], ad
     if (!prefixResolved) addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', `Could not statically resolve prefix for router '${target}'.`, source);
     const tags = stringsFromExpression(keywords.get('tags'));
     const dependencies = expressionsFromList(keywords.get('dependencies'));
-    const key = `${file.module}.${target}`;
-  const node = addNode(kind === 'application' ? 'fastapi_application' : 'fastapi_router', target, file.path, `${file.path}/${key}/${assignment.id}`, { module: file.module, name: target, ...(kind === 'router' ? { prefix: prefix ?? null, prefixResolved, tags } : {}) }, source, kind === 'application' ? 'fastapi.application' : 'fastapi.router');
-    objects.push({ key, sourceNodeId: assignment.id, file, assignment, kind, prefix: prefix ?? '', prefixResolved, tags, dependencies, node });
+    const logicalKey = `${file.module}.${target}`;
+    const key = `${file.path}#${assignment.id}`;
+    const node = addNode(kind === 'application' ? 'fastapi_application' : 'fastapi_router', target, file.path, `${key}/${logicalKey}`, { module: file.module, name: target, ...(kind === 'router' ? { prefix: prefix ?? null, prefixResolved, tags } : {}) }, source, kind === 'application' ? 'fastapi.application' : 'fastapi.router');
+    objects.push({ key, logicalKey, sourceNodeId: assignment.id, file, assignment, kind, prefix: prefix ?? '', prefixResolved, tags, dependencies, node });
   }
   return objects;
 }
@@ -552,3 +558,6 @@ function callEvidence(uri: string, line: number, column: number): AnalysisEviden
 function asExpression(value: unknown): PythonExpressionFact | undefined { return typeof value === 'object' && value !== null ? value as PythonExpressionFact : undefined; }
 function isScopeNode(node: GraphNode): boolean { return node.kind === 'python_class' || node.kind === 'python_function' || node.kind === 'python_async_function'; }
 function dedupeDiagnostics(items: AnalysisDiagnostic[]) { return [...new Map(items.map((item) => [`${item.code ?? ''}\u0000${item.uri ?? ''}\u0000${item.line ?? ''}\u0000${item.message}`, item])).values()]; }
+function fatalLimit(code: string, message: string, source?: AnalysisEvidence) {
+  return new AnalysisError('ANALYZER_FAILED', message, [{ code, severity: 'error', message, ...(source?.uri ? { uri: source.uri } : {}), ...(source?.line ? { line: source.line } : {}) }]);
+}
