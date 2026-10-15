@@ -6,7 +6,7 @@ export type ImpactNode = {
 export type ImpactEdge = {
   id: string; scope: 'workspace' | 'cross-workspace'; sourceId: string; targetId: string;
   sourceWorkspaceId?: string; targetWorkspaceId?: string; kind: string; level: 'DIRECT' | 'DERIVED' | 'INFERRED';
-  properties: Record<string, unknown>; evidence: Array<{ id: string; subjectId: string; type: string; level: string; sources: unknown[] }>;
+  properties: Record<string, unknown>; evidence: Array<{ id: string; subjectId: string; type: string; level: string; sources: Array<{ workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: string[] }> }>;
 };
 export type ImpactPath = { nodeId: string; nodeIds: string[]; edgeIds: string[]; workspaceIds: string[]; level: 'DIRECT' | 'DERIVED' | 'INFERRED' };
 export type GenerationRef = { workspaceId: string; analyzerId: string; generationId: number; runId: string; sourceRevision?: string; completedAt: string };
