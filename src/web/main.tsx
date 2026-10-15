@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import cytoscape, { type Core } from 'cytoscape';
 import { ArchitectureView } from './architecture-view.js';
+import { ImpactView } from './impact-view.js';
 import './style.css';
 
 type Node = { id:string; label:string; kind:string; properties:Record<string,unknown>; evidence?: unknown[] };
@@ -30,11 +31,11 @@ function App() {
   const [status, setStatus] = useState<any>();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [view, setView] = useState(() => new URLSearchParams(location.search).get('view') === 'architecture' ? 'architecture' : 'overview');
+  const [view, setView] = useState(() => ['architecture', 'impact'].includes(new URLSearchParams(location.search).get('view') ?? '') ? new URLSearchParams(location.search).get('view')! : 'overview');
   useEffect(() => { void Promise.all([fetch('/api/v1/status').then(r=>r.json()), fetch('/api/v1/workspaces').then(r=>r.json())]).then(([s,w]) => { setStatus(s); setWorkspaces(w.workspaces ?? []); }); }, []);
-  useEffect(() => { const onPop = () => setView(new URLSearchParams(location.search).get('view') === 'architecture' ? 'architecture' : 'overview'); addEventListener('popstate', onPop); return () => removeEventListener('popstate', onPop); }, []);
+  useEffect(() => { const onPop = () => { const next = new URLSearchParams(location.search).get('view'); setView(next === 'architecture' || next === 'impact' ? next : 'overview'); }; addEventListener('popstate', onPop); return () => removeEventListener('popstate', onPop); }, []);
   const selectView = (next: string) => { const params = new URLSearchParams(location.search); params.set('view', next); window.history.pushState({}, '', `${location.pathname}?${params}`); setView(next); };
   const syncDemo = async () => { const response = await fetch('/api/v1/sync',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({demo:true,workspaces:['.']})}); if (!response.ok) alert((await response.json()).message); setRefreshKey(key => key + 1); };
-  return <main><header><div><span className="mark">◈</span><strong>GraphLens</strong><small>Local architecture explorer</small></div><div className="header-actions"><nav aria-label="Main view"><button className={view === 'overview' ? 'nav-active' : ''} aria-current={view === 'overview' ? 'page' : undefined} onClick={() => selectView('overview')}>Overview</button><button className={view === 'architecture' ? 'nav-active' : ''} aria-current={view === 'architecture' ? 'page' : undefined} onClick={() => selectView('architecture')}>Architecture</button></nav>{view === 'overview' && <button onClick={syncDemo}>Load demo graph</button>}</div></header><section className="status"><span>{status?.codegraph?.connected ? 'CodeGraph connected' : 'CodeGraph not connected'}</span><span>{status?.codegraph?.detail ?? 'Checking CodeGraph capability…'}</span></section>{view === 'overview' ? <OverviewView status={status} refreshKey={refreshKey}/> : <ArchitectureView workspaces={workspaces}/>}</main>;
+  return <main><header><div><span className="mark">◈</span><strong>GraphLens</strong><small>Local architecture explorer</small></div><div className="header-actions"><nav aria-label="Main view"><button className={view === 'overview' ? 'nav-active' : ''} aria-current={view === 'overview' ? 'page' : undefined} onClick={() => selectView('overview')}>Overview</button><button className={view === 'architecture' ? 'nav-active' : ''} aria-current={view === 'architecture' ? 'page' : undefined} onClick={() => selectView('architecture')}>Architecture</button><button className={view === 'impact' ? 'nav-active' : ''} aria-current={view === 'impact' ? 'page' : undefined} onClick={() => selectView('impact')}>Impact</button></nav>{view === 'overview' && <button onClick={syncDemo}>Load demo graph</button>}</div></header><section className="status"><span>{status?.codegraph?.connected ? 'CodeGraph connected' : 'CodeGraph not connected'}</span><span>{status?.codegraph?.detail ?? 'Checking CodeGraph capability…'}</span></section>{view === 'overview' ? <OverviewView status={status} refreshKey={refreshKey}/> : view === 'architecture' ? <ArchitectureView workspaces={workspaces}/> : <ImpactView workspaces={workspaces}/>}</main>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);
