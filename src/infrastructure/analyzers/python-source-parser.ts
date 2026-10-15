@@ -250,7 +250,8 @@ function expressionFact(node: any, source: string, errorRegions: Range[] = []): 
   if (node.name === 'CallExpression') {
     const callee = children(node).find(isExpressionNode);
     const args = directChild(node, 'ArgList');
-    return { kind: 'call', name: callee ? expressionName(expressionFact(callee, source, errorRegions)) ?? '' : '', ...(args ? { arguments: callArguments(args, source, errorRegions).map((arg) => ({ kind: arg.kind, ...(arg.keyword ? { keyword: arg.keyword } : {}), literalKind: arg.expression.literalKind ?? arg.expression.kind, ...(Object.hasOwn(arg.expression, 'value') ? { value: arg.expression.value } : {}), expression: arg.expression })) } : {}) };
+    const calleeFact = callee ? expressionFact(callee, source, errorRegions) : undefined;
+    return { kind: 'call', name: calleeFact ? expressionName(calleeFact) ?? '' : '', ...(calleeFact ? { callee: calleeFact } : {}), ...(args ? { arguments: callArguments(args, source, errorRegions).map((arg) => ({ kind: arg.kind, ...(arg.keyword ? { keyword: arg.keyword } : {}), literalKind: arg.expression.literalKind ?? arg.expression.kind, ...(Object.hasOwn(arg.expression, 'value') ? { value: arg.expression.value } : {}), expression: arg.expression })) } : {}) };
   }
   const literalKind = ({ String: 'string', Number: 'number', Boolean: 'boolean', None: 'none', True: 'boolean', False: 'boolean' } as Record<string, string>)[node.name];
   const parts = children(node).filter(isExpressionNode);
