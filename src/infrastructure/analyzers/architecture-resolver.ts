@@ -1,4 +1,4 @@
-import type { AnalysisDiagnostic, AnalysisEvidence, ArchitectureInputGeneration, AnalysisInputGeneration } from '../../domain/analyzer.js';
+import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type ArchitectureInputGeneration, type AnalysisInputGeneration } from '../../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 
@@ -227,7 +227,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     }
     const bodies = (generation: ArchitectureInputGeneration, endpoint: GraphNode) => relations(generation, endpoint, 'accepts').map(({ targetId }) => nodeById(generation, targetId)).filter((node): node is GraphNode => node?.kind === 'api_request_body');
     const fastBodies = bodies(sources.fastApi, fast); const specBodies = bodies(sources.openApi, specOwner);
-    if (fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
+    const openApiOperationEvidence = evidenceFor(sources.openApi, specOwner.id);
+    const unresolvedRequestBody = !specBodies.length && sources.openApi.diagnostics.some((item) => {
+      const code = item.code ?? '';
+      const isRelevant = /OPENAPI_(EXTERNAL_REF_UNRESOLVED|LOCAL_REF_UNRESOLVED|REF_CYCLE|REF_DEPTH_LIMIT|DYNAMIC_REF_UNRESOLVED|INVALID_REF|INVALID_DOCUMENT|INVALID_ENCODING)/.test(code);
+      return isRelevant && (!item.uri || !openApiOperationEvidence?.uri || item.uri === openApiOperationEvidence.uri);
+    });
+    if (!unresolvedRequestBody && fastBodies.length && !specBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: true, contractHasRequestBody: false });
     if (specBodies.length && !fastBodies.length) addMismatch('request_body_presence', { implementationHasRequestBody: false, contractHasRequestBody: true });
     if (fastBodies.length === 1 && specBodies.length === 1 && typeof fastBodies[0]!.properties.required === 'boolean' && typeof specBodies[0]!.properties.required === 'boolean' && fastBodies[0]!.properties.required !== specBodies[0]!.properties.required) addMismatch('request_body_required', { implementationRequired: fastBodies[0]!.properties.required, contractRequired: specBodies[0]!.properties.required });
     if (fastBodies.length === 1 && specBodies.length === 1) {
@@ -241,14 +247,14 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const fastStatus = responseStatuses(sources.fastApi, fast);
     const fastRouteId = sources.fastApi.edges.find((edge) => edge.targetId === fast.id && edge.kind === 'exposes')?.sourceId;
     const fastRoute = fastRouteId ? nodeById(sources.fastApi, fastRouteId) : undefined;
-    if (!fastStatus.length && typeof fastRoute?.properties.statusCode === 'number') fastStatus.push(String(fastRoute.properties.statusCode));
-    else if (!fastStatus.length && typeof fastRoute?.properties.statusCode === 'string' && /^\d{3}$/.test(fastRoute.properties.statusCode)) fastStatus.push(fastRoute.properties.statusCode);
+    const routeStatus = typeof fastRoute?.properties.statusCode === 'number' ? String(fastRoute.properties.statusCode) : typeof fastRoute?.properties.statusCode === 'string' && /^\d{3}$/.test(fastRoute.properties.statusCode) ? fastRoute.properties.statusCode : undefined;
+    if (routeStatus) fastStatus.push(routeStatus);
     const specStatus = responseStatuses(sources.openApi, specOwner);
     const covered = (status: string) => specStatus.includes(status) || specStatus.includes('default') || specStatus.some((item) => /^([1-5])XX$/i.test(item) && item[0] === status[0]);
     if (specStatus.length && fastStatus.some((status) => /^\d{3}$/.test(status) && !covered(status))) addMismatch('response_status', { implementationStatuses: [...new Set(fastStatus)].sort(), contractStatuses: [...new Set(specStatus)].sort() });
     const specMode = stringProperty(specOwner, 'securityMode');
-    type SchemeFact = { tuple: string; scopes: string[] };
-    type SecurityGroup = { id: string; facts: SchemeFact[]; required: boolean; complete: boolean };
+    type SchemeFact = { tuple?: string; scopes?: string[]; required?: boolean };
+    type SecurityGroup = { id: string; facts: SchemeFact[]; complete: boolean };
     const securityGroups = (generation: ArchitectureInputGeneration, endpoint: GraphNode, isOpenApi: boolean): SecurityGroup[] => {
       const groups = new Map<string, SecurityGroup>();
       for (const edge of relations(generation, endpoint, 'secured_by')) {
@@ -257,8 +263,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         const groupId = isOpenApi ? String(requirement.properties.alternative) : String(requirement.properties.requirementGroup ?? '');
         if (!groupId) continue;
         let group = groups.get(groupId);
-        if (!group) { group = { id: groupId, facts: [], required: true, complete: true }; groups.set(groupId, group); }
-        if (!isOpenApi && (requirement.properties.mode === 'optional' || requirement.properties.required === false || edge.properties.required === false)) group.required = false;
+        if (!group) { group = { id: groupId, facts: [], complete: true }; groups.set(groupId, group); }
         const schemeEdges = generation.edges.filter((item) => item.sourceId === requirement.id && item.kind === 'uses_scheme').sort((a, b) => a.id.localeCompare(b.id));
         if (!schemeEdges.length) { group.complete = false; continue; }
         for (const schemeEdge of schemeEdges) {
@@ -266,21 +271,32 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
           const tuple = scheme ? normalizeScheme(scheme) : undefined;
           const rawScopes = schemeEdge.properties.scopes ?? requirement.properties.scopes;
           const scopes = Array.isArray(rawScopes) ? rawScopes.filter((value): value is string => typeof value === 'string').sort() : undefined;
-          if (!tuple || !scopes) { group.complete = false; continue; }
-          group.facts.push({ tuple, scopes });
+          const required = isOpenApi ? true : typeof schemeEdge.properties.required === 'boolean' ? schemeEdge.properties.required : typeof requirement.properties.required === 'boolean' ? requirement.properties.required : requirement.properties.mode === 'joint' ? true : requirement.properties.mode === 'optional' ? false : undefined;
+          if (!tuple || !scopes) group.complete = false;
+          if (required === undefined) group.complete = false;
+          group.facts.push({ ...(tuple ? { tuple } : {}), ...(scopes ? { scopes } : {}), ...(required !== undefined ? { required } : {}) });
         }
       }
       return [...groups.values()].map((group) => ({ ...group, facts: group.facts.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) }));
     };
     const fastSecurity = securityGroups(sources.fastApi, fast, false);
     const specSecurity = securityGroups(sources.openApi, specOwner, true);
-    const fastRequired = fastSecurity.some((group) => group.required && group.complete && group.facts.length > 0);
+    const fastRequired = fastSecurity.some((group) => group.facts.some((fact) => fact.required === true));
     if ((specMode === 'disabled' || specMode === 'none') && fastRequired) addMismatch('security_requiredness', { implementationRequired: true, contractSecurityMode: specMode });
     if (specMode === 'declared' || specMode === 'document') {
       const fastGroup = fastSecurity.length === 1 ? fastSecurity[0] : undefined;
       const specGroup = specSecurity.length === 1 ? specSecurity[0] : undefined;
-      if (fastGroup?.complete && fastGroup.facts.length && specGroup?.complete && specGroup.facts.length && fastGroup.required !== true) addMismatch('security_requiredness', { implementationRequired: false, contractRequired: true });
-      else if (fastGroup?.complete && fastGroup.required && specGroup?.complete && fastGroup.facts.length && specGroup.facts.length && JSON.stringify(fastGroup.facts) !== JSON.stringify(specGroup.facts)) addMismatch('security_requirement_group', { implementationSchemes: fastGroup.facts, contractSchemes: specGroup.facts });
+      if (fastGroup?.complete && specGroup?.complete) {
+        for (const fact of fastGroup.facts) {
+          const counterpart = specGroup.facts.find((candidate) => candidate.tuple === fact.tuple && JSON.stringify(candidate.scopes) === JSON.stringify(fact.scopes));
+          if (fact.required === true && !counterpart) addMismatch('security_requirement_group', { implementationScheme: fact, contractSchemes: specGroup.facts });
+          if (fact.required === false && counterpart?.required === true) addMismatch('security_requiredness', { implementationScheme: fact, contractScheme: counterpart });
+        }
+        for (const fact of specGroup.facts) {
+          const counterpart = fastGroup.facts.find((candidate) => candidate.tuple === fact.tuple && JSON.stringify(candidate.scopes) === JSON.stringify(fact.scopes));
+          if (counterpart?.required === false && fact.required === true) addMismatch('security_requiredness', { implementationScheme: counterpart, contractScheme: fact });
+        }
+      }
     }
   }
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
@@ -298,7 +314,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         api_endpoint: ['namespace', 'method', 'path', 'pathShape', 'operationId', 'securityMode'], fastapi_route: ['namespace', 'path', 'pathShape', 'methods', 'operationId'],
         openapi_operation: ['documentPath', 'method', 'path', 'operationId', 'securityMode'], python_function: ['module', 'qualifiedName', 'async'], python_class: ['module', 'qualifiedName'],
         api_parameter: ['name', 'alias', 'in', 'required', 'contentTypes'], api_request_body: ['required', 'contentTypes', 'model'], api_response: ['status', 'statusCode', 'model'],
-        api_security_requirement: ['alternative', 'scopes'], api_security_scheme: ['scheme', 'type', 'name', 'in'], api_schema_reference: ['ref', 'referenceKind'], api_schema: ['name'],
+        api_security_requirement: ['alternative', 'scopes', 'requirementGroup', 'mode', 'required'], api_security_scheme: ['constructor', 'scheme', 'type', 'name', 'in'], api_schema_reference: ['ref', 'referenceKind'], api_schema: ['name'],
         sqlalchemy_model: ['tableName', 'schema', 'databaseNamespace'], sqlalchemy_table: ['name', 'schema', 'databaseNamespace'],
       };
       for (const key of fields[node.kind] ?? []) if (node.properties[key] !== undefined && (typeof node.properties[key] !== 'object' || node.properties[key] === null)) safe[key] = node.properties[key];
@@ -307,7 +323,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (source && evidence.length < 10000) {
         const derivedId = evidenceId(node.id, `${generation.analyzerId}:${source.id}`);
         if (!evidenceIds.has(derivedId)) { evidenceIds.add(derivedId); evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { analyzerId: generation.analyzerId, sourceEvidenceId: source.id, sourceLevel: source.level }, inputGenerations: [`${generation.analyzerId}:${generation.generationId}`] }); }
-      }
+      } else if (source) markOutputLimit();
     };
     const addEdge = (edge: GraphEdge) => {
       if (!allowedEdges.has(edge.kind) || projectedEdgeIds.has(edge.id)) return;
@@ -322,7 +338,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (source && evidence.length < 10000) {
         const derivedId = evidenceId(edge.id, `${generation.analyzerId}:${source.id}`);
         if (!evidenceIds.has(derivedId)) { evidenceIds.add(derivedId); evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { analyzerId: generation.analyzerId, sourceEvidenceId: source.id, sourceLevel: source.level }, inputGenerations: [`${generation.analyzerId}:${generation.generationId}`] }); }
-      }
+      } else if (source) markOutputLimit();
     };
     addNode(endpoint);
     const outgoing = (id: string) => generation.edges.filter((edge) => edge.sourceId === id && allowedEdges.has(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
@@ -377,14 +393,15 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (tables.length === 1) {
         projectClosure(sources.sqlAlchemy, byId.get(classId) ?? endpoint);
         const id = ids.edge(sources.workspaceId, classId, model.id, 'accesses_model');
-        if (!edges.some((edge) => edge.id === id) && nodes.length + edges.length < 9000) {
+        if (!edges.some((edge) => edge.id === id) && nodes.length + edges.length < 9000 && evidence.length < 10000) {
           edges.push({ id, workspaceId: sources.workspaceId, sourceId: classId, targetId: model.id, kind: 'accesses_model', properties: { correlation: 'maps_to' } });
           const sourceEvidence = evidenceFor(generation, classId);
           if (evidence.length < 10000) evidence.push({ id: evidenceId(id, 'architecture.accesses_model'), subjectKind: 'edge', subjectId: id, level: 'DERIVED', type: 'architecture.accesses_model', provenance: { sources: [sourceProvenance(generation, sourceEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
-        }
+        } else if (!edges.some((edge) => edge.id === id)) markOutputLimit();
       }
     }
   }
+  if (outputLimitReached) throw new AnalysisError('ANALYZER_FAILED', 'Architecture result exceeded a hard projection limit; the partial result was discarded.', [{ code: 'ARCHITECTURE_OUTPUT_LIMIT', severity: 'error', message: 'Architecture result exceeded a hard projection limit; the partial result was discarded.' }]);
   return { nodes: nodes.sort((a, b) => a.id.localeCompare(b.id)), edges: edges.sort((a, b) => a.id.localeCompare(b.id)), evidence: evidence.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? '')), diagnostics: diagnostics.slice(0, 10000), inputGenerations };
 }
 
