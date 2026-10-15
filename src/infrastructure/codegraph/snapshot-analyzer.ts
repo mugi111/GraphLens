@@ -158,6 +158,7 @@ function validateSnapshotHealth(counts: DbCounts): void {
 
 function validateOutputBudget(counts: DbCounts): void {
   const totalItems = counts.nodes + counts.edges + counts.fileOnly;
+  if (counts.files > MAX_ITEMS) throw new Error(`CodeGraph snapshot has more than ${MAX_ITEMS} source-file records.`);
   if (counts.nodes > MAX_ITEMS || counts.edges > MAX_ITEMS || totalItems > MAX_ITEMS) throw new Error(`CodeGraph snapshot exceeds the ${MAX_ITEMS}-item analyzer limit.`);
   const estimatedDerivedBytes = counts.bytes * 2 + totalItems * 256;
   if (estimatedDerivedBytes > MAX_TOTAL_BYTES) throw new Error(`Estimated CodeGraph snapshot output exceeds the ${MAX_TOTAL_BYTES}-byte aggregate budget.`);
