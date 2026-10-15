@@ -54,7 +54,19 @@ Plugins are exact-version npm packages stored under `.graphlens/plugins/<plugin-
 
 **Security boundary:** package authors' analyzer code runs in-process with GraphLens permissions. This is not a sandbox. `--ignore-scripts` prevents npm lifecycle scripts, but it does not make imported plugin code safe; only install packages from sources you trust. GraphLens loads only packages already marked enabled in the selected database and never installs or updates packages automatically. Disabling/removing a plugin first clears its active graph contributions so they cannot remain visible after package removal.
 
-The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
+The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation.
+
+### CodeGraph import investigation
+
+`colbymchenry/codegraph` is the leading candidate for a future read-only import because its source exposes a Graph Store API. MCP `explore`/`files` evidence is insufficient to enumerate a complete graph, so those tools alone cannot support an import. The source inspected was commit `8f1f842b5b828175992d2ce2cdf673b955b2cce9`; its `package.json` reports `@colbymchenry/codegraph` version `1.6.2`, MIT license, and Node.js `>=20 <25`. These are source-repository facts, not independently verified published npm provenance.
+
+This remains investigation only; GraphLens does not import CodeGraph yet. Before implementation, establish:
+
+- The canonical workspace/database identity and a way to enumerate every node, file, and edge kind. `getAllNodes()` and `getAllFiles()` return unbounded arrays, and no edge-pagination API is confirmed. Do not call them until a safe pre-read count/byte gate or bounded query is confirmed; do not assume retrieval can be paginated.
+- Stable identity and stability guarantees for imported facts; read-only transaction semantics; and whether GraphLens launch writes to CodeGraph or triggers upstream indexing.
+- Writer completion and atomicity, including how to know an index is complete before reading it.
+- Exact compatibility with GraphLens's Node.js `>=20.11` requirement. The inspected SQLite adapter declares `>=22.5`, which does not establish compatibility across GraphLens's supported range.
+- A bounded, all-or-fail import that preserves the active GraphLens generation on failure, carries inferred provenance, and namespaces unknown edge kinds without dropping them.
 
 ### Python source index
 
@@ -128,7 +140,7 @@ graphlens --workspace /repo \
 
 The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens currently lists available tools for diagnostics only. It does not call a search/traversal tool and does not include a custom, undocumented `--graphlens-snapshot` protocol.
 
-The status API and UI explicitly report complete enumeration as unsupported, even after a successful MCP connection. No partial data is claimed as complete. This is the current acceptance-criterion blocker for direct CodeGraph graph import until CodeGraph provides a documented snapshot/export API.
+The status API and UI explicitly report complete enumeration as unsupported by the MCP adapter, even after a successful connection. No partial data is claimed as complete. The current investigation gate is the read-only Graph Store API described above; if that path proves unsuitable, assess a documented upstream export next, with direct storage access as the last option.
 
 For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
 
