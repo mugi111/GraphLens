@@ -21,7 +21,7 @@ export type CrossWorkspaceArchitectureQuery = {
 };
 
 type Cursor = { v: 1; workspaces: string[]; filters: string; snapshotId: string; offset: number };
-const edgeAllowlist = new Set<ArchitectureEdgeKind>(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model']);
+const edgeAllowlist = new Set<ArchitectureEdgeKind>(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model', 'http_request']);
 const methods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH']);
 
 export class CrossWorkspaceQueryError extends Error {
@@ -158,7 +158,10 @@ function toCrossEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: strin
 }
 function selectRoots(nodes: SystemNode[], edges: SystemEdge[], query: CrossWorkspaceArchitectureQuery, workspaceIds: string[], workspaceNames: Map<string, string>) {
   const globalWorkspaceOwners = new Map<string, Set<string>>();
-  for (const edge of edges) if (edge.scope === 'cross-workspace') globalWorkspaceOwners.set(edge.targetId, new Set([...(globalWorkspaceOwners.get(edge.targetId) ?? []), edge.sourceWorkspaceId ?? '']));
+  for (const edge of edges) if (edge.scope === 'cross-workspace') {
+    if (edge.sourceId.startsWith('api-contract://')) globalWorkspaceOwners.set(edge.sourceId, new Set([...(globalWorkspaceOwners.get(edge.sourceId) ?? []), edge.targetWorkspaceId ?? edge.sourceWorkspaceId ?? '']));
+    else if (edge.targetId.startsWith('api-contract://')) globalWorkspaceOwners.set(edge.targetId, new Set([...(globalWorkspaceOwners.get(edge.targetId) ?? []), edge.sourceWorkspaceId ?? edge.targetWorkspaceId ?? '']));
+  }
   return nodes.filter((node) => {
     if (query.root === 'contract' ? node.scope !== 'global' || node.kind !== 'api_contract' : node.scope !== 'workspace' || node.kind !== 'api_endpoint') return false;
     const properties = node.properties;

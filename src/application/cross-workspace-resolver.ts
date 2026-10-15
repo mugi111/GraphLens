@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
-import type { ApiContractKey, CrossWorkspaceEvidence, CrossWorkspaceResolution, CrossWorkspaceSnapshot, SystemEdge, SystemNode, WorkspaceArchitectureSnapshot } from '../domain/federation.js';
+import type { ApiContractKey, ArchitectureEdgeKind, CrossWorkspaceEvidence, CrossWorkspaceResolution, CrossWorkspaceSnapshot, SystemEdge, SystemNode, WorkspaceArchitectureSnapshot } from '../domain/federation.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 
 export type CrossWorkspaceResolverOptions = {
@@ -24,7 +24,7 @@ type Participant = {
   owner: GraphNode;
   endpoint: GraphNode;
   exposure: GraphEdge;
-  role: 'provider' | 'specification';
+  role: 'provider' | 'specification' | 'consumer';
   key: ApiContractKey;
 };
 
@@ -51,10 +51,19 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
       const endpoint = nodesById.get(edge.targetId);
       if (!endpoint || endpoint.kind !== 'api_endpoint') continue;
       const role = owner.kind === 'fastapi_route' ? 'provider' : owner.kind === 'openapi_operation' ? 'specification' : undefined;
-      if (!role) continue;
+      if (role) {
+        const key = contractKey(endpoint);
+        if (key) participants.push({ workspace, owner, endpoint, exposure: edge, role, key });
+      }
+    }
+    // Frontend HTTP requests are consumers. OpenAPI operations remain specifications.
+    for (const edge of workspace.edges) {
+      if (edge.kind !== 'http_request') continue;
+      const owner = nodesById.get(edge.sourceId);
+      const endpoint = nodesById.get(edge.targetId);
+      if (owner?.kind !== 'frontend.http_request' || endpoint?.kind !== 'api_endpoint') continue;
       const key = contractKey(endpoint);
-      if (!key) continue;
-      participants.push({ workspace, owner, endpoint, exposure: edge, role, key });
+      if (key) participants.push({ workspace, owner, endpoint, exposure: edge, role: 'consumer', key });
     }
   }
 
@@ -66,6 +75,14 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
   const nodes = new Map<string, SystemNode>();
   const edges: SystemEdge[] = [];
   const diagnostics: AnalysisDiagnostic[] = [];
+  let syntheticEvidenceCost = 0;
+  const addSystemEdge = (edge: SystemEdge) => {
+    if (edges.length >= options.maxSyntheticEdges) throw exceeded('synthetic edge', options.maxSyntheticEdges);
+    const evidenceCost = edge.evidence.reduce((total, item) => total + 1 + item.sources.reduce((sum, source) => sum + source.evidenceIds.length, 0), 0);
+    if (syntheticEvidenceCost + evidenceCost > options.maxSyntheticEdges) throw exceeded('synthetic evidence source', options.maxSyntheticEdges);
+    syntheticEvidenceCost += evidenceCost;
+    edges.push(edge);
+  };
   const evidenceBySubject = new Map<string, AnalysisEvidence[]>();
   for (const workspace of snapshot.generations) for (const evidence of workspace.evidence) {
     const key = `${workspace.workspace.id}\0${evidence.subjectKind}\0${evidence.subjectId}`;
@@ -106,18 +123,19 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     const evidenceSources = [
       evidenceSource(item.workspace, item.owner.id, workspaceEvidence(item.workspace, 'node', item.owner.id)),
       evidenceSource(item.workspace, item.endpoint.id, workspaceEvidence(item.workspace, 'node', item.endpoint.id)),
+      evidenceSource(item.workspace, item.owner.id, workspaceEvidence(item.workspace, 'edge', item.exposure.id)),
     ];
-    edges.push({
+    addSystemEdge({
       id,
       scope: 'workspace',
       sourceId: item.owner.id,
       targetId: item.endpoint.id,
       sourceWorkspaceId: item.workspace.workspace.id,
       targetWorkspaceId: item.workspace.workspace.id,
-      kind: 'exposes',
+      kind: item.exposure.kind as ArchitectureEdgeKind,
       level: graphLevel(undefined, workspaceEvidence(item.workspace, 'edge', item.exposure.id)),
       properties: item.exposure.properties,
-      evidence: [makeEvidence(item.workspace, 'edge', id, 'cross_workspace.exposes', evidenceSources)],
+      evidence: [makeEvidence(item.workspace, 'edge', id, `cross_workspace.${item.exposure.kind}`, evidenceSources)],
     });
   }
 
@@ -131,26 +149,34 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     const providerIdentities = new Set(providerItems.map((item) => `${item.workspace.workspace.id}\0${item.owner.id}\0${item.endpoint.id}`));
     if (providerIdentities.size > 1) diagnostics.push({ code: 'CROSS_WORKSPACE_MULTIPLE_PROVIDERS', severity: 'warning', message: `The shared API contract ${key.method} ${key.path} has multiple FastAPI providers; all providers are retained without selecting one.`, detail: { namespace: key.namespace, method: key.method, path: key.path, providerCount: providerIdentities.size } });
 
+    const byRoleEndpoint = new Map<string, Participant[]>();
     for (const item of items) {
-      const ownerNode = workspaceNode(item.workspace, item.owner);
+      const groupKey = item.role === 'specification'
+        ? `${item.role}\0${item.workspace.workspace.id}\0${item.owner.id}`
+        : `${item.role}\0${item.workspace.workspace.id}\0${item.endpoint.id}`;
+      byRoleEndpoint.set(groupKey, [...(byRoleEndpoint.get(groupKey) ?? []), item]);
+    }
+    const contractSources = participantSources(items, options.maxSyntheticEdges);
+    for (const groupedItems of [...byRoleEndpoint.values()].sort((a, b) => cmp([a[0]!.role, a[0]!.workspace.workspace.id, a[0]!.endpoint.id, a[0]!.owner.id], [b[0]!.role, b[0]!.workspace.workspace.id, b[0]!.endpoint.id, b[0]!.owner.id]))) {
+      const item = groupedItems[0]!;
+      const workspaceId = item.workspace.workspace.id;
       const endpointNode = workspaceNode(item.workspace, item.endpoint);
-      const kind = item.role === 'provider' ? 'provides_contract' : 'defines_contract';
-      const sourceId = ownerNode.id;
-      const id = contractEdgeId(item.workspace.workspace.id, sourceId, globalId, kind);
-      const sourceEvidence = [
-        evidenceSource(item.workspace, item.owner.id, workspaceEvidence(item.workspace, 'node', item.owner.id)),
-        evidenceSource(item.workspace, item.endpoint.id, workspaceEvidence(item.workspace, 'node', item.endpoint.id)),
-        evidenceSource(item.workspace, item.owner.id, workspaceEvidence(item.workspace, 'edge', item.exposure.id)),
-      ];
-      edges.push({
+      const ownerNodes = groupedItems.map(({ workspace, owner }) => workspaceNode(workspace, owner));
+      const kind = item.role === 'provider' ? 'provides_contract' : item.role === 'consumer' ? 'consumes_contract' : 'defines_contract';
+      // Consumers attach at endpoint identity once per workspace; providers point from hub to implementation.
+      const sourceId = item.role === 'provider' ? globalId : item.role === 'consumer' ? endpointNode.id : ownerNodes[0]!.id;
+      const targetId = item.role === 'provider' ? endpointNode.id : globalId;
+      const id = contractEdgeId(workspaceId, sourceId, targetId, kind);
+      const sourceEvidence = contractSources;
+      addSystemEdge({
         id,
         scope: 'cross-workspace',
         sourceId,
-        targetId: globalId,
-        sourceWorkspaceId: item.workspace.workspace.id,
+        targetId,
+        ...(item.role === 'provider' ? { targetWorkspaceId: workspaceId } : { sourceWorkspaceId: workspaceId }),
         kind,
         level: 'DERIVED',
-        properties: { contract: key, endpointId: endpointNode.id, ownerId: ownerNode.id },
+        properties: { contract: key, endpointId: endpointNode.id, ownerIds: ownerNodes.map(({ id: ownerId }) => ownerId).sort(), ...(item.role === 'consumer' ? { requestCount: ownerNodes.length } : {}) },
         evidence: [makeEvidence(item.workspace, 'edge', id, `cross_workspace.${kind}`, sourceEvidence)],
       });
     }
@@ -158,7 +184,6 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     if (globalId !== keyText) throw invalid('Contract identity is not canonical.');
   }
 
-  if (edges.length > options.maxSyntheticEdges) throw exceeded('synthetic edge', options.maxSyntheticEdges);
   return {
     snapshotId: snapshot.snapshotId,
     requestedWorkspaceIds: [...snapshot.requestedWorkspaceIds].sort(),
@@ -178,6 +203,28 @@ function resolverOptions(input: Partial<CrossWorkspaceResolverOptions>): CrossWo
     output[key] = value;
   }
   return output;
+}
+
+function participantSources(items: readonly Participant[], maxEvidenceSourceCost: number): CrossWorkspaceEvidence['sources'] {
+  const grouped = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: Set<string> }>();
+  let sourceCost = 0;
+  for (const item of items) {
+    const sources = [
+      [item.owner.id, 'node', item.owner.id],
+      [item.endpoint.id, 'node', item.endpoint.id],
+      [item.exposure.sourceId, 'edge', item.exposure.id],
+    ] as const;
+    for (const [nodeId, subjectKind, subjectId] of sources) {
+      const evidenceIds = item.workspace.evidence.filter((evidence) => evidence.subjectKind === subjectKind && evidence.subjectId === subjectId).map(({ id }) => id).sort();
+      const key = `${item.workspace.workspace.id}\0${item.workspace.generation.analyzerId}\0${item.workspace.generation.generationId}\0${nodeId}`;
+      const current = grouped.get(key) ?? { workspaceId: item.workspace.workspace.id, analyzerId: item.workspace.generation.analyzerId, generationId: item.workspace.generation.generationId, nodeId, evidenceIds: new Set<string>() };
+      if (!grouped.has(key)) sourceCost++;
+      for (const evidenceId of evidenceIds) if (!current.evidenceIds.has(evidenceId)) { current.evidenceIds.add(evidenceId); sourceCost++; }
+      if (sourceCost > maxEvidenceSourceCost) throw exceeded('synthetic evidence source', maxEvidenceSourceCost);
+      grouped.set(key, current);
+    }
+  }
+  return [...grouped.values()].map((source) => ({ ...source, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId, a.nodeId], [b.workspaceId, b.analyzerId, b.generationId, b.nodeId]));
 }
 
 function validateSnapshot(snapshot: CrossWorkspaceSnapshot): void {
