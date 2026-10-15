@@ -87,7 +87,7 @@ export class DatabaseSchemaService {
 function isCursor(value: unknown): value is CursorPayload {
   if (!isRecord(value)) return false;
   const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'v', 'workspace'];
-  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && value.analyzerId === 'builtin.sqlalchemy' && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
+  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
 }
 function filterKey(query: DatabaseSchemaQuery) {
   return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
