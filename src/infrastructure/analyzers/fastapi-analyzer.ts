@@ -415,12 +415,15 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
   const node = addNode('api_security_scheme', schemeName, declarationFile.path, `security/${declarationFile.path}/${assignment?.id ?? canonical}`, publicProperties, assignmentEvidence, 'api.security_scheme');
   const scopes = strictStringsFromExpression(scopeExpression);
   if (scopeExpression && !scopes) { addDiagnostic('FASTAPI_DYNAMIC_SECURITY_SCOPES', `Security requirement for '${schemeName}' has dynamic scopes.`, source); return undefined; }
-  // FastAPI evaluates every declared dependency for an endpoint. Treat schemes
-  // collected from those dependencies as jointly required; there is no static
-  // OR construct in the supported source patterns, so don't imply alternatives.
+  const autoError = args.has('auto_error') ? staticValue(args.get('auto_error'), declarationFile, String(assignment?.properties.scope ?? ''), assignmentEvidence?.startOffset ?? 0) : true;
+  if (autoError !== true && autoError !== false) addDiagnostic('FASTAPI_DYNAMIC_SECURITY_OPTIONALITY', `Could not determine whether security scheme '${schemeName}' is optional.`, assignmentEvidence);
+  // Dependency declarations are conjunctive in FastAPI; optional or dynamic
+  // auto_error values must not be presented as a definitely required scheme.
   const requirementGroup = `${key}/${endpoint.id}`;
-  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${requirementGroup}/${schemeName}`, { scheme: schemeName, scopes: scopes ?? [], requirementGroup, mode: 'joint' }, source, 'api.security_requirement');
-  addEdge(endpoint, requirement, 'secured_by', `${key}:security:${schemeName}`, source, {}, 'DIRECT');
+  const scopeKey = JSON.stringify(scopes ?? []);
+  const mode = autoError === false ? 'optional' : autoError === true ? 'joint' : 'unknown';
+  const requirement = addNode('api_security_requirement', `Security requirement ${schemeName}`, file.path, `security-requirement/${requirementGroup}/${schemeName}/${scopeKey}`, { scheme: schemeName, scopes: scopes ?? [], requirementGroup, mode, required: autoError === undefined ? null : autoError }, source, 'api.security_requirement');
+  addEdge(endpoint, requirement, 'secured_by', `${key}:security:${schemeName}:${scopeKey}`, source, { required: autoError === undefined ? null : autoError }, 'DIRECT');
   addEdge(requirement, node, 'uses_scheme', `${key}:uses-scheme:${schemeName}`, source, {}, 'DIRECT');
   return node;
 }
