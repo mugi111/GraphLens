@@ -58,7 +58,7 @@ The built-in `builtin.demo` analyzer provides the same clearly labelled local fi
 
 ### Python source index
 
-`builtin.python-source` statically scans Python files below a registered workspace. It uses the bundled Lezer grammar in the Node.js process and never starts Python or imports project code. The index includes files, modules, classes, synchronous and asynchronous functions, containment, and import relationships. Imports are resolved only to files and declarations found in the same scan; other references appear as unresolved import nodes. Syntax recovery produces warning diagnostics while retaining facts outside the damaged region.
+`builtin.python-source` statically scans Python files below a registered workspace. It uses the bundled Lezer grammar in the Node.js process and never starts Python or imports project code. The index includes files, modules, classes, synchronous and asynchronous functions, decorators, class bases, function parameters and annotations, assignments, structured expression references, calls, containment, and import relationships. Calls retain dotted callees, keyword names, and argument literal kinds without storing source snippets. Imports are resolved only to files and declarations found in the same scan; other references appear as unresolved import nodes, while duplicate `.py` and `.pyi` candidates are marked ambiguous. Syntax recovery produces warning diagnostics and omits facts intersecting damaged syntax.
 
 The scanner accepts `.py` and, by default, `.pyi` files. It skips VCS metadata, Python caches and virtual environments, `node_modules`, `build`, and `dist`, and never follows symlinks. Paths are normalized to NFC and sorted before indexing. Files must be valid UTF-8 (an optional BOM is accepted). A source revision is computed from the effective configuration and raw file hashes; supplying `sourceRevision` in a run request requires it to match the computed revision. A failed scan leaves the prior active generation in place.
 
@@ -70,7 +70,7 @@ curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.python-source","config":{"includeStubs":true,"excludes":["generated/**"],"maxFiles":5000,"maxFileBytes":2097152,"maxTotalBytes":67108864}}'
 ```
 
-The default bounds are 5,000 files, 2 MiB per file, and 64 MiB total. Configurable ceilings are 5,000 files, 10 MiB per file, and 256 MiB total. The analyzer fails instead of truncating when a bound is exceeded, the workspace changes during scanning, a file cannot be decoded, or graph output exceeds 9,000 combined nodes and edges. Evidence locations include UTF-16 source offsets and one-based line and column ranges.
+The default bounds are 5,000 files, 2 MiB per file, and 64 MiB total. Configurable ceilings are 5,000 files, 10 MiB per file, and 256 MiB total. Traversal also stops with an error above 100,000 directory entries, 20,000 directories, or depth 64. The analyzer fails instead of truncating when a bound is exceeded, the workspace changes during scanning, a file cannot be decoded, or graph output exceeds 9,000 combined nodes and edges. Evidence locations include UTF-16 source offsets and one-based line and column ranges.
 
 Use the additive analyzer endpoints to run and poll an analyzer:
 
