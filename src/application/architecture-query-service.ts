@@ -22,22 +22,22 @@ export class ArchitectureQueryService {
     const filterHash = createHash('sha256').update(filters).digest('base64url');
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.architecture' || cursor.filters !== filterHash)) throw new ArchitectureQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
-    let snapshot: Snapshot | undefined;
-    try { snapshot = this.store.architectureSnapshot(query.workspace) as Snapshot | undefined; } catch (error) {
+    let page: ReturnType<GraphStore['architectureQueryPage']>;
+    try { page = this.store.architectureQueryPage(query, cursor?.offset ?? 0) as ReturnType<GraphStore['architectureQueryPage']>; } catch (error) {
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
       throw error;
     }
-    if (!snapshot) {
+    if (!page) {
       if (cursor) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
       throw new ArchitectureQueryError('ARCHITECTURE_ANALYSIS_NOT_FOUND', 'No active architecture analysis exists for this workspace.');
     }
+    const snapshot = page.snapshot as Snapshot;
     if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
-    const allRoots = selectRoots(snapshot, query);
-    if (query.node !== undefined && allRoots.length === 0) throw new ArchitectureQueryError('ARCHITECTURE_NODE_NOT_FOUND', `Node '${query.node}' was not found in the active architecture snapshot.`);
     const offset = cursor?.offset ?? 0;
-    if (offset >= allRoots.length && cursor) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
-    const roots = allRoots.slice(offset, offset + query.limit);
-    const closure = buildClosure(snapshot, roots, query.depth);
+    if (offset >= page.totalRootCount && cursor) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
+    if (query.node !== undefined && page.rootIds.length === 0) throw new ArchitectureQueryError('ARCHITECTURE_NODE_NOT_FOUND', `Node '${query.node}' was not found in the active architecture snapshot.`);
+    const roots = page.rootIds;
+    const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
     if (closure.nodes.length > 250 || closure.edges.length > 200) throw tooLarge();
     let projection: ReturnType<GraphStore['projectGraph']>;
     try { projection = this.store.projectGraph(closure.nodes, closure.edges, query.includeEvidence || query.includeDiagnostics); }
@@ -53,13 +53,13 @@ export class ArchitectureQueryService {
     const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, projection.nodes, projection.edges, projectionEvidence) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + roots.length;
-    const nextCursor = nextOffset < allRoots.length ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < page.totalRootCount ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const result = {
       workspace: snapshot.workspace,
       analysis: { ...snapshot.analysis, inputGenerations: snapshot.inputGenerations ?? [], diagnostics: diagnosticCounts(snapshot.diagnostics) },
       query: { root: query.root, ...(query.node !== undefined ? { node: query.node } : {}), ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.finding !== undefined ? { finding: query.finding } : {}), depth: query.depth },
-      page: { limit: query.limit, rootCount: roots.length, totalRootCount: allRoots.length, ...(nextCursor ? { nextCursor } : {}) },
-      rootIds: roots.map((node) => node.id),
+      page: { limit: query.limit, rootCount: roots.length, totalRootCount: page.totalRootCount, ...(nextCursor ? { nextCursor } : {}) },
+      rootIds: roots,
       nodes: projection.nodes.map((node) => projectNode(node, nodeEvidence.get(node.id) ?? [], query.includeEvidence)),
       edges: projection.edges.map((edge) => projectEdge(edge, edgeEvidence.get(edge.id) ?? [], query.includeEvidence)),
       ...(diagnostics ? { diagnostics } : {}),
@@ -137,7 +137,7 @@ function relevantDiagnostics(items: StoredAnalysisDiagnostic[], nodes: GraphNode
   return items.filter((item) => { const detail = item.detail && typeof item.detail === 'object' ? item.detail as Record<string, unknown> : {}; const related = [detail.endpointId, detail.fastApiEndpointId, detail.openApiEndpointId].some((id) => typeof id === 'string' && ids.has(id)); const hasSubject = [detail.endpointId, detail.fastApiEndpointId, detail.openApiEndpointId].some((id) => typeof id === 'string'); return related || (!item.uri && !hasSubject) || (!!item.uri && uris.has(item.uri)); }).map(({ sequence: _sequence, generationId: _generationId, ...item }) => item);
 }
 function diagnosticCounts(items: StoredAnalysisDiagnostic[]) { return { total: items.length, info: items.filter((i) => i.severity === 'info').length, warning: items.filter((i) => i.severity === 'warning').length, error: items.filter((i) => i.severity === 'error').length }; }
-function filterKey(query: ArchitectureQuery) { return JSON.stringify({ root: query.root, node: query.node ?? null, namespace: query.namespace ?? null, method: query.method ?? null, path: query.path ?? null, finding: query.finding ?? null, depth: query.depth, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics }); }
+function filterKey(query: ArchitectureQuery) { return JSON.stringify({ root: query.root, node: query.node ?? null, namespace: query.namespace ?? null, method: query.method ?? null, path: query.path ?? null, finding: query.finding ?? null, limit: query.limit, depth: query.depth, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics }); }
 function encodeCursor(cursor: Cursor) { return Buffer.from(JSON.stringify(cursor)).toString('base64url'); }
 function decodeCursor(raw: string): Cursor {
   if (!raw || raw.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
