@@ -216,3 +216,5 @@ The read-only CLI supports the same query:
 ```sh
 graphlens query impact --workspaces <workspace-id-1,workspace-id-2> --node <stable-node-id> --direction dependents --depth 4 --includeInferred false --include evidence,diagnostics
 ```
+
+The **Impact** view in the local UI discovers shared contracts or workspace endpoints from the selected active architecture snapshots, then lets you trace either direction. Workspace groups, global contract hubs, impact roles, and evidence levels use distinct shapes, outlines, and line patterns. Each reached node has one deterministic shortest path; the path selector and keyboard-accessible node index work without graph-canvas interaction. The view records its workspace set, target filters, selected node, direction, and traversal options in the URL. Frontend consumer relationships are not inferred by the current analyzers, so the view labels an empty dependent side as “not observed” rather than confirmed absence.
