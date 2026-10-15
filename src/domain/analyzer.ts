@@ -1,7 +1,7 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
 
 /** IDs owned by GraphLens itself and unavailable to installed packages. */
-export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph'] as const;
+export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source'] as const;
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -38,6 +38,11 @@ export type AnalysisEvidence = {
   type: string;
   uri?: string;
   line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  startOffset?: number;
+  endOffset?: number;
   detail?: string;
   provenance?: Record<string, JsonValue>;
   inputGenerations?: string[];
@@ -54,6 +59,8 @@ export type AnalysisDiagnostic = {
 };
 
 export type AnalysisResult = {
+  /** Content-derived revision computed by source analyzers. */
+  sourceRevision?: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
