@@ -25,7 +25,8 @@ export type SqlAlchemyModelFact = {
   module: string;
   qualifiedName: string;
   label: string;
-  tableName: string;
+  tableName: string | null;
+  tableResolved?: boolean;
   schema?: string;
   bases: string[];
   sourceEvidence?: AnalysisEvidence;

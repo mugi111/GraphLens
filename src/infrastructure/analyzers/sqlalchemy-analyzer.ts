@@ -30,20 +30,32 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
   const classByLocal = new Map(allClasses.map((item) => [`${item.module}.${item.qualifiedName}`, item]));
   const rootVariables = new Set<string>();
   const rootClasses = new Set<string>();
+  const registryVariables = new Set<string>();
   for (const file of files) {
     for (const assignment of file.assignments) {
       const target = expressionName(assignment.properties.target);
       if (!target || assignment.properties.scope !== '') continue;
       const valueName = expressionName(assignment.properties.value);
+      const directCall = asExpression(assignment.properties.value);
+      const canonicalValue = directCall?.kind === 'call' && typeof directCall.name === 'string' ? canonicalSqlAlchemyName(directCall.name, file.imports) : undefined;
+      if (canonicalValue === 'sqlalchemy.orm.registry') registryVariables.add(`${moduleForAssignment(assignment)}.${target}`);
+      if (canonicalValue === 'sqlalchemy.orm.declarative_base' || canonicalValue === 'sqlalchemy.ext.declarative.declarative_base') rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
+      if (valueName?.endsWith('.generate_base') && registryVariables.has(`${moduleForAssignment(assignment)}.${valueName.slice(0, -'.generate_base'.length)}`)) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
       if (calls(assignment).some((call) => {
         const canonical = canonicalSqlAlchemyName(call.callee, file.imports);
         return canonical === 'sqlalchemy.orm.declarative_base' || canonical === 'sqlalchemy.ext.declarative.declarative_base';
-      }) || valueName?.endsWith('.generate_base') && calls(assignment).some((call) => canonicalSqlAlchemyName(call.callee, file.imports) === 'sqlalchemy.orm.registry')) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
+      })) rootVariables.add(`${moduleForAssignment(assignment)}.${target}`);
     }
     for (const klass of file.classes) {
       const key = `${String(klass.properties.module)}.${String(klass.properties.qualifiedName)}`;
-      const hasTablename = literalString(localAssignmentValue(file.assignments, '__tablename__', String(klass.properties.qualifiedName))?.properties.value);
-      if (!hasTablename && classBases(klass).some((base) => canonicalSqlAlchemyName(base, file.imports) === 'sqlalchemy.orm.DeclarativeBase')) rootClasses.add(key);
+      const tableAssignment = localAssignmentValue(file.assignments, '__tablename__', String(klass.properties.qualifiedName));
+      const decorators = Array.isArray(klass.properties.decorators) ? klass.properties.decorators as Array<{name?: string}> : [];
+      const isMappedDecorator = decorators.some(({ name }) => {
+        if (!name) return false;
+        const canonical = canonicalSqlAlchemyName(name, file.imports);
+        return canonical === 'sqlalchemy.orm.registry.mapped' || canonical === 'sqlalchemy.orm.registry.mapped_as_dataclass' || [...registryVariables].some((registry) => registry === `${String(klass.properties.module)}.${name.split('.')[0]}` && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!));
+      });
+      if (!tableAssignment && !isMappedDecorator && classBases(klass).some((base) => canonicalSqlAlchemyName(base, file.imports) === 'sqlalchemy.orm.DeclarativeBase')) rootClasses.add(key);
     }
   }
   const models = new Map<string, SqlAlchemyModelFact>();
@@ -55,11 +67,16 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const key = `${item.module}.${item.qualifiedName}`;
       if (rootClasses.has(key) || models.has(key)) continue;
       const bases = classBases(item.node);
+      const abstract = localAssignmentValue(item.file.assignments, '__abstract__', item.qualifiedName);
+      if (abstract && literalBoolean(abstract.properties.value) === true) continue;
       const isDerived = bases.some((base) => {
         const canonical = canonicalSqlAlchemyName(base, item.file.imports);
         const localBase = resolveLocalBaseKey(item.file, base);
         return canonical === 'sqlalchemy.orm.DeclarativeBase' || rootBases.has(localBase ?? `${item.module}.${canonical}`) || rootBases.has(canonical) || models.has(localBase ?? `${item.module}.${base}`) || classByLocal.has(localBase ?? `${item.module}.${base}`) && models.has(localBase ?? `${item.module}.${base}`);
       });
+      const decorators = Array.isArray(item.node.properties.decorators) ? item.node.properties.decorators as Array<{name?: string}> : [];
+      const mappedDecorator = decorators.some(({ name }) => !!name && (/\.(mapped|mapped_as_dataclass)$/.test(canonicalSqlAlchemyName(name, item.file.imports)) || [...rootVariables].some((root) => root === `${item.module}.${name.split('.')[0]}`) && ['mapped', 'mapped_as_dataclass'].includes(name.split('.').at(-1)!)));
+      if (mappedDecorator && !rootClasses.has(key)) { models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName: null, tableResolved: false, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); continue; }
       const tableAssignment = localAssignmentValue(item.file.assignments, '__tablename__', item.qualifiedName);
       const tableName = literalString(tableAssignment?.properties.value);
       if (!isDerived) {
@@ -68,9 +85,8 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       }
       if (tableAssignment && !tableName) {
         diagnostics.push(sourceDiagnostic('SQLALCHEMY_DYNAMIC_TABLE_NAME', `Could not statically resolve table name for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(tableAssignment.id)));
-        continue;
       }
-      if (!tableName) {
+      if (!tableName && !tableAssignment) {
         const baseKeys = bases.map((base) => resolveLocalBaseKey(item.file, base) ?? `${item.module}.${base}`);
         if (baseKeys.some((base) => models.has(base))) {
           const inherited = baseKeys.map((base) => models.get(base)).find(Boolean);
@@ -78,12 +94,14 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
         }
         continue;
       }
-      const schema = tableSchema(item.file.assignments, item.qualifiedName);
-      models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName, schema, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), tableEvidence: item.file.evidenceBySubject.get(tableAssignment!.id), columns: [], constraints: [], relationships: [] });
+      const schemaFact = tableSchema(item.file.assignments, item.qualifiedName);
+      const resolvedTable = !!tableName && !schemaFact.dynamic;
+      if (!resolvedTable) diagnostics.push(sourceDiagnostic(tableName ? 'SQLALCHEMY_SCHEMA_UNRESOLVED' : 'SQLALCHEMY_TABLE_UNRESOLVED', `Could not statically resolve table mapping for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(tableAssignment?.id ?? item.node.id)));
+      models.set(key, { classId: item.node.id, path: item.path, module: item.module, qualifiedName: item.qualifiedName, label: item.label, tableName: tableName ?? null, tableResolved: resolvedTable, schema: schemaFact.schema, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), tableEvidence: item.file.evidenceBySubject.get(tableAssignment?.id ?? item.node.id), columns: [], constraints: [], relationships: [] });
       changed = true;
     }
   }
-  const collected = [...models.values()].filter((model) => model.tableName).sort((a, b) => lexical(`${a.module}.${a.qualifiedName}`, `${b.module}.${b.qualifiedName}`));
+  const collected = [...models.values()].sort((a, b) => lexical(`${a.module}.${a.qualifiedName}`, `${b.module}.${b.qualifiedName}`));
   for (const model of collected) {
     const file = files.find((candidate) => candidate.path === model.path)!;
     const columnByName = new Map<string, SqlAlchemyModelFact['columns'][number]>();
@@ -97,7 +115,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       if (relation) { model.relationships.push(relation.fact); if (relation.diagnostic) diagnostics.push(relation.diagnostic); }
     }
     model.columns = [...columnByName.values()];
-    model.constraints = tableConstraints(file.assignments, model.qualifiedName, file, model.columns, diagnostics);
+    if (model.tableName) model.constraints = tableConstraints(file.assignments, model.qualifiedName, file, model.columns, diagnostics);
   }
   return collected;
 }
@@ -154,9 +172,10 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     if (!sourceClass) continue;
     if (!nodesById.has(sourceClass.id)) { nodesById.set(sourceClass.id, sourceClass); nodes.push(sourceClass); }
     if (model.sourceEvidence) evidence.push({ ...model.sourceEvidence, id: identity.node(sourceClass.id, 'evidence:node', 'sqlalchemy.source-class'), subjectId: sourceClass.id, type: 'sqlalchemy.source-class' });
-    const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null }, model.sourceEvidence);
+    const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, tableResolved: model.tableResolved ?? !!model.tableName }, model.sourceEvidence);
     projectedModels.set(`${model.module}.${model.qualifiedName}`, modelNode);
     addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DIRECT');
+    if (!model.tableName || model.tableResolved === false) continue;
     const tableKey = `table/${model.schema ? `${model.schema}.` : ''}${model.tableName}`;
     const table = addNode(databaseNamespace, 'sqlalchemy_table', `${model.schema ? `${model.schema}.` : ''}${model.tableName}`, tableKey, { databaseNamespace, schema: model.schema ?? null, tableName: model.tableName }, model.tableEvidence ?? model.sourceEvidence, 'sqlalchemy.table');
     addEdge(modelNode, table, 'contains', model.tableEvidence ?? model.sourceEvidence, tableKey);
@@ -370,12 +389,14 @@ function resolveRelationshipCandidates(models: SqlAlchemyModelFact[], file: SqlA
   const exact = models.filter((model) => `${model.module}.${model.qualifiedName}` === importedKey || `${model.module}.${model.qualifiedName}` === `${source.module}.${targetName}`);
   return exact.length ? exact : findModelCandidates(models, source.module, targetName);
 }
-function tableSchema(assignments: GraphNode[], scope: string): string | undefined {
+function tableSchema(assignments: GraphNode[], scope: string): { schema?: string; dynamic: boolean } {
   const assignment = localAssignmentValue(assignments, '__table_args__', scope);
+  let found = false;
   const stack: unknown[] = [assignment?.properties.value];
-  while (stack.length) { const value = stack.pop(); if (!isObject(value)) continue; if (value.kind === 'DictionaryExpression' && Array.isArray(value.children)) { for (let i = 0; i + 1 < value.children.length; i += 2) { const key = value.children[i]; const item = value.children[i + 1]; if (isObject(key) && key.value === 'schema' && isObject(item) && typeof item.value === 'string') return item.value; } } if (Array.isArray(value.children)) stack.push(...value.children); }
-  return undefined;
+  while (stack.length) { const value = stack.pop(); if (!isObject(value)) continue; if (value.kind === 'DictionaryExpression' && Array.isArray(value.children)) { for (let i = 0; i + 1 < value.children.length; i += 2) { const key = value.children[i]; const item = value.children[i + 1]; if (isObject(key) && key.value === 'schema') { found = true; if (isObject(item) && item.literalKind === 'string' && typeof item.value === 'string') return { schema: item.value, dynamic: false }; return { dynamic: true }; } } } if (Array.isArray(value.children)) stack.push(...value.children); }
+  return { dynamic: found };
 }
+function literalBoolean(value: unknown): boolean | undefined { return isObject(value) && value.literalKind === 'boolean' && typeof value.value === 'boolean' ? value.value : undefined; }
 function moduleForAssignment(node: GraphNode) { return String(node.properties.module); }
 function resolveLocalBaseKey(file: SqlAlchemyCollectedFile, name: string): string | undefined {
   if (name.includes('.')) {
