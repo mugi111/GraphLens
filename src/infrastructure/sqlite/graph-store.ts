@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisInputGeneration, type AnalysisResult, type AnalyzerDescriptor, type ArchitectureInputProvider, type ArchitectureInputSnapshot } from '../../domain/analyzer.js';
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
+import type { CrossWorkspaceSnapshot, WorkspaceArchitectureSnapshot } from '../../domain/federation.js';
 import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
@@ -139,6 +140,55 @@ export class GraphStore implements ArchitectureInputProvider {
       return { workspace: { id: active.workspace_id, name: active.name }, analysis: { analyzerId: active.analyzer_id, analyzerVersion: active.analyzer_version, generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at }, nodes, edges, evidence, diagnostics, inputGenerations } satisfies DatabaseSchemaSnapshot & { inputGenerations: Array<{ analyzerId: string; generationId: number }> };
     });
     return read(workspaceId);
+  }
+  crossWorkspaceArchitectureSnapshot(workspaceIds: readonly string[]): CrossWorkspaceSnapshot {
+    if (!Array.isArray(workspaceIds) || workspaceIds.length < 2 || workspaceIds.length > 16 || new Set(workspaceIds).size !== workspaceIds.length || workspaceIds.some((id) => typeof id !== 'string' || id.length < 1 || id.length > 256)) {
+      throw new Error('Cross-workspace snapshot requires 2–16 unique workspace IDs.');
+    }
+    const requestedWorkspaceIds = [...workspaceIds].sort();
+    const read = this.db.transaction((requested: string[]) => {
+      const placeholders = requested.map(() => '?').join(',');
+      const workspaceRows = this.db.prepare(`SELECT id,name FROM workspaces WHERE id IN (${placeholders}) ORDER BY id`).all(...requested) as Array<{ id: string; name: string }>;
+      const knownIds = new Set(workspaceRows.map((workspace) => workspace.id));
+      const unknown = requested.filter((id) => !knownIds.has(id));
+      if (unknown.length) throw new Error(`Workspace not found: ${unknown.join(', ')}.`);
+
+      const activeRows = this.db.prepare(`SELECT a.workspace_id,w.name,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at
+        FROM active_analysis_generations a
+        JOIN workspaces w ON w.id=a.workspace_id
+        JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+        WHERE a.workspace_id IN (${placeholders}) AND a.analyzer_id='builtin.architecture'
+        ORDER BY a.workspace_id`).all(...requested) as any[];
+      const activeIds = new Set(activeRows.map((row) => row.workspace_id as string));
+      const missingArchitectureWorkspaceIds = requested.filter((id) => !activeIds.has(id));
+      const generations: WorkspaceArchitectureSnapshot[] = activeRows.map((active) => {
+        const generationId = Number(active.generation_id);
+        const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
+          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
+        const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
+          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
+        const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[])
+          .map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
+        const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[])
+          .map((row) => ({ code: row.code ?? undefined, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as AnalysisDiagnostic));
+        const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(generationId) as any[])
+          .map((row) => ({ analyzerId: row.analyzerId as string, generationId: Number(row.generationId) }));
+        return {
+          workspace: { id: active.workspace_id, name: active.name },
+          generation: { workspaceId: active.workspace_id, analyzerId: 'builtin.architecture', generationId, runId: active.run_id, sourceRevision: active.source_revision ?? undefined, completedAt: active.completed_at },
+          inputGenerations,
+          nodes: nodes as WorkspaceArchitectureSnapshot['nodes'],
+          edges: edges as WorkspaceArchitectureSnapshot['edges'],
+          evidence: evidence as WorkspaceArchitectureSnapshot['evidence'],
+          diagnostics: diagnostics as WorkspaceArchitectureSnapshot['diagnostics'],
+        };
+      });
+      const vector = generations.map(({ generation }) => `${generation.workspaceId}\t${generation.generationId}`).join('\n');
+      const snapshotId = createHash('sha256').update(`graphlens-cross-workspace-v1\n${vector}`).digest('hex');
+      return { snapshotId, requestedWorkspaceIds, generations, missingArchitectureWorkspaceIds } satisfies CrossWorkspaceSnapshot;
+    });
+    return read.deferred(requestedWorkspaceIds);
   }
   snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot {
     if (!Array.isArray(analyzerIds) || analyzerIds.length > 32 || new Set(analyzerIds).size !== analyzerIds.length || analyzerIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) throw new Error('Architecture input analyzer scope is invalid.');
