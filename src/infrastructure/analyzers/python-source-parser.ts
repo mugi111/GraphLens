@@ -243,12 +243,15 @@ function expressionFact(node: any, source: string, errorRegions: Range[] = []): 
     const parts = children(node).filter(isExpressionNode);
     const object = parts[0] ? expressionFact(parts[0], source, errorRegions) : { kind: 'unknown' };
     const property = [...parts].reverse()[0];
-    return { kind: 'member', property: property ? expressionName(expressionFact(property, source, errorRegions)) ?? '' : '', children: [object] };
+    const propertyFact = property ? expressionFact(property, source, errorRegions) : undefined;
+    const literalProperty = property ? literalValue(property, source) : undefined;
+    return { kind: 'member', property: property ? expressionName(propertyFact!) ?? (typeof literalProperty === 'string' ? literalProperty : '') : '', children: propertyFact ? [object, propertyFact] : [object] };
   }
   if (node.name === 'CallExpression') {
     const callee = children(node).find(isExpressionNode);
     const args = directChild(node, 'ArgList');
-    return { kind: 'call', name: callee ? expressionName(expressionFact(callee, source, errorRegions)) ?? '' : '', ...(args ? { arguments: callArguments(args, source, errorRegions).map((arg) => ({ kind: arg.kind, ...(arg.keyword ? { keyword: arg.keyword } : {}), literalKind: arg.expression.literalKind ?? arg.expression.kind, ...(Object.hasOwn(arg.expression, 'value') ? { value: arg.expression.value } : {}), expression: arg.expression })) } : {}) };
+    const calleeFact = callee ? expressionFact(callee, source, errorRegions) : undefined;
+    return { kind: 'call', name: calleeFact ? expressionName(calleeFact) ?? '' : '', ...(calleeFact ? { callee: calleeFact } : {}), ...(args ? { arguments: callArguments(args, source, errorRegions).map((arg) => ({ kind: arg.kind, ...(arg.keyword ? { keyword: arg.keyword } : {}), literalKind: arg.expression.literalKind ?? arg.expression.kind, ...(Object.hasOwn(arg.expression, 'value') ? { value: arg.expression.value } : {}), expression: arg.expression })) } : {}) };
   }
   const literalKind = ({ String: 'string', Number: 'number', Boolean: 'boolean', None: 'none', True: 'boolean', False: 'boolean' } as Record<string, string>)[node.name];
   const parts = children(node).filter(isExpressionNode);
