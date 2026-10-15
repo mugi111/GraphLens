@@ -304,7 +304,7 @@ function columnFact(assignment: GraphNode, file: SqlAlchemyCollectedFile) {
   const namedColumn = staticString(kwargs.get('name'));
   const explicitName = namedColumn ?? (recognizedFactory && staticString(positional[0]) ? staticString(positional[0]) : undefined);
   const typeExpression = recognizedFactory && staticString(positional[0]) ? positional[1] : positional[0];
-  const typeName = mappedType ?? expressionName(typeExpression);
+  const typeName = expressionName(typeExpression) ?? mappedType;
   const foreignKeys = [] as SqlAlchemyModelFact['columns'][number]['foreignKeys'];
   let dynamicForeignKey = false;
   const nestedCalls = (recognizedFactory ? args.map((arg) => arg.expression) : []).flatMap((argument) => argument?.kind === 'call' ? [argument] : []);
