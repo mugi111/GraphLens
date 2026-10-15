@@ -121,7 +121,7 @@ export class GraphStore implements ArchitectureInputProvider {
     if (!Array.isArray(analyzerIds) || analyzerIds.length > 32 || new Set(analyzerIds).size !== analyzerIds.length || analyzerIds.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id))) throw new Error('Architecture input analyzer scope is invalid.');
     const read = this.db.transaction((workspace: string, requested: readonly string[]) => {
       if (!this.getWorkspace(workspace)) throw new Error(`Workspace '${workspace}' was not found.`);
-      if (!requested.length) return { workspaceId: workspace, generations: [] } satisfies ArchitectureInputSnapshot;
+      if (!requested.length) return { workspaceId: workspace, generations: [], missingAnalyzerIds: [] } satisfies ArchitectureInputSnapshot;
       const placeholders = requested.map(() => '?').join(',');
       const active = this.db.prepare(`SELECT a.analyzer_id,g.id AS generation_id,r.source_revision
         FROM active_analysis_generations a
@@ -131,7 +131,6 @@ export class GraphStore implements ArchitectureInputProvider {
         ORDER BY a.analyzer_id`).all(workspace, ...requested) as Array<{ analyzer_id: string; generation_id: number; source_revision: string | null }>;
       const byAnalyzer = new Map(active.map((item) => [item.analyzer_id, item]));
       const missing = requested.filter((id) => !byAnalyzer.has(id));
-      if (missing.length) throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', `No active generation is available for analyzer input(s): ${missing.join(', ')}.`);
       const generations = active.map((item) => {
         const generationId = Number(item.generation_id);
         const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphNode));
@@ -140,7 +139,7 @@ export class GraphStore implements ArchitectureInputProvider {
         const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE generation_id=? ORDER BY sequence').all(generationId) as any[]).map((row) => ({ sequence: row.sequence, generationId, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
         return { analyzerId: item.analyzer_id, generationId, sourceRevision: item.source_revision ?? undefined, nodes, edges, evidence, diagnostics };
       });
-      return deepFreeze({ workspaceId: workspace, generations });
+      return deepFreeze({ workspaceId: workspace, generations, missingAnalyzerIds: missing });
     }).deferred;
     return read(workspaceId, analyzerIds);
   }

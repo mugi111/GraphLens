@@ -36,7 +36,7 @@ export type ArchitectureInputGeneration = AnalysisInputGeneration & {
   evidence: readonly AnalysisEvidence[];
   diagnostics: readonly AnalysisDiagnostic[];
 };
-export type ArchitectureInputSnapshot = { workspaceId: string; generations: readonly ArchitectureInputGeneration[] };
+export type ArchitectureInputSnapshot = { workspaceId: string; generations: readonly ArchitectureInputGeneration[]; missingAnalyzerIds: readonly string[] };
 export type ArchitectureInputProvider = {
   /** Reads only the requested active generations in one workspace-scoped snapshot. */
   snapshot(workspaceId: string, analyzerIds: readonly string[]): ArchitectureInputSnapshot;
