@@ -8,6 +8,10 @@ export type GraphNode = {
   analyzerId?: string;
   generationId?: number;
   level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
+  contributors?: ContributionOwner[];
+  propertySources?: Record<string, ContributionOwner[]>;
+  propertyConflicts?: PropertyConflict[];
+  evidenceCount?: number;
 };
 
 export type GraphEdge = {
@@ -21,7 +25,14 @@ export type GraphEdge = {
   analyzerId?: string;
   generationId?: number;
   level?: 'DIRECT' | 'DERIVED' | 'INFERRED';
+  contributors?: ContributionOwner[];
+  propertySources?: Record<string, ContributionOwner[]>;
+  propertyConflicts?: PropertyConflict[];
+  evidenceCount?: number;
 };
+
+export type ContributionOwner = { analyzerId: string; generationId: number };
+export type PropertyConflict = { property: string; values: Array<{ value: unknown; owner: ContributionOwner }> };
 
 export type Evidence = {
   id?: string;

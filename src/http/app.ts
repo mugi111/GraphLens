@@ -99,7 +99,7 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     try{return c.json(codeGraphQuery.query(parsed.query));}catch(error){if(error instanceof CodeGraphQueryError)return c.json({error:error.message,code:error.code},error.status);return c.json({error:'Code graph query failed.',code:'CODE_GRAPH_QUERY_FAILED'},500);}
   });
   app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
-  app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
+  app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId'), c.req.query('workspace')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', serveStatic({ path: `${webRoot}/index.html` }));
   return app;
