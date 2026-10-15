@@ -112,6 +112,7 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     level: 'DERIVED',
     type,
     sources,
+    sourceReferences: sourceReferences(snapshot, sources),
     ...(detail ? { detail } : {}),
   });
 
@@ -192,6 +193,37 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
     edges: edges.sort((a, b) => cmp([a.scope, a.sourceWorkspaceId ?? '', a.sourceId, a.targetWorkspaceId ?? '', a.targetId, a.kind, a.id], [b.scope, b.sourceWorkspaceId ?? '', b.sourceId, b.targetWorkspaceId ?? '', b.targetId, b.kind, b.id])),
     diagnostics: diagnostics.sort((a, b) => cmp([a.code ?? '', JSON.stringify(a.detail ?? {})], [b.code ?? '', JSON.stringify(b.detail ?? {})])),
   };
+}
+
+function sourceReferences(snapshot: CrossWorkspaceSnapshot, sources: CrossWorkspaceEvidence['sources']) {
+  const refs = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  const add = (architectureWorkspace: WorkspaceArchitectureSnapshot, analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean) => {
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) return;
+    if (!architectureWorkspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) return;
+    const key = `${architectureWorkspace.workspace.id}\0${analyzerId}\0${generationId}`;
+    const ref = refs.get(key) ?? { workspaceId: architectureWorkspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
+    ref.evidenceIds.add(evidenceId); refs.set(key, ref);
+  };
+  for (const tuple of sources) {
+    const workspace = snapshot.generations.find((candidate) => candidate.workspace.id === tuple.workspaceId && candidate.generation.analyzerId === tuple.analyzerId && candidate.generation.generationId === tuple.generationId);
+    if (!workspace || tuple.analyzerId !== 'builtin.architecture') continue;
+    for (const evidenceId of tuple.evidenceIds) {
+      const evidence = workspace.evidence.find((item) => item.id === evidenceId);
+      const provenance = evidence?.provenance;
+      if (!evidence || !provenance) continue;
+      if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') {
+        add(workspace, provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof evidence.uri === 'string');
+      } else if (Array.isArray(provenance.sources)) {
+        for (const value of provenance.sources) {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+          const item = value as Record<string, unknown>;
+          const input = workspace.inputGenerations.find((candidate) => candidate.analyzerId === item.analyzerId);
+          add(workspace, item.analyzerId, input?.generationId, item.evidenceId, typeof item.uri === 'string');
+        }
+      }
+    }
+  }
+  return [...refs.values()].map((ref) => ({ workspaceId: ref.workspaceId, analyzerId: ref.analyzerId, generationId: ref.generationId, evidenceIds: [...ref.evidenceIds].sort() }));
 }
 
 function resolverOptions(input: Partial<CrossWorkspaceResolverOptions>): CrossWorkspaceResolverOptions {

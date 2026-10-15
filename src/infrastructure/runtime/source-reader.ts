@@ -3,7 +3,8 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 
-export class SourceReadError extends Error { constructor(readonly code: string, message: string, readonly status = 400) { super(message); } }
+export type SourceHttpStatus = 400 | 404 | 409 | 413 | 415;
+export class SourceReadError extends Error { constructor(readonly code: string, message: string, readonly status: SourceHttpStatus = 400) { super(message); } }
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
@@ -32,9 +33,15 @@ export async function readCurrentSource(rootPath: string, uri: string, recordedL
     const opened = await handle.stat();
     if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || await realpath(target) !== target) throw new SourceReadError('SOURCE_FILE_CHANGED', 'The current working file changed while it was being opened.', 409);
     const buffer = Buffer.alloc(MAX_SOURCE_BYTES + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    if (bytesRead > MAX_SOURCE_BYTES) throw new SourceReadError('SOURCE_FILE_TOO_LARGE', 'The current working file exceeds the 2 MiB source limit.', 413);
-    bytes = buffer.subarray(0, bytesRead);
+    let bytesReadTotal = 0;
+    while (bytesReadTotal < buffer.length) {
+      const read = await handle.read(buffer, bytesReadTotal, buffer.length - bytesReadTotal, bytesReadTotal);
+      if (read.bytesRead === 0) break;
+      bytesReadTotal += read.bytesRead;
+    }
+    if (bytesReadTotal > MAX_SOURCE_BYTES) throw new SourceReadError('SOURCE_FILE_TOO_LARGE', 'The current working file exceeds the 2 MiB source limit.', 413);
+    if (bytesReadTotal !== opened.size) throw new SourceReadError('SOURCE_FILE_CHANGED', 'The source descriptor ended before its recorded size was read.', 409);
+    bytes = buffer.subarray(0, bytesReadTotal);
     const after = await handle.stat();
     const pathAfter = await lstat(target);
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs || pathAfter.isSymbolicLink() || pathAfter.dev !== opened.dev || pathAfter.ino !== opened.ino || pathAfter.size !== opened.size || pathAfter.mtimeMs !== opened.mtimeMs || pathAfter.ctimeMs !== opened.ctimeMs || await realpath(target) !== target) throw new SourceReadError('SOURCE_FILE_CHANGED', 'The current working file changed while it was being read.', 409);
