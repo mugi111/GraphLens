@@ -2,7 +2,6 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisInputGeneration, type AnalysisResult, type AnalyzerDescriptor, type ArchitectureInputProvider, type ArchitectureInputSnapshot } from '../../domain/analyzer.js';
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
@@ -149,12 +148,12 @@ export class GraphStore implements ArchitectureInputProvider {
     const requestedWorkspaceIds = [...workspaceIds].sort();
     const read = this.db.transaction((requested: string[]) => {
       const placeholders = requested.map(() => '?').join(',');
-      const workspaceRows = this.db.prepare(`SELECT id,name,path FROM workspaces WHERE id IN (${placeholders}) ORDER BY id`).all(...requested) as Array<{ id: string; name: string; path: string }>;
+      const workspaceRows = this.db.prepare(`SELECT id,name FROM workspaces WHERE id IN (${placeholders}) ORDER BY id`).all(...requested) as Array<{ id: string; name: string }>;
       const knownIds = new Set(workspaceRows.map((workspace) => workspace.id));
       const unknown = requested.filter((id) => !knownIds.has(id));
       if (unknown.length) throw new Error(`Workspace not found: ${unknown.join(', ')}.`);
 
-      const activeRows = this.db.prepare(`SELECT a.workspace_id,w.name,w.path,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at
+      const activeRows = this.db.prepare(`SELECT a.workspace_id,w.name,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at
         FROM active_analysis_generations a
         JOIN workspaces w ON w.id=a.workspace_id
         JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
@@ -165,15 +164,14 @@ export class GraphStore implements ArchitectureInputProvider {
       const missingArchitectureWorkspaceIds = requested.filter((id) => !activeIds.has(id));
       const generations: WorkspaceArchitectureSnapshot[] = activeRows.map((active) => {
         const generationId = Number(active.generation_id);
-        const sanitize = (value: unknown) => scrubWorkspacePath(value, active.path);
         const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => sanitize({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId }));
+          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphNode));
         const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => sanitize({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId }));
+          .map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: active.analyzer_id, generationId } satisfies GraphEdge));
         const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[])
-          .map((row) => sanitize({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId }));
+          .map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: active.analyzer_id, generationId } as AnalysisEvidence));
         const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence').all(active.run_id) as any[])
-          .map((row) => sanitize({ code: row.code ?? undefined, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined }));
+          .map((row) => ({ code: row.code ?? undefined, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as AnalysisDiagnostic));
         const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(generationId) as any[])
           .map((row) => ({ analyzerId: row.analyzerId as string, generationId: Number(row.generationId) }));
         return {
@@ -376,15 +374,6 @@ function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   Object.freeze(value);
   for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
-  return value;
-}
-function scrubWorkspacePath(value: unknown, workspacePath: string): unknown {
-  if (typeof value === 'string') {
-    const candidates = [workspacePath, workspacePath.replaceAll('\\', '/'), encodeURI(workspacePath), pathToFileURL(workspacePath).href];
-    return candidates.filter(Boolean).reduce((result, candidate) => result.replaceAll(candidate, '<workspace>'), value);
-  }
-  if (Array.isArray(value)) return value.map((item) => scrubWorkspacePath(item, workspacePath));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, scrubWorkspacePath(child, workspacePath)]));
   return value;
 }
 function parseNode(r: any): GraphNode { return { id:r.id, workspaceId:r.workspace_id, kind:r.kind, label:r.label, properties:JSON.parse(r.properties_json), analyzerId:r.analyzer_id, generationId:r.generation_id, level:r.effective_level }; }
