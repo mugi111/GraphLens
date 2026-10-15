@@ -92,10 +92,9 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       }
       if (!tableName && !tableAssignment) {
         const baseKeys = bases.map((base) => resolveLocalBaseKey(item.file, base) ?? `${item.module}.${base}`);
-        if (baseKeys.some((base) => models.has(base))) {
-          const inherited = baseKeys.map((base) => models.get(base)).find(Boolean);
-          if (inherited) { models.set(key, { ...inherited, classId: item.node.id, path: item.path, module: item.module, label: item.label, qualifiedName: item.qualifiedName, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); changed = true; }
-        }
+        const inherited = [...new Map(baseKeys.map((base) => models.get(base)).filter((model): model is SqlAlchemyModelFact => !!model && !!model.tableName).map((model) => [`${model.schema ?? ''}.${model.tableName}`, model])).values()];
+        if (inherited.length === 1) { models.set(key, { ...inherited[0]!, classId: item.node.id, path: item.path, module: item.module, label: item.label, qualifiedName: item.qualifiedName, bases, sourceEvidence: item.file.evidenceBySubject.get(item.node.id), columns: [], constraints: [], relationships: [] }); changed = true; }
+        else if (inherited.length > 1) diagnostics.push(sourceDiagnostic('SQLALCHEMY_TABLE_UNRESOLVED', `Could not prove a single inherited table for '${item.qualifiedName}'.`, item.file.evidenceBySubject.get(item.node.id)));
         continue;
       }
       const schemaFact = tableSchema(item.file.assignments, item.qualifiedName);
@@ -115,7 +114,7 @@ function collectModels(files: SqlAlchemyCollectedFile[], diagnostics: AnalysisDi
       const assignmentFile = files.find((candidate) => candidate.assignments.some((node) => node.id === assignment.id)) ?? file;
       const column = columnFact(assignment, assignmentFile);
       if (column?.diagnostic) diagnostics.push(column.diagnostic);
-      if (column) columnByName.set(column.name, column);
+      if (column) columnByName.set(column.pythonName, column);
       const relation = relationshipFact(assignment, assignmentFile);
       if (relation) { relationshipByName.set(relation.fact.name, relation.fact); if (relation.diagnostic) diagnostics.push(relation.diagnostic); }
     }
