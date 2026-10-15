@@ -78,8 +78,8 @@ export async function inventoryPythonSources(rootInput: string, config: PythonSo
 }
 
 export async function readStablePythonSources(root: string, config: PythonSourceConfig): Promise<PythonSourceFile[]> {
+  const initial = await inventoryPythonSources(root, config);
   const canonicalRoot = await realpath(resolve(root));
-  const initial = await inventoryPythonSources(canonicalRoot, config);
   const files: PythonSourceFile[] = [];
   for (const item of initial) {
     let stable = false;
@@ -91,7 +91,7 @@ export async function readStablePythonSources(root: string, config: PythonSource
       try {
         const before = await handle.stat();
         if (!sameStat(pathInfo, before) || !before.isFile() || before.size > config.maxFileBytes) continue;
-        const bytes = await handle.readFile();
+        const bytes = await readBounded(handle, config.maxFileBytes);
         const after = await handle.stat();
         const pathAfter = await checkedPath(item.absolute, canonicalRoot, false);
         stable = sameStat(before, after) && sameStat(after, pathAfter) && bytes.length === after.size && after.size === item.size && after.mtimeMs === item.mtimeMs && after.ino === item.ino;
@@ -106,6 +106,18 @@ export async function readStablePythonSources(root: string, config: PythonSource
   const finalInventory = await inventoryPythonSources(canonicalRoot, config);
   if (initial.length !== finalInventory.length || initial.some((file, i) => !sameInventory(file, finalInventory[i]))) throw new Error('Python source inventory changed during analysis.');
   return files;
+}
+
+async function readBounded(handle: Awaited<ReturnType<typeof open>>, limit: number): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(limit + 1);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset > limit) throw new Error(`Python source exceeds maxFileBytes (${limit}) while being read.`);
+  return buffer.subarray(0, offset);
 }
 
 function sameStat(a: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }, b: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number }) { return a.dev === b.dev && a.ino === b.ino && Number(a.size) === Number(b.size) && a.mtimeMs === b.mtimeMs; }
