@@ -373,7 +373,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
     const targetName = directReferenceName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
-    const bindingId = `dependency-use:${fact.file.path}:${fact.scope}:${fact.offset}:${fact.ordinal ?? ''}:${depIndex}:${symbol ?? targetName ?? '<dynamic>'}`;
+    const bindingId = dependencyBindingUseSite(fact.file.path, fact.scope, fact.ordinal ?? `offset:${fact.offset}:index:${depIndex}`);
     const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
     if (!fn) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
     sourceMappingUsage.record(`declaration:${fn.id}`, sourceMappingCategory(fn) ?? 'unverified');
@@ -478,7 +478,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = directReferenceName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
-      const bindingId = `dependency-use:${currentFile.path}:${currentKey}:${parameter.name}:${dependencyIndex}:${symbol ?? targetName ?? '<dynamic>'}`;
+      const bindingId = dependencyBindingUseSite(currentFile.path, String(current.properties.qualifiedName ?? ''), `param:${parameter.name}:${dependencyIndex}`);
       const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
       if (!next || !nextFile) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
@@ -548,14 +548,16 @@ function routeDependencies(route: RouteSpec): DependencyFact[] {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id);
   const offset = source?.startOffset ?? 0;
   for (const parameter of parameters) {
-    for (const [index, expression] of dependencyExpressions(parameter.default, route.handlerFile, scope, offset).concat(dependencyExpressions(parameter.annotation, route.handlerFile, scope, offset)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `${parameter.name}:${index}`, source });
+    for (const [index, expression] of dependencyExpressions(parameter.default, route.handlerFile, scope, offset).concat(dependencyExpressions(parameter.annotation, route.handlerFile, scope, offset)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `param:${parameter.name}:${index}`, source });
   }
   return result;
 }
 
 function makeDependencyFacts(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number, source?: AnalysisEvidence): DependencyFact[] {
-  return expressionsFromList(expression).map((item, index) => ({ expression: item, file, scope, offset, ordinal: String(index), source }));
+  return expressionsFromList(expression).map((item, index) => ({ expression: item, file, scope, offset, ordinal: `expression:${index}`, source }));
 }
+
+function dependencyBindingUseSite(path: string, scope: string, ordinal: string) { return `dependency-use:${path}:${scope}:${ordinal}`; }
 
 function decoratorArguments(decorator: ReturnType<typeof decoratorsOf>[number]) {
   const positional: PythonExpressionFact[] = [];
