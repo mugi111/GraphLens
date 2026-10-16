@@ -61,6 +61,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const projectedEdgesById = new Map<string, GraphEdge>();
   const issueIds = new Set<string>();
   const processedClosures = new Set<string>();
+  const codeGraphEdges = (sources.codeGraph?.edges ?? []).filter((edge) => ['calls', 'references', 'depends_on'].includes(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
+  const codeGraphNodeById = new Map((sources.codeGraph?.nodes ?? []).map((node) => [node.id, node]));
+  const codeGraphNodeIds = new Set(codeGraphNodeById.keys());
+  const codeGraphEdgeIds = new Set(codeGraphEdges.map((edge) => edge.id));
+  const codeGraphOutgoing = indexEdges(codeGraphEdges, 'sourceId');
+  const codeGraphIncoming = indexEdges(codeGraphEdges, 'targetId');
+  const generationAdjacency = new WeakMap<ArchitectureInputGeneration, { byId: Map<string, GraphNode>; outgoing: Map<string, GraphEdge[]>; incoming: Map<string, GraphEdge[]> }>();
   const matchedPairs: Array<{ fast: GraphNode; spec: GraphNode; match: string }> = [];
   const ambiguousEndpointIds = new Set<string>();
   let totalVisits = 0;
@@ -334,11 +341,17 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
     if (!generation || processedClosures.has(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`)) return;
     processedClosures.add(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`);
-    const byId = new Map([...generation.nodes, ...(sources.codeGraph?.nodes ?? [])].map((node) => [node.id, node]));
-    const codeGraphEdges = sources.codeGraph?.edges.filter((edge) => edge.kind === 'calls' || edge.kind === 'references') ?? [];
-    const codeGraphNodeIds = new Set(sources.codeGraph?.nodes.map((node) => node.id) ?? []);
-    const codeGraphEdgeIds = new Set(codeGraphEdges.map((edge) => edge.id));
-    const closureEdges = [...generation.edges, ...codeGraphEdges];
+    let indexed = generationAdjacency.get(generation);
+    if (!indexed) {
+      const generationEdges = [...generation.edges].sort((a, b) => a.id.localeCompare(b.id));
+      indexed = {
+        byId: new Map([...codeGraphNodeById, ...generation.nodes.map((node) => [node.id, node] as const)]),
+        outgoing: indexEdges(generationEdges, 'sourceId'),
+        incoming: indexEdges(generationEdges, 'targetId'),
+      };
+      generationAdjacency.set(generation, indexed);
+    }
+    const { byId } = indexed;
     const allowedKinds = new Set(['api_endpoint', 'fastapi_route', 'openapi_operation', 'python_function', 'python_class', 'code.function', 'code.class', 'file', 'api_parameter', 'api_request_body', 'api_response', 'api_security_requirement', 'api_security_scheme', 'api_schema_reference', 'api_schema', 'sqlalchemy_model', 'sqlalchemy_table', 'frontend_file', 'frontend.http_request']);
     const allowedEdges = new Set(['exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'http_request']);
     const addNode = (node: GraphNode | undefined) => {
@@ -400,8 +413,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       }
     }
     addNode(endpoint);
-    const outgoing = (id: string) => closureEdges.filter((edge) => edge.sourceId === id && allowedEdges.has(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
-    const incoming = (id: string, kind: string) => closureEdges.filter((edge) => edge.targetId === id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
+    const outgoing = (id: string) => mergeIndexedEdges(indexed!.outgoing.get(id), codeGraphOutgoing.get(id)).filter((edge) => allowedEdges.has(edge.kind));
+    const incoming = (id: string, kind: string) => mergeIndexedEdges(indexed!.incoming.get(id), codeGraphIncoming.get(id)).filter((edge) => edge.kind === kind && allowedEdges.has(edge.kind));
     const callsQueue: Array<{ id: string; depth: number }> = [];
     const reachedClasses = new Set<string>();
     for (const edge of outgoing(endpoint.id)) {
@@ -500,6 +513,19 @@ function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>,
     if (!add(candidates[0]!, targets[0]!, method, level, confidence)) continue;
     fast.delete(candidates[0]!.id); spec.delete(targets[0]!.id);
   }
+}
+
+function indexEdges(edges: readonly GraphEdge[], endpoint: 'sourceId' | 'targetId'): Map<string, GraphEdge[]> {
+  const indexed = new Map<string, GraphEdge[]>();
+  for (const edge of edges) indexed.set(edge[endpoint], [...(indexed.get(edge[endpoint]) ?? []), edge]);
+  return indexed;
+}
+
+function mergeIndexedEdges(first: readonly GraphEdge[] = [], second: readonly GraphEdge[] = []): GraphEdge[] {
+  const byId = new Map<string, GraphEdge>();
+  for (const edge of first) byId.set(edge.id, edge);
+  for (const edge of second) if (!byId.has(edge.id)) byId.set(edge.id, edge);
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function stringProperty(node: GraphNode, key: string): string | undefined { const value = node.properties[key]; return typeof value === 'string' && value.length ? value : undefined; }
