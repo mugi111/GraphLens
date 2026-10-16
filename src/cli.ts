@@ -14,7 +14,6 @@ import { DatabaseSchemaService } from './application/database-schema-service.js'
 import { ArchitectureQueryService } from './application/architecture-query-service.js';
 import { CrossWorkspaceQueryService, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceArchitectureQuery } from './application/cross-workspace-query-service.js';
 import { ImpactQueryService, parseImpactQuery, type ImpactQuery } from './application/impact-query-service.js';
-import { demoAnalyzer } from './infrastructure/analyzers/demo-analyzer.js';
 import { pythonSourceAnalyzer } from './infrastructure/analyzers/python-source-analyzer.js';
 import { sqlAlchemyAnalyzer } from './infrastructure/analyzers/sqlalchemy-analyzer.js';
 import { fastApiAnalyzer } from './infrastructure/analyzers/fastapi-analyzer.js';
@@ -26,7 +25,7 @@ import { loadEnabledPlugins } from './infrastructure/plugins/plugin-loader.js';
 import { parsePluginSpec } from './infrastructure/plugins/package-spec.js';
 import { PluginManager } from './infrastructure/plugins/plugin-manager.js';
 
-type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean; demo: boolean };
+type ServerOptions = { command: 'server'; workspaces: string[]; codegraphCommand?: string; codegraphArgs: string[]; port: number; noOpen: boolean };
 type PluginCommand = { command: 'plugin-list'; json: boolean } | { command: 'plugin-add'; packageName: string; version: string } | { command: 'plugin-remove'; id: string };
 type ReadQueryCommand = { command: 'architecture-query'; query: CrossWorkspaceArchitectureQuery } | { command: 'impact-query'; query: ImpactQuery };
 export type CliCommand = ServerOptions | PluginCommand | ReadQueryCommand | { command: 'help'; topic?: 'plugin' | 'query' };
@@ -83,7 +82,7 @@ export function parseCommand(argv: string[]): CliCommand {
     }
     throw new CliUsageError('Usage: graphlens plugin <list [--json] | add <package>@<exact-version> | remove <plugin-id>>');
   }
-  const out: ServerOptions = { command: 'server', workspaces: [], codegraphArgs: [], port: 4174, noOpen: false, demo: false };
+  const out: ServerOptions = { command: 'server', workspaces: [], codegraphArgs: [], port: 4174, noOpen: false };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i]!;
     const next = (allowOption = false) => { const value = argv[++i]; if (!value || (!allowOption && value.startsWith('--'))) throw new Error(`${v} requires a value`); return value; };
@@ -92,14 +91,13 @@ export function parseCommand(argv: string[]): CliCommand {
     else if (v === '--codegraph-arg') out.codegraphArgs.push(next(true));
     else if (v === '--port') { out.port = Number(next()); if (!Number.isInteger(out.port) || out.port < 1 || out.port > 65535) throw new Error('Port must be between 1 and 65535.'); }
     else if (v === '--no-open') out.noOpen = true;
-    else if (v === '--demo') out.demo = true;
     else if (v === '--help' || v === '-h') return { command: 'help' };
     else throw new Error(`Unknown option: ${v}`);
   }
   return out;
 }
 
-function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --demo                         Load a clearly labelled local fixture graph\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
+function help(topic?: 'plugin' | 'query') { if (topic === 'plugin') return `GraphLens plugin management\n\nUsage: graphlens plugin list [--json]\n       graphlens plugin add <package>@<exact-version>\n       graphlens plugin remove <plugin-id>\n`; if (topic === 'query') return `GraphLens read-only query commands\n\nUsage: graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n\nImpact options:\n  --direction <dependents|dependencies|both>\n  --depth <1-8>\n  --limit <1-2000>\n  --includeInferred <true|false>\n  --include <evidence,diagnostics>\n`; return `GraphLens\n\nUsage: graphlens --workspace <path> [options]\n       graphlens query architecture --workspaces <id1,id2> [options]\n       graphlens query impact --workspaces <id1,id2> --node <node-id> [options]\n       graphlens plugin <list | add <package>@<exact-version> | remove <plugin-id>>\n\nOptions:\n  -w, --workspace <path>       Repeat for each workspace\n  --codegraph-command <command> Command that starts the CodeGraph MCP stdio server\n  --codegraph-arg <arg>         Repeatable MCP server argument\n  --port <port>                  Loopback port (default: 4174)\n  --no-open                      Do not open the browser\n`; }
 
 function queryArchitecture(query: CrossWorkspaceArchitectureQuery): void {
   const store = new GraphStore(resolve(process.cwd(), '.graphlens/graphlens.sqlite'), { readOnly: true });
@@ -141,7 +139,7 @@ async function runPlugin(command: PluginCommand): Promise<void> {
     const plugins = resolvePluginStorePath(databaseFile);
     if (command.command === 'plugin-list') return listPlugins(store, command.json);
     const registry = new AnalyzerRegistry();
-    if (command.command === 'plugin-add') { registry.register(demoAnalyzer); registry.register(pythonSourceAnalyzer); registry.register(sqlAlchemyAnalyzer); registry.register(fastApiAnalyzer); registry.register(openApiAnalyzer); registry.register(architectureAnalyzer); }
+    if (command.command === 'plugin-add') { registry.register(pythonSourceAnalyzer); registry.register(sqlAlchemyAnalyzer); registry.register(fastApiAnalyzer); registry.register(openApiAnalyzer); registry.register(architectureAnalyzer); }
     const manager = new PluginManager(plugins, store, registry);
     if (command.command === 'plugin-add') return addPlugin(manager, command.packageName, command.version);
     await removePlugin(manager, store, command.id);
@@ -155,7 +153,6 @@ async function runServer(options: ServerOptions) {
   const adapter = new CodeGraphAdapter({ command: options.codegraphCommand, args: options.codegraphArgs });
   const graph = new GraphService(store, adapter);
   const registry = new AnalyzerRegistry();
-  registry.register(demoAnalyzer);
   registry.register(pythonSourceAnalyzer);
   registry.register(sqlAlchemyAnalyzer);
   registry.register(fastApiAnalyzer);
@@ -168,7 +165,6 @@ async function runServer(options: ServerOptions) {
   const crossWorkspaceQuery = new CrossWorkspaceQueryService(store);
   const impactQuery = new ImpactQueryService(store);
   store.ensureWorkspaces(options.workspaces.map((path) => workspaceFor(path)));
-  if (options.demo && options.workspaces.length) await graph.sync(options.workspaces, true);
   const here = dirname(fileURLToPath(import.meta.url));
   const webRoot = resolve(here, 'web');
   if (!existsSync(webRoot)) throw new Error('Web assets missing. Install from the published package or run npm run build.');

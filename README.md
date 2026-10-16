@@ -54,7 +54,7 @@ Plugins are exact-version npm packages stored under `.graphlens/plugins/<plugin-
 
 **Security boundary:** package authors' analyzer code runs in-process with GraphLens permissions. This is not a sandbox. `--ignore-scripts` prevents npm lifecycle scripts, but it does not make imported plugin code safe; only install packages from sources you trust. GraphLens loads only packages already marked enabled in the selected database and never installs or updates packages automatically. Disabling/removing a plugin first clears its active graph contributions so they cannot remain visible after package removal.
 
-The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
+Startup records every supplied workspace even before it has an active generation. GraphLens does not generate placeholder graph data: graph views contain only results from analyzers run against registered workspaces. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
 
 ### Python source index
 
@@ -102,7 +102,7 @@ Use the additive analyzer endpoints to run and poll an analyzer:
 curl http://127.0.0.1:4174/api/v1/analyzers
 curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -H 'content-type: application/json' \
-  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.demo"}'
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.python-source"}'
 curl http://127.0.0.1:4174/api/v1/analysis-runs/<run-id>
 ```
 
@@ -127,12 +127,6 @@ graphlens --workspace /repo \
 The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens currently lists available tools for diagnostics only. It does not call a search/traversal tool and does not include a custom, undocumented `--graphlens-snapshot` protocol.
 
 The status API and UI explicitly report complete enumeration as unsupported, even after a successful MCP connection. No partial data is claimed as complete. This is the current acceptance-criterion blocker for direct CodeGraph graph import until CodeGraph provides a documented snapshot/export API.
-
-For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
-
-```sh
-npm start -- --workspace . --demo
-```
 
 ## Package development
 
