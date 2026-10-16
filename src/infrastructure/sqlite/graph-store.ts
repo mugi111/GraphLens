@@ -336,9 +336,11 @@ export class GraphStore implements ArchitectureInputProvider {
     });
     return read(workspaceId);
   }
-  architectureQueryPage(input: { workspace: string; root: 'endpoint' | 'handler' | 'model' | 'table' | 'finding'; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; includeEvidence: boolean }, offset: number) {
+  architectureQueryPage(input: { workspace: string; root: 'endpoint' | 'handler' | 'model' | 'table' | 'finding'; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; includeEvidence: boolean }, offset: number, expectedSnapshotId?: string) {
     const read = this.db.transaction(() => {
       const activeGenerations = this.activeGenerationVector([input.workspace]);
+      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
+      if(expectedSnapshotId!==undefined&&expectedSnapshotId!==projectionSnapshotId)throw new Error('ARCHITECTURE_SNAPSHOT_CHANGED');
       const active = this.db.prepare(`SELECT w.id workspace_id,w.name,g.id generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.architecture'`).get(input.workspace) as any;
       if (!active) return undefined;
       const generationId = Number(active.generation_id);
@@ -372,7 +374,6 @@ export class GraphStore implements ArchitectureInputProvider {
         if (edgeRows.length > 200) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
       }
       const projection=this.unifiedPage(selectedIds.map((id)=>({workspaceId:input.workspace,id})),edgeRows.map((edge)=>({workspaceId:edge.workspace_id,id:edge.id})),input.includeEvidence);
-      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
       const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
       if (diagnostics.length > 1000) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
       const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id LIMIT 257').all(generationId) as any[]).map((row)=>({analyzerId:row.analyzerId,generationId:Number(row.generationId)}));
@@ -380,9 +381,11 @@ export class GraphStore implements ArchitectureInputProvider {
     });
     return read();
   }
-  databaseQueryPage(input: { workspace: string; root: 'table' | 'model'; namespace?: string; schema?: string; table?: string; model?: string; limit: number; includeEvidence: boolean }, offset: number) {
+  databaseQueryPage(input: { workspace: string; root: 'table' | 'model'; namespace?: string; schema?: string; table?: string; model?: string; limit: number; includeEvidence: boolean }, offset: number, expectedSnapshotId?: string) {
     const read = this.db.transaction(() => {
       const activeGenerations = this.activeGenerationVector([input.workspace]);
+      const projectionSnapshotId = createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
+      if(expectedSnapshotId!==undefined&&expectedSnapshotId!==projectionSnapshotId)throw new Error('DATABASE_SNAPSHOT_CHANGED');
       const active = this.db.prepare(`SELECT w.id workspace_id,w.name,g.id generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.sqlalchemy'`).get(input.workspace) as any;
       if (!active) return undefined;
       const generationId = Number(active.generation_id);
@@ -448,7 +451,6 @@ export class GraphStore implements ArchitectureInputProvider {
       const selectedIds=[...selectedNodeIds];
       const edgeRows=[...selectedEdges.values()];
       const projection=this.unifiedPage(selectedIds.map((id)=>({workspaceId:input.workspace,id})),edgeRows.map((edge)=>({workspaceId:edge.workspace_id,id:edge.id})),input.includeEvidence);
-      const projectionSnapshotId=createHash('sha256').update(JSON.stringify(activeGenerations)).digest('base64url');
       const diagnostics=(this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
       if(diagnostics.length>1000)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
       return {snapshot:{workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes:projection.nodes,edges:projection.edges,evidence:[...projection.nodes.flatMap((node)=>node.evidence??[]),...projection.edges.flatMap((edge)=>edge.evidence??[])],diagnostics,activeGenerations,projectionSnapshotId} satisfies DatabaseSchemaSnapshot,rootIds,totalRootCount};
@@ -526,7 +528,7 @@ export class GraphStore implements ArchitectureInputProvider {
     return read.deferred(requestedWorkspaceIds);
   }
   /** Select one federation root page and all participants for its contract keys in SQL before payload hydration. */
-  crossWorkspaceArchitecturePage(workspaceIds: readonly string[], query: { root: 'contract' | 'endpoint'; namespace?: string; method?: string; path?: string; workspace?: string; depth: number; limit: number; offset: number }) {
+  crossWorkspaceArchitecturePage(workspaceIds: readonly string[], query: { root: 'contract' | 'endpoint'; namespace?: string; method?: string; path?: string; workspace?: string; depth: number; limit: number; offset: number }, expectedSnapshotId?: string) {
     if (!Array.isArray(workspaceIds) || workspaceIds.length < 2 || workspaceIds.length > 16 || new Set(workspaceIds).size !== workspaceIds.length) throw new Error('Cross-workspace snapshot requires 2–16 unique workspace IDs.');
     const requested = [...workspaceIds].sort();
     return this.db.transaction(() => {
@@ -536,6 +538,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const activeRows = this.db.prepare(`SELECT a.workspace_id,w.name,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id IN (${ph}) AND a.analyzer_id='builtin.architecture' ORDER BY a.workspace_id`).all(...requested) as any[];
       const generationVector = this.activeGenerationVector(requested);
       const snapshotId = createHash('sha256').update(JSON.stringify({ requested, generationVector })).digest('hex');
+      if(expectedSnapshotId!==undefined&&expectedSnapshotId!==snapshotId)throw new Error('CROSS_WORKSPACE_SNAPSHOT_CHANGED');
       const missingArchitectureWorkspaceIds = requested.filter((id)=>!activeRows.some((row)=>row.workspace_id===id));
       if (activeRows.length < 2) {
         const empty = { snapshotId, requestedWorkspaceIds: requested, activeGenerationVector:generationVector, generations:[], missingArchitectureWorkspaceIds } satisfies CrossWorkspaceSnapshot;

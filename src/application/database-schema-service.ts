@@ -39,7 +39,8 @@ export class DatabaseSchemaService {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
     let page: ReturnType<GraphStore['databaseQueryPage']>;
-    try { page = this.store.databaseQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
+    try { page = this.store.databaseQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0, cursor?.projectionSnapshotId) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
+      if (error instanceof Error && error.message === 'DATABASE_SNAPSHOT_CHANGED') throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', error.message, 422);
       throw error;
     }

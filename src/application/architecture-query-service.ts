@@ -23,7 +23,8 @@ export class ArchitectureQueryService {
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.architecture' || cursor.filters !== filterHash)) throw new ArchitectureQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     let page: ReturnType<GraphStore['architectureQueryPage']>;
-    try { page = this.store.architectureQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0) as ReturnType<GraphStore['architectureQueryPage']>; } catch (error) {
+    try { page = this.store.architectureQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0, cursor?.projectionSnapshotId) as ReturnType<GraphStore['architectureQueryPage']>; } catch (error) {
+      if (error instanceof Error && error.message === 'ARCHITECTURE_SNAPSHOT_CHANGED') throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
       throw error;
     }
