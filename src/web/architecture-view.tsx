@@ -1,19 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import cytoscape, { type Core } from 'cytoscape';
 import './architecture.css';
-import { SourceEvidenceButton } from './source-viewer.js';
+import { ProvenanceInspector } from './provenance-inspector.js';
+import { SourceStatePanel } from './source-state.js';
 
 type Workspace = { id: string; name: string; path: string };
 type Root = 'endpoint' | 'handler' | 'model' | 'table' | 'finding';
 type Level = 'DIRECT' | 'DERIVED' | 'INFERRED';
 type Evidence = { id: string; subjectKind: 'node' | 'edge'; subjectId: string; level: Level; type: string; uri?: string; line?: number; detail?: string; provenance?: Record<string, unknown>; inputGenerations?: string[] };
-type ItemBase = { id: string; workspaceId: string; kind: string; properties: Record<string, unknown>; evidenceCount: number; evidence?: Evidence[]; level: Level };
+type Owner = { analyzerId: string; generationId: number };
+type ItemBase = { id: string; workspaceId: string; kind: string; properties: Record<string, unknown>; evidenceCount: number; evidence?: Evidence[]; level: Level; analyzerId?: string; generationId?: number; contributors?: Owner[]; propertySources?: Record<string, Owner[]>; propertyConflicts?: Array<{ property: string; values: Array<{ value: unknown; owner: Owner }> }> };
 type NodeItem = ItemBase & { label: string; sourceId?: never; targetId?: never };
 type EdgeItem = ItemBase & { sourceId: string; targetId: string; label?: string };
 type Item = NodeItem | EdgeItem;
 type Diagnostic = { code?: string; severity: 'info' | 'warning' | 'error'; message: string; uri?: string; line?: number; detail?: Record<string, unknown> };
 type InputGeneration = { analyzerId: string; generationId: number };
-type Result = { workspace: { id: string; name: string }; analysis: { analyzerId: string; analyzerVersion: string; generationId: number; runId: string; sourceRevision?: string; completedAt: string; inputGenerations: InputGeneration[]; diagnostics: { total: number; info: number; warning: number; error: number } }; query: { root: Root; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; depth: number }; page: { limit: number; totalRootCount: number; rootCount: number; nextCursor?: string }; rootIds: string[]; nodes: Item[]; edges: Item[]; diagnostics?: Diagnostic[] };
+type Result = { workspace: { id: string; name: string }; activeSnapshotId?: string; analysis: { analyzerId: string; analyzerVersion: string; generationId: number; runId: string; sourceRevision?: string; completedAt: string; inputGenerations: InputGeneration[]; diagnostics: { total: number; info: number; warning: number; error: number } }; query: { root: Root; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; depth: number }; page: { limit: number; totalRootCount: number; rootCount: number; nextCursor?: string }; rootIds: string[]; nodes: Item[]; edges: Item[]; diagnostics?: Diagnostic[] };
 type Filters = { workspace: string; root: Root; namespace: string; method: string; path: string; finding: '' | 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; includeEvidence: boolean; includeDiagnostics: boolean };
 const roots: Root[] = ['endpoint', 'handler', 'model', 'table', 'finding'];
 const initial: Filters = { workspace: '', root: 'endpoint', namespace: '', method: '', path: '', finding: '', limit: 25, depth: 3, includeEvidence: true, includeDiagnostics: false };
@@ -67,7 +69,7 @@ function parseResult(value: unknown): Result {
       value.rootIds.some(id => !nodes.some(node => node.id === id)) || edges.some(edge => !nodes.some(node => node.id === edge.sourceId) || !nodes.some(node => node.id === edge.targetId))) throw new Error('The architecture API returned invalid graph data.');
   const analysis = value.analysis, page = value.page;
   if (value.diagnostics !== undefined && !(value.diagnostics as unknown[]).every(isDiagnostic)) throw new Error('The architecture API returned invalid diagnostics.');
-  return { workspace: value.workspace as Result['workspace'], analysis: { ...analysis, inputGenerations: inputs as InputGeneration[], diagnostics: analysis.diagnostics as Result['analysis']['diagnostics'] }, query: value.query as Result['query'], page: page as Result['page'], rootIds: value.rootIds as string[], nodes, edges, ...(value.diagnostics === undefined ? {} : { diagnostics: value.diagnostics as Diagnostic[] }) };
+  return { workspace: value.workspace as Result['workspace'], ...(isText(value.activeSnapshotId) ? { activeSnapshotId: value.activeSnapshotId } : {}), analysis: { ...analysis, inputGenerations: inputs as InputGeneration[], diagnostics: analysis.diagnostics as Result['analysis']['diagnostics'] }, query: value.query as Result['query'], page: page as Result['page'], rootIds: value.rootIds as string[], nodes, edges, ...(value.diagnostics === undefined ? {} : { diagnostics: value.diagnostics as Diagnostic[] }) };
 }
 function parseNode(value: unknown): NodeItem { validateItem(value); if (!isRecord(value) || !isText(value.label)) throw new Error('The architecture API returned an invalid node.'); return value as NodeItem; }
 function parseEdge(value: unknown): EdgeItem { validateItem(value); if (!isRecord(value) || !isText(value.sourceId) || !isText(value.targetId)) throw new Error('The architecture API returned an invalid edge.'); return value as EdgeItem; }
@@ -187,6 +189,7 @@ export function ArchitectureView({ workspaces }: { workspaces: Workspace[] }) {
   return <section className="architecture-view" aria-labelledby="architecture-title">
     <div className="architecture-heading"><div><p className="eyebrow">ANALYSIS SNAPSHOT</p><h1 id="architecture-title">Architecture</h1><p className="muted">Explore generated contracts and their source evidence.</p></div><p className="snapshot-meta">{result ? `Generation ${result.analysis.generationId}` : 'Workspace architecture'}</p></div>
     <FilterBar workspaces={workspaces} filters={draftFilters} onChange={changeDraft} onSubmit={applyFilters} loading={loading} />
+    {filters.workspace && <SourceStatePanel workspaceId={filters.workspace} graphSnapshotId={result?.activeSnapshotId} refreshGraph={() => void load(undefined, { type: 'restart' })} mode="architecture" architectureGeneration={result?.analysis.generationId} codeGraphInput={result?.analysis.inputGenerations.find(input => input.analyzerId === 'builtin.codegraph')?.generationId}/>}
     {error && <div className="architecture-message error-message" role="alert"><strong>{error.status === 404 ? 'No active architecture snapshot' : error.status === 409 ? 'Snapshot changed' : error.status === 422 ? 'Query is too large' : 'Could not load architecture'}</strong><p>{error.message}</p>{error.status === 404 && <p>Run the FastAPI, OpenAPI, or SQLAlchemy analyzer, then run the architecture analyzer.</p>}{error.status === 409 && <button onClick={() => void load(undefined, { type: 'restart' })}>Restart paging</button>}{error.status === 422 && <p>Reduce the root limit or graph depth, then retry.</p>}</div>}
     {loading && <p className="architecture-message" role="status">Loading architecture snapshot…</p>}
     {!loading && !error && result && result.rootIds.length === 0 && <p className="architecture-message" role="status">No roots match these filters. Change the root type or filters.</p>}
@@ -228,18 +231,6 @@ function AccessibleGraph({ items, edges, onSelect, selectedId }: { items: Item[]
 }
 
 function Inspector({ item, inputs, analysis }: { item?: Item; inputs: Result['analysis']['inputGenerations']; analysis: Result['analysis'] }) {
-  return <aside className="architecture-inspector"><details open><summary>Selection details</summary>{!item ? <p className="muted">Select a node or relationship in the graph or lists.</p> : <><p className="eyebrow">{item.kind.replaceAll('_', ' ')}</p><h3>{item.label ?? item.id}</h3><p>Evidence level: <strong>{item.level}</strong></p><p>Evidence count: {item.evidenceCount}</p>{item.sourceId && <p>Relationship: <code>{item.sourceId} → {item.targetId}</code></p>}<h3>Properties and evidence</h3><pre>{JSON.stringify({ properties: item.properties, evidence: item.evidence ?? [] }, null, 2)}</pre>{item.evidence?.map(entry => { const sources = architectureEvidenceSources(entry, item.workspaceId, inputs); return <p key={entry.id}><code>{entry.uri ?? 'No source location recorded'}</code><br/>{sources.length ? sources.map(source => <SourceEvidenceButton key={`${source.analyzerId}:${source.generationId}:${source.evidenceId}`} source={source}/>) : <span>Source file unavailable for this evidence.</span>}</p>; })}<h3>Analysis provenance</h3><p>Generation: {analysis.generationId}</p><p>Source revision: <code>{analysis.sourceRevision ?? 'not provided'}</code></p><ul>{inputs.map(input => <li key={input.analyzerId}><code>{input.analyzerId} #{input.generationId}</code></li>)}</ul></>}</details></aside>;
-}
-function architectureEvidenceSources(evidence: Evidence, workspaceId: string, inputs: Result['analysis']['inputGenerations']) {
-  const direct = evidence as Evidence & { analyzerId?: string; generationId?: number };
-  if (evidence.uri && typeof direct.analyzerId === 'string' && Number.isSafeInteger(direct.generationId) && typeof evidence.id === 'string') return [{ workspaceId, analyzerId: direct.analyzerId, generationId: direct.generationId!, evidenceId: evidence.id }];
-  const provenance = evidence.provenance;
-  if (provenance && typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') return [{ workspaceId, analyzerId: provenance.analyzerId, generationId: provenance.generationId, evidenceId: provenance.sourceEvidenceId }];
-  if (provenance && Array.isArray(provenance.sources)) return provenance.sources.flatMap((source) => {
-    if (!source || typeof source !== 'object') return [];
-    const value = source as Record<string, unknown>; const generation = inputs.find(input => input.analyzerId === value.analyzerId);
-    return generation && typeof value.analyzerId === 'string' && typeof value.evidenceId === 'string' ? [{ workspaceId, analyzerId: value.analyzerId, generationId: generation.generationId, evidenceId: value.evidenceId }] : [];
-  });
-  return [];
+  return <aside className="architecture-inspector"><details open><summary>Selection details</summary>{!item ? <p className="muted">Select a node or relationship in the graph or lists.</p> : <><p className="eyebrow">{item.kind.replaceAll('_', ' ')}</p><h3>{item.label ?? item.id}</h3><p>Evidence level: <strong>{item.level}</strong></p><p>Evidence count: {item.evidenceCount}</p>{item.sourceId && <p>Relationship: <code>{item.sourceId} → {item.targetId}</code></p>}<ProvenanceInspector item={item}/><h3>Analysis generation</h3><p>Generation: {analysis.generationId}</p><p>Source revision: <code>{analysis.sourceRevision ?? 'not provided'}</code></p><ul>{inputs.map(input => <li key={input.analyzerId}><code>{input.analyzerId} #{input.generationId}</code></li>)}</ul></>}</details></aside>;
 }
 function Diagnostics({ diagnostics, counts }: { diagnostics: Diagnostic[]; counts: Result['analysis']['diagnostics'] }) { return <section className="diagnostics"><h2>Related diagnostics <span>{diagnostics.length} shown · {counts.warning} warnings, {counts.error} errors, {counts.total} generation-wide</span></h2>{diagnostics.length ? <ul>{diagnostics.map((item, i) => <li key={i}><strong>{item.severity} · {item.code ?? 'Diagnostic'}</strong><p>{item.message}</p>{item.uri && <code>{item.uri}{item.line ? `:${item.line}` : ''}</code>}</li>)}</ul> : <p className="muted">No related diagnostics for this page.</p>}</section>; }

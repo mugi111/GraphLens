@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ImpactEdge, ImpactNode, ImpactResult } from './impact-types.js';
 import { SourceEvidenceButton } from './source-viewer.js';
+import { ProvenanceInspector } from './provenance-inspector.js';
 
 export function ImpactInspector({ item, result }: { item?: ImpactNode | ImpactEdge; result: ImpactResult }) {
   const workspaceName = (id: string) => result.scope.workspaces.find((workspace) => workspace.id === id)?.name ?? id;
@@ -15,6 +16,7 @@ export function ImpactInspector({ item, result }: { item?: ImpactNode | ImpactEd
     {item && <>
       <h3>{'label' in item ? item.label : item.kind}</h3>
       <p>{'scope' in item ? item.scope : ''} · {'kind' in item ? item.kind : ''} · {'level' in item ? item.level : ''}</p>
+      <ProvenanceInspector item={{ ...item, workspaceId: 'workspaceId' in item ? item.workspaceId : item.sourceWorkspaceId, evidence: (evidence ?? []).map(entry => ({ id: entry.id, type: entry.type, level: entry.level, provenance: { sources: entry.sourceReferences ? entry.sourceReferences.flatMap(source => source.evidenceIds.map(evidenceId => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceId }))) : entry.sources.flatMap(source => source.evidenceIds.map(evidenceId => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceId }))) } })) }} compact/>
       {selectedNode && <><p>{selectedNode.impactRole} · distance {selectedNode.distance}</p>{generation && <section><h3>Architecture generation</h3><dl><dt>Workspace</dt><dd>{workspaceName(generation.workspaceId)}</dd><dt>Analyzer</dt><dd>{generation.analyzerId}</dd><dt>Generation</dt><dd>{generation.generationId}</dd><dt>Run</dt><dd><code>{generation.runId}</code></dd><dt>Completed</dt><dd>{generation.completedAt}</dd>{generation.sourceRevision && <><dt>Revision</dt><dd>{generation.sourceRevision}</dd></>}</dl></section>}</>}
       {selectedEdge && <dl><dt>Source</dt><dd><code>{selectedEdge.sourceId}</code></dd><dt>Target</dt><dd><code>{selectedEdge.targetId}</code></dd><dt>Relationship</dt><dd>{selectedEdge.kind}</dd><dt>Scope</dt><dd>{selectedEdge.scope === 'cross-workspace' ? 'Cross-workspace transition' : 'Within workspace'}</dd></dl>}
       <details open><summary>Properties</summary><pre>{JSON.stringify(item.properties, null, 2)}</pre></details>
