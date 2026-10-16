@@ -7,7 +7,7 @@ import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence, Analyzer, A
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { apiEndpointUri } from '../../core/api-identity.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
-import { requireSourceCatalog, semanticSourceRevision } from './source-catalog-adoption.js';
+import { requireSourceCatalog, semanticSourceRevision, SourceMappingUsage } from './source-catalog-adoption.js';
 
 const ids = new GraphIdentityFactory();
 const extensions = new Set(['.js', '.jsx', '.ts', '.tsx']);
@@ -31,6 +31,7 @@ export const frontendHttpAnalyzer: Analyzer = {
     const sourceCatalog = requireSourceCatalog(context, decodedSources.map(({ file, source }) => ({ path: file.path, source, bytes: file.bytes, hash: file.hash })));
     const catalogFiles = new Map(sourceCatalog.files.map((file) => [file.relativePath, file]));
     const nodes: GraphNode[] = [], edges: GraphEdge[] = [], evidence: AnalysisEvidence[] = [], diagnostics: AnalysisDiagnostic[] = [];
+    const sourceMappingUsage = new SourceMappingUsage();
     const nodeMap = new Map<string, GraphNode>();
     const addNode = (kind: string, key: string, label: string, properties: Record<string, unknown>) => {
       const id = kind === 'frontend_file' ? catalogFiles.get(key)?.fileId ?? ids.node(context.workspace.id, key, kind) : ids.node(context.workspace.id, key, kind);
@@ -56,6 +57,7 @@ export const frontendHttpAnalyzer: Analyzer = {
         throw new Error(`Frontend source '${file.path}' has a parse error at line ${lineOfDiagnostic(ast, diagnostic)}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}.`);
       }
       const fileNode = addNode('frontend_file', file.path, file.path, { path: file.path });
+      sourceMappingUsage.record(`file:${catalogFiles.get(file.path)!.fileId}`, 'mapped');
       addEvidence('node', fileNode.id, `file:${file.path}`, file.path, 1, 'frontend.file');
       const astBudget = { visits: 0 };
       const shadowed = hasFetchBinding(ast, file.path, astBudget);
@@ -94,7 +96,7 @@ export const frontendHttpAnalyzer: Analyzer = {
     if (signature(after) !== before) throw new Error('Frontend source inventory or content changed during analysis.');
     const sourceRevision = semanticSourceRevision('builtin.frontend-http', 'frontend-http-codegraph-v2+typescript-scan-v1+identity-map-v1', config, decodedSources.map(({ file, source }) => ({ ...file, source })), sourceCatalog);
     if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new Error('Computed frontend HTTP source revision does not match the requested revision.');
-    return { sourceRevision, inputGenerations: [{ analyzerId: 'builtin.codegraph', generationId: sourceCatalog.input.generationId }], nodes, edges, evidence, diagnostics };
+    return { sourceRevision, inputGenerations: [{ analyzerId: 'builtin.codegraph', generationId: sourceCatalog.input.generationId }], sourceMappingSummary: sourceMappingUsage.summary(sourceCatalog.input.generationId), nodes, edges, evidence, diagnostics };
 
     function diag(code: string, message: string, uri: string, line: number) {
       if (diagnostics.length >= MAX_DIAGNOSTICS) throw new Error(`Frontend HTTP diagnostics exceed ${MAX_DIAGNOSTICS}.`);
