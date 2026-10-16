@@ -1,7 +1,8 @@
 import type { GraphEdge, GraphNode, Workspace } from './graph.js';
+import type { SourceCatalogReader } from './source-identity.js';
 
 /** IDs owned by GraphLens itself and unavailable to installed packages. */
-export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi', 'builtin.architecture'] as const;
+export const BUILTIN_ANALYZER_IDS = ['builtin.demo', 'builtin.codegraph', 'builtin.python-source', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.openapi', 'builtin.frontend-http', 'builtin.architecture'] as const;
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
@@ -25,12 +26,21 @@ export type AnalysisContext = {
   config: Record<string, JsonValue>;
   /** Optional read-only access to active, workspace-scoped analyzer generations. */
   architectureInputProvider?: ArchitectureInputReader;
+  /** Bounded read-only access to the active CodeGraph source catalog for this workspace. */
+  sourceCatalogReader?: SourceCatalogReader;
   signal?: { aborted: boolean };
 };
 
 export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
+export type SourceMappingSummary = {
+  contractVersion: 'source-mapping-summary-v1';
+  input: { analyzerId: 'builtin.codegraph'; generationId: number };
+  counts: { mapped: number; unresolved: number; unverified: number; ambiguous: number; unsupported: number };
+};
 export type ArchitectureInputGeneration = AnalysisInputGeneration & {
   sourceRevision?: string;
+  identityVersion?: number;
+  inputGenerations?: readonly AnalysisInputGeneration[];
   nodes: readonly GraphNode[];
   edges: readonly GraphEdge[];
   evidence: readonly AnalysisEvidence[];
@@ -54,6 +64,9 @@ export type AnalysisEvidence = {
   id: string;
   subjectKind: EvidenceSubjectKind;
   subjectId: string;
+  /** Exact active contribution owner attached by GraphLens storage projections. */
+  analyzerId?: string;
+  generationId?: number;
   level: EvidenceLevel;
   type: string;
   uri?: string;
@@ -83,6 +96,8 @@ export type AnalysisResult = {
   sourceRevision?: string;
   /** Exact active generations consumed to derive this result. */
   inputGenerations?: AnalysisInputGeneration[];
+  /** Optional bounded summary of source bindings used by this semantic output. */
+  sourceMappingSummary?: SourceMappingSummary;
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
@@ -97,6 +112,7 @@ export type Analyzer = {
 /** Machine-readable failures returned by the analyzer host. */
 export type AnalysisErrorCode =
   | 'ANALYZER_NOT_FOUND'
+  | 'ANALYZER_RETIRED'
   | 'API_VERSION_UNSUPPORTED'
   | 'DUPLICATE_ANALYZER'
   | 'INVALID_DESCRIPTOR'

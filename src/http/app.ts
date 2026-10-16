@@ -9,11 +9,45 @@ import { DatabaseSchemaError, type DatabaseSchemaQuery, type DatabaseSchemaServi
 import { ArchitectureQueryError, parseArchitectureQuery, type ArchitectureQueryService } from '../application/architecture-query-service.js';
 import { CrossWorkspaceQueryError, parseCrossWorkspaceArchitectureQuery, type CrossWorkspaceQueryService } from '../application/cross-workspace-query-service.js';
 import { ImpactQueryError, parseImpactQuery, type ImpactQueryService } from '../application/impact-query-service.js';
+import { parseWorkspaceGraphQuery, WorkspaceGraphError, type WorkspaceQueryService } from '../application/workspace-query-service.js';
+import { SourceNavigationError, SourceNavigationService } from '../application/source-navigation-service.js';
+import { CodeGraphQueryError, CodeGraphQueryService, parseCodeGraphQuery } from '../application/code-graph-query-service.js';
 
-export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspacePaths: string[], webRoot: string) {
+export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphService: GraphService, analyzerRunner: AnalyzerRunner, databaseSchema: DatabaseSchemaService, architectureQuery: ArchitectureQueryService, crossWorkspaceQuery: CrossWorkspaceQueryService, impactQuery: ImpactQueryService, workspaceQuery: WorkspaceQueryService, workspacePaths: string[], webRoot: string, codegraphSnapshot: { configured: boolean; packageVersion?: string; runtimeSupported: boolean; detail: string }) {
   const app = new Hono();
-  app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: await adapter.status() }));
+  const sourceNavigation = new SourceNavigationService(store);
+  const codeGraphQuery = new CodeGraphQueryService(store);
+  app.get('/api/v1/status', async (c) => c.json({ ...(store.status() as object), codegraph: { mcp: await adapter.status(), snapshot: codegraphSnapshot } }));
+  app.get('/api/v1/source', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    const params = new URL(c.req.url).searchParams;
+    const allowed = new Set(['workspace', 'analyzer', 'generation', 'evidence']);
+    const values = new Map<string, string>();
+    for (const [key, value] of params) {
+      if (!allowed.has(key) || values.has(key)) return c.json({ error: 'Source requests require exactly one workspace, analyzer, generation, and evidence parameter.', code: 'INVALID_SOURCE_QUERY' }, 400);
+      values.set(key, value);
+    }
+    if (values.size !== 4 || [...values.values()].some((value) => !value || value.length > 512 || value.includes('\0'))) return c.json({ error: 'Source requests require exactly one workspace, analyzer, generation, and evidence parameter.', code: 'INVALID_SOURCE_QUERY' }, 400);
+    const generation = values.get('generation')!;
+    if (!/^[1-9]\d{0,14}$/.test(generation) || !Number.isSafeInteger(Number(generation))) return c.json({ error: 'generation must be a positive safe integer.', code: 'INVALID_SOURCE_QUERY' }, 400);
+    try { return c.json(await sourceNavigation.open({ workspaceId: values.get('workspace')!, analyzerId: values.get('analyzer')!, generationId: Number(generation), evidenceId: values.get('evidence')! })); }
+    catch (error) {
+      if (error instanceof SourceNavigationError) return c.json({ error: error.message, code: error.code }, error.status);
+      return c.json({ error: 'The current working source could not be opened.', code: 'SOURCE_FILE_UNAVAILABLE' }, 404);
+    }
+  });
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
+  app.get('/api/v1/workspaces/:workspaceId/reanalysis', (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    try {
+      const state = store.sourceReanalysisState(workspaceId);
+      return state ? c.json(state) : c.json({ error: 'Workspace not found.', code: 'WORKSPACE_NOT_FOUND' }, 404);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'SOURCE_REANALYSIS_STATE_TOO_LARGE') return c.json({ error: 'Workspace source state exceeds the 64 KiB response limit.', code: 'SOURCE_STATE_TOO_LARGE' }, 422);
+      if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Workspace active generation metadata exceeds the source state limit.', code: 'SOURCE_STATE_LIMIT_EXCEEDED' }, 422);
+      throw error;
+    }
+  });
   app.post('/api/v1/sync', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaces?: string[] };
     const paths = Array.isArray(body.workspaces) ? body.workspaces : workspacePaths;
@@ -27,7 +61,7 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     const body = await c.req.json().catch(() => ({})) as { workspaceId?: string; analyzerId?: string; sourceRevision?: string; config?: Record<string, never> };
     if (typeof body.workspaceId !== 'string' || typeof body.analyzerId !== 'string' || (body.sourceRevision !== undefined && typeof body.sourceRevision !== 'string') || (body.config !== undefined && (!body.config || Array.isArray(body.config)))) return c.json({ error: 'workspaceId and analyzerId are required; config must be an object.' }, 400);
     try { return c.json(analyzerRunner.start({ workspaceId: body.workspaceId, analyzerId: body.analyzerId, sourceRevision: body.sourceRevision, config: body.config }), 202); }
-    catch (error) { if (error instanceof AnalysisError) return c.json({ error: error.message, code: error.code, diagnostics: error.diagnostics }, error.code === 'RUN_ALREADY_ACTIVE' ? 409 : error.code === 'WORKSPACE_NOT_FOUND' || error.code === 'ANALYZER_NOT_FOUND' ? 404 : 400); throw error; }
+    catch (error) { if (error instanceof AnalysisError) return c.json({ error: error.message, code: error.code, diagnostics: error.diagnostics }, error.code === 'ANALYZER_RETIRED' ? 410 : error.code === 'RUN_ALREADY_ACTIVE' ? 409 : error.code === 'WORKSPACE_NOT_FOUND' || error.code === 'ANALYZER_NOT_FOUND' ? 404 : 400); throw error; }
   });
   app.get('/api/v1/analysis-runs', (c) => c.json({ runs: store.analysisRuns(c.req.query('workspace'), runLimit(c.req.query('limit'))) }));
   app.get('/api/v1/analysis-runs/:runId', (c) => { const run = store.analysisRun(c.req.param('runId')); return run ? c.json({ ...run, diagnostics: store.analysisDiagnostics(run.id) }) : c.json({ error: 'Analysis run not found' }, 404); });
@@ -64,8 +98,18 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
       return c.json({ error: 'Impact query failed.', code: 'IMPACT_QUERY_FAILED' }, 500);
     }
   });
-  app.get('/api/v1/graph', (c) => c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))));
-  app.get('/api/v1/nodes/:nodeId', (c) => { const node = store.node(c.req.param('nodeId')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); });
+  app.get('/api/v1/workspace-graph', (c) => {
+    const parsed = parseWorkspaceGraphQuery(new URL(c.req.url).searchParams);
+    if ('error' in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
+    try { return c.json(workspaceQuery.query(parsed.query)); }
+    catch (error) { if (error instanceof WorkspaceGraphError) return c.json({ error: error.message, code: error.code }, error.status); return c.json({ error: 'Workspace graph query failed.', code: 'WORKSPACE_GRAPH_QUERY_FAILED' }, 500); }
+  });
+  app.get('/api/v1/code-graph', (c) => {
+    const parsed=parseCodeGraphQuery(new URL(c.req.url).searchParams);if('error' in parsed)return c.json({error:parsed.error,code:parsed.code},400);
+    try{return c.json(codeGraphQuery.query(parsed.query));}catch(error){if(error instanceof CodeGraphQueryError)return c.json({error:error.message,code:error.code},error.status);return c.json({error:'Code graph query failed.',code:'CODE_GRAPH_QUERY_FAILED'},500);}
+  });
+  app.get('/api/v1/graph', (c) => { try { return c.json(store.graph(c.req.query('workspace'), graphLimit(c.req.query('limit')))); } catch (error) { if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Graph response exceeds a hard size limit; no partial result was returned.', code: 'GRAPH_QUERY_TOO_LARGE' }, 422); return c.json({ error: 'Graph query failed.', code: 'GRAPH_QUERY_FAILED' }, 500); } });
+  app.get('/api/v1/nodes/:nodeId', (c) => { try { const node = store.node(c.req.param('nodeId'), c.req.query('workspace')); return node ? c.json(node) : c.json({ error: 'Node not found' }, 404); } catch (error) { if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Node response exceeds a hard size limit.', code: 'GRAPH_QUERY_TOO_LARGE' }, 422); return c.json({ error: 'Node query failed.', code: 'GRAPH_QUERY_FAILED' }, 500); } });
   app.use('/*', serveStatic({ root: webRoot }));
   app.get('*', serveStatic({ path: `${webRoot}/index.html` }));
   return app;

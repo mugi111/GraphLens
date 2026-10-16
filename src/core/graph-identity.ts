@@ -17,6 +17,26 @@ export class GraphIdentityFactory {
   workspace(path: string): string {
     return hash('workspace', canonicalUri(path));
   }
+
+  repository(workspaceId: string, repositoryKey: string): string {
+    return sourceHash('repository', workspaceId, repositoryKey);
+  }
+
+  directory(workspaceId: string, repositoryKey: string, relativePath: string): string {
+    return sourceHash('directory', workspaceId, repositoryKey, relativePath);
+  }
+
+  file(workspaceId: string, repositoryKey: string, relativePath: string): string {
+    return sourceHash('file', workspaceId, repositoryKey, relativePath);
+  }
+
+  sourceSymbol(workspaceId: string, repositoryKey: string, provider: string, upstreamSymbolId: string): string {
+    return sourceHash('symbol', workspaceId, repositoryKey, provider, upstreamSymbolId);
+  }
+
+  relationship(workspaceId: string, sourceId: string, targetId: string, kind: string): string {
+    return sourceHash('relationship', workspaceId, sourceId, targetId, kind);
+  }
 }
 
 export function canonicalUri(value: string): string {
@@ -31,4 +51,8 @@ export function canonicalUri(value: string): string {
 
 function hash(...parts: string[]): string {
   return createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 24);
+}
+
+function sourceHash(kind: string, ...parts: string[]): string {
+  return createHash('sha256').update(JSON.stringify(['graphlens-source-identity-v2', kind, ...parts])).digest('hex');
 }

@@ -14,6 +14,7 @@ export type WorkspaceArchitectureSnapshot = {
   workspace: { id: string; name: string };
   generation: ArchitectureGenerationRef;
   inputGenerations: ReadonlyArray<{ analyzerId: string; generationId: number }>;
+  activeGenerations: ReadonlyArray<{ analyzerId: string; generationId: number }>;
   nodes: readonly GraphNode[];
   edges: readonly GraphEdge[];
   evidence: readonly AnalysisEvidence[];
@@ -23,6 +24,7 @@ export type WorkspaceArchitectureSnapshot = {
 export type CrossWorkspaceSnapshot = {
   snapshotId: string;
   requestedWorkspaceIds: readonly string[];
+  activeGenerationVector: readonly { workspaceId: string; analyzerId: string; generationId: number }[];
   generations: readonly WorkspaceArchitectureSnapshot[];
   missingArchitectureWorkspaceIds: readonly string[];
 };
@@ -30,7 +32,7 @@ export type CrossWorkspaceSnapshot = {
 export type ApiContractKey = { namespace: string; method: string; path: string };
 
 export type SystemNode =
-  | { scope: 'workspace'; workspaceId: string; id: string; kind: string; label: string; properties: Record<string, unknown>; level: 'DIRECT' | 'DERIVED' | 'INFERRED' }
+  | { scope: 'workspace'; workspaceId: string; id: string; kind: string; label: string; properties: Record<string, unknown>; level: 'DIRECT' | 'DERIVED' | 'INFERRED'; contributors?: GraphNode['contributors']; propertySources?: GraphNode['propertySources']; propertyConflicts?: GraphNode['propertyConflicts'] }
   | { scope: 'global'; id: string; kind: 'api_contract'; label: string; properties: ApiContractKey; level: 'DERIVED' };
 
 export type CrossWorkspaceEvidence = {
@@ -40,10 +42,13 @@ export type CrossWorkspaceEvidence = {
   level: 'DERIVED' | 'INFERRED';
   type: string;
   sources: ReadonlyArray<{ workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: readonly string[] }>;
+  /** Original file evidence resolved through the selected architecture evidence provenance and its recorded input generations. */
+  sourceReferences?: ReadonlyArray<{ workspaceId: string; analyzerId: string; generationId: number; evidenceIds: readonly string[] }>;
+  sourceLocationsUnavailable?: boolean;
   detail?: string;
 };
 
-export type ArchitectureEdgeKind = 'implements_contract' | 'architecture_contract_finding' | 'exposes' | 'handled_by' | 'depends_on' | 'calls' | 'references' | 'accepts' | 'returns' | 'uses_schema' | 'secured_by' | 'uses_scheme' | 'maps_to' | 'contains' | 'accesses_model';
+export type ArchitectureEdgeKind = 'implements_contract' | 'architecture_contract_finding' | 'exposes' | 'handled_by' | 'depends_on' | 'calls' | 'references' | 'accepts' | 'returns' | 'uses_schema' | 'secured_by' | 'uses_scheme' | 'maps_to' | 'contains' | 'accesses_model' | 'http_request';
 
 export type SystemEdge = {
   id: string;
@@ -56,6 +61,9 @@ export type SystemEdge = {
   level: 'DIRECT' | 'DERIVED' | 'INFERRED';
   properties: Record<string, unknown>;
   evidence: readonly CrossWorkspaceEvidence[];
+  contributors?: GraphEdge['contributors'];
+  propertySources?: GraphEdge['propertySources'];
+  propertyConflicts?: GraphEdge['propertyConflicts'];
 };
 
 export type CrossWorkspaceResolution = {

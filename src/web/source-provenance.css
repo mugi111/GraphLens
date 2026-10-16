@@ -1,0 +1,40 @@
+.source-state,
+.provenance-inspector {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid #344252;
+  border-radius: 8px;
+  background: #131b25;
+  color: #dce5ee;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.source-state h2,
+.provenance-inspector h3 { margin: 0 0 10px; }
+.source-state h3,
+.provenance-inspector h4 { margin: 12px 0 6px; font-size: 13px; }
+.source-state-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.source-state dl,
+.provenance-inspector dl { display: grid; grid-template-columns: minmax(100px, .8fr) minmax(0, 1.4fr); gap: 4px 10px; margin: 10px 0; }
+.source-state dt,
+.provenance-inspector dt { color: #9facba; }
+.source-state dd,
+.provenance-inspector dd { margin: 0; }
+.source-state ul,
+.source-state ol,
+.provenance-inspector ul { margin: 6px 0; padding-left: 20px; }
+.source-state li,
+.provenance-inspector li { margin: 4px 0; }
+.source-state-mismatch { padding: 8px; border-left: 3px solid #f0bd72; background: #30271a; color: #ffe4b5; }
+.source-state-compact { max-height: 175px; overflow: auto; }
+.provenance-compact { max-height: 260px; overflow: auto; }
+.provenance-inspector p { margin: 5px 0; }
+.source-state button:focus-visible,
+.provenance-inspector a:focus-visible { outline: 2px solid #f0bd72; outline-offset: 2px; }
+@media (max-width: 700px) {
+  .source-state dl,
+  .provenance-inspector dl { grid-template-columns: 1fr; gap: 2px; }
+  .source-state dd { margin: 0 0 7px; }
+}

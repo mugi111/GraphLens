@@ -1,19 +1,23 @@
-import { AnalysisError, type AnalysisContext, type AnalysisDiagnostic, type AnalysisEvidence } from '../../domain/analyzer.js';
+import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence } from '../../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { pythonSourceRevision } from './python-source-content.js';
 import { parsePythonSourceFile, type ParsedPythonFile } from './python-source-parser.js';
 import { readStablePythonSources, pythonSourceConfig } from './python-source-scanner.js';
 import { resolvePythonImports } from './python-source-resolver.js';
-import { PYTHON_SOURCE_LIMITS, type PythonSourceFile } from './python-source-types.js';
+import { PYTHON_SOURCE_LIMITS, type PythonSourceConfig, type PythonSourceFile } from './python-source-types.js';
+import { adoptDeclarationIdentities, requireSourceCatalog } from './source-catalog-adoption.js';
+import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 
 export type PythonSourceSnapshot = {
   sourceRevision: string;
+  scanConfig: PythonSourceConfig;
   files: PythonSourceFile[];
   parsedFiles: Array<{ file: PythonSourceFile; parsed: ParsedPythonFile }>;
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
   diagnostics: AnalysisDiagnostic[];
+  sourceCatalog: SourceCatalogSnapshot;
 };
 
 /** Read and parse one bounded Python snapshot for static analyzers. This does not run a generation. */
@@ -21,10 +25,6 @@ export async function collectPythonSourceSnapshot(context: AnalysisContext): Pro
   const config = pythonSourceConfig(context.config);
   const files = await readStablePythonSources(context.workspace.path, config);
   const sourceRevision = pythonSourceRevision(config, files);
-  if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) {
-    const message = 'Computed Python source revision does not match the requested revision.';
-    throw new AnalysisError('INVALID_RESULT', message, [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message }]);
-  }
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
@@ -53,7 +53,13 @@ export async function collectPythonSourceSnapshot(context: AnalysisContext): Pro
   evidence.push(...resolution.evidence);
   assertCapacity(nodes.length, edges.length, diagnostics.length);
   if (evidence.length > 10_000) throw new Error('Python source evidence exceeds the result limit (10000).');
-  return { sourceRevision, files, parsedFiles, nodes, edges, evidence, diagnostics };
+  const sourceCatalog = requireSourceCatalog(context, files);
+  const replacements = adoptDeclarationIdentities(context.workspace.id, sourceCatalog, nodes, edges, evidence, diagnostics);
+  for (const imported of imports) imported.ownerId = replacements.get(imported.ownerId) ?? imported.ownerId;
+  for (const item of parsedFiles) {
+    for (const imported of item.parsed.imports) imported.ownerId = replacements.get(imported.ownerId) ?? imported.ownerId;
+  }
+  return { sourceRevision, scanConfig: config, files, parsedFiles, nodes, edges, evidence, diagnostics, sourceCatalog };
 }
 
 function assertCapacity(nodes: number, edges: number, diagnostics: number) {

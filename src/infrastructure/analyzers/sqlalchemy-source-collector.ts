@@ -11,7 +11,7 @@ export function sqlAlchemyConfig(config: Record<string, unknown>): SqlAlchemyCon
 
 export async function collectSqlAlchemySource(context: AnalysisContext): Promise<PythonSourceSnapshot> {
   const { databaseNamespace: _databaseNamespace, ...scanConfig } = context.config;
-  // The namespace scopes graph identities; source revisions continue to represent the Python scan inputs.
+  // The namespace is included in the final analyzer revision after the shared source snapshot is collected.
   return collectPythonSourceSnapshot({ ...context, config: scanConfig });
 }
 
