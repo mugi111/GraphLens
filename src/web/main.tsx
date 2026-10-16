@@ -123,9 +123,6 @@ function App() {
   return <div className="app-shell">
     <a className="skip-link" href="#app-content">{t('Skip to analysis')}</a>
     <aside className="app-rail">
-      <a className="brand" href={viewHref('overview')} onClick={event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); selectView('overview'); }} aria-label="GraphLens">
-        <span className="brand-mark" aria-hidden="true">GL</span><span className="brand-name">GraphLens</span>
-      </a>
       <nav className="view-nav" aria-label={t('Main view')}>
         {(['overview', 'architecture', 'impact'] as const).map(key => <a key={key} href={viewHref(key)} className={view === key ? 'view-nav-item is-active' : 'view-nav-item'} aria-label={t(key === 'overview' ? 'Overview' : key === 'architecture' ? 'Architecture' : 'Impact')} aria-current={view === key ? 'page' : undefined} onClick={event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); selectView(key); }}>
           <span className={`nav-glyph nav-glyph-${key}`} aria-hidden="true" /><span className="nav-label">{t(key === 'overview' ? 'Overview' : key === 'architecture' ? 'Architecture' : 'Impact')}</span>
