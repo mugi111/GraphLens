@@ -413,11 +413,16 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       }
     }
     addNode(endpoint);
-    const outgoing = (id: string) => mergeIndexedEdges(indexed!.outgoing.get(id), codeGraphOutgoing.get(id)).filter((edge) => allowedEdges.has(edge.kind));
-    const incoming = (id: string, kind: string) => mergeIndexedEdges(indexed!.incoming.get(id), codeGraphIncoming.get(id)).filter((edge) => edge.kind === kind && allowedEdges.has(edge.kind));
+    // CodeGraph dependency traversal belongs to verified FastAPI handler closures.
+    // SQLAlchemy closures are supplemental ORM context and must not restart the
+    // source walk at depth zero when reached from a handler's class mapping.
+    const traverseCodeGraph = generation.analyzerId === 'builtin.fastapi';
+    const outgoing = (id: string) => mergeIndexedEdges(indexed!.outgoing.get(id), traverseCodeGraph ? codeGraphOutgoing.get(id) : undefined).filter((edge) => allowedEdges.has(edge.kind));
+    const incoming = (id: string, kind: string) => mergeIndexedEdges(indexed!.incoming.get(id), traverseCodeGraph ? codeGraphIncoming.get(id) : undefined).filter((edge) => edge.kind === kind && allowedEdges.has(edge.kind));
     const callsQueue: Array<{ id: string; depth: number }> = [];
     const reachedClasses = new Set<string>();
     const symbolKinds = new Set(['python_function', 'python_async_function', 'code.function', 'python_class', 'code.class']);
+    if (traverseCodeGraph && symbolKinds.has(endpoint.kind)) callsQueue.push({ id: endpoint.id, depth: 0 });
     let traversalLimitReported = false;
     const reportTraversalLimit = () => {
       if (traversalLimitReported || diagnostics.length >= 10000) return;
@@ -426,8 +431,12 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     };
     for (const edge of outgoing(endpoint.id)) {
       addEdge(edge);
-      if (edge.kind === 'depends_on' && ['python_function','code.function'].includes(byId.get(edge.targetId)?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: 0 });
-      if (['python_class','code.class'].includes(byId.get(edge.targetId)?.kind ?? '')) reachedClasses.add(edge.targetId);
+      const targetKind = byId.get(edge.targetId)?.kind ?? '';
+      if (traverseCodeGraph && edge.kind === 'depends_on' && symbolKinds.has(targetKind)) callsQueue.push({ id: edge.targetId, depth: 0 });
+      if (traverseCodeGraph && symbolKinds.has(targetKind)) {
+        callsQueue.push({ id: edge.targetId, depth: 0 });
+        if (['python_class','code.class'].includes(targetKind)) reachedClasses.add(edge.targetId);
+      }
       if (edge.kind === 'maps_to' && byId.get(edge.targetId)?.kind === 'sqlalchemy_model') {
         for (const relation of outgoing(edge.targetId)) if (relation.kind === 'contains' && byId.get(relation.targetId)?.kind === 'sqlalchemy_table') addEdge(relation);
       }
@@ -441,7 +450,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (owner?.kind === 'fastapi_route') {
         for (const relation of outgoing(owner.id)) {
           addEdge(relation);
-          if (relation.kind === 'handled_by') callsQueue.push({ id: relation.targetId, depth: 0 });
+          if (traverseCodeGraph && relation.kind === 'handled_by' && symbolKinds.has(byId.get(relation.targetId)?.kind ?? '')) callsQueue.push({ id: relation.targetId, depth: 0 });
         }
       } else if (owner?.kind === 'openapi_operation') {
         for (const relation of outgoing(owner.id)) addEdge(relation);
