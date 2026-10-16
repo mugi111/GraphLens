@@ -7,6 +7,7 @@ import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 
 const CODEGRAPH_VERSION = '1.6.2';
+const ANALYZER_VERSION = '1.6.2+identity-v2';
 const SCHEMA_VERSION = 15;
 const EXTRACTION_VERSION = 28;
 const MAX_ITEMS = 10_000;
@@ -38,7 +39,7 @@ type CodeGraphSdk = {
 export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyzer {
   let sdk: CodeGraphSdk | undefined;
   return {
-    descriptor: { id: 'builtin.codegraph', version: CODEGRAPH_VERSION, apiVersion: '1', capabilities: ['graph', 'evidence', 'diagnostics'] },
+    descriptor: { id: 'builtin.codegraph', version: ANALYZER_VERSION, apiVersion: '1', capabilities: ['graph', 'evidence', 'diagnostics'] },
     async analyze({ workspace, signal }): Promise<AnalysisResult> {
       if (signal?.aborted) throw new Error('CodeGraph snapshot ingestion was cancelled.');
       assertSupportedRuntime();
@@ -100,6 +101,7 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
 
         const graphNodes: GraphNode[] = [];
         const graphEdges: GraphEdge[] = [];
+        const graphEdgesById = new Map<string, GraphEdge>();
         const evidence: AnalysisEvidence[] = [];
         const outputMeter = new SerializedBudget(diagnostics);
         const sourceHash = createHash('sha256').update(`${CODEGRAPH_VERSION}:${SCHEMA_VERSION}:${EXTRACTION_VERSION}:`);
@@ -107,20 +109,34 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         const mapped = new Map<string, string>();
         const nodeFilePaths = new Map<string, string>();
         const addNode = (node: GraphNode, ev: AnalysisEvidence) => { outputMeter.addNode(node); outputMeter.addEvidence(ev); graphNodes.push(node); evidence.push(ev); };
-        const addEdge = (edge: GraphEdge, ev: AnalysisEvidence) => { outputMeter.addEdge(edge); outputMeter.addEvidence(ev); graphEdges.push(edge); evidence.push(ev); };
-        const workspaceNodeId = stableId(workspace.id, 'workspace', workspace.id);
+        const addEdge = (edge: GraphEdge, ev: AnalysisEvidence) => {
+          const existing = graphEdgesById.get(edge.id);
+          if (existing) {
+            const oldOccurrences = Array.isArray(existing.properties.occurrences) ? existing.properties.occurrences : [];
+            const newOccurrences = Array.isArray(edge.properties.occurrences) ? edge.properties.occurrences : [];
+            existing.properties = { ...existing.properties, occurrences: [...oldOccurrences, ...newOccurrences] };
+            existing.evidence = [...(existing.evidence ?? []), ...(edge.evidence ?? [])];
+            if (edge.level === 'DIRECT' || (edge.level === 'DERIVED' && existing.level === 'INFERRED')) existing.level = edge.level;
+          } else {
+            outputMeter.addEdge(edge);
+            graphEdgesById.set(edge.id, edge);
+            graphEdges.push(edge);
+          }
+          outputMeter.addEvidence(ev); evidence.push(ev);
+        };
+        const workspaceNodeId = identity.node(workspace.id, `workspace://${workspace.id}`, 'workspace');
         addNode({ id: workspaceNodeId, workspaceId: workspace.id, kind: 'workspace', label: workspace.name.normalize('NFC'), properties: { workspacePath: workspace.path.normalize('NFC') }, level: 'DIRECT' }, evidenceFor('codegraph.workspace', 'node', workspaceNodeId, 'DIRECT', workspace.path));
         const repositoryKey = 'root';
-        const repositoryId = stableId(workspace.id, 'repository', repositoryKey);
+        const repositoryId = identity.repository(workspace.id, repositoryKey);
         addNode({ id: repositoryId, workspaceId: workspace.id, kind: 'repository', label: workspace.name, properties: { repositoryKey, relativeRoot: '.', scope: 'workspace-source-root' }, level: 'DERIVED' }, evidenceFor('codegraph.repository', 'node', repositoryId, 'DERIVED', undefined, undefined, { workspaceId: workspace.id, repositoryKey }));
         addDerivedContains(workspaceNodeId, repositoryId, '.');
         const directoryIds = new Map<string, string>();
         for (const path of [...directories].sort()) {
-          const id = stableId(workspace.id, 'directory', path); directoryIds.set(path, id);
+          const id = identity.directory(workspace.id, repositoryKey, path); directoryIds.set(path, id);
           addNode({ id, workspaceId: workspace.id, kind: 'directory', label: path.split('/').at(-1)!, properties: { path }, level: 'DERIVED' }, evidenceFor('codegraph.directory', 'node', id, 'DERIVED', path));
         }
         for (const file of normalizedFiles) {
-          const id = stableId(workspace.id, 'file', file.normalizedPath); fileIds.set(file.normalizedPath, id);
+          const id = identity.file(workspace.id, repositoryKey, file.normalizedPath); fileIds.set(file.normalizedPath, id);
           const warningCodes = (fileIssues.get(file.normalizedPath) ?? []).filter((issue) => issue.severity === 'warning').map((issue) => issue.code).filter(Boolean);
           addNode({ id, workspaceId: workspace.id, kind: 'file', label: file.normalizedPath, properties: jsonRecord({ path: file.normalizedPath, language: file.language, contentHash: file.content_hash, size: file.size, generated: Boolean(file.generated), warningCodes }), level: 'DIRECT' }, evidenceFor('codegraph.file', 'node', id, 'DIRECT', file.normalizedPath));
         }
@@ -129,7 +145,7 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
           nodeFilePaths.set(node.id, normalizedPath);
           const fileId = fileIds.get(normalizedPath);
           if (!fileId && node.kind === 'file') throw new Error(`CodeGraph file node has no matching file record: ${normalizedPath}.`);
-          const id = node.kind === 'file' ? fileId! : stableId(workspace.id, 'node', node.id);
+          const id = node.kind === 'file' ? fileId! : identity.sourceSymbol(workspace.id, repositoryKey, 'codegraph', node.id);
           mapped.set(node.id, id);
           if (node.kind === 'file') continue;
           const kind = normalizeNodeKind(node.kind);
@@ -142,21 +158,21 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
           if (!sourceId || !targetId) throw new Error(`CodeGraph edge ${edge.id} refers to a missing endpoint.`);
           const kind = normalizeEdgeKind(edge.kind);
           const level = edgeLevel(edge);
-          const id = stableId(workspace.id, 'edge', `${edge.id}:${edge.source}:${edge.target}:${edge.kind}`);
-          const ev = evidenceFor('codegraph.relationship', 'edge', id, level, nodeFilePaths.get(edge.source), edge.line, { codegraphId: edge.id, upstreamProvenance: edge.provenance });
-          addEdge({ id, workspaceId: workspace.id, sourceId, targetId, kind, properties: jsonRecord({ codegraphId: edge.id, upstreamKind: isKnownEdgeKind(edge.kind) ? undefined : edge.kind, metadata: parseJsonObject(edge.metadata, `metadata for edge ${edge.id}`), line: edge.line, column: edge.col, provenance: edge.provenance }), evidence: [{ type: ev.type, ...(ev.uri ? { uri: ev.uri } : {}), ...(ev.line ? { line: ev.line } : {}), level: ev.level }], level }, ev);
+          const id = identity.relationship(workspace.id, sourceId, targetId, normalizeEdgeKind(edge.kind));
+          const occurrence = jsonRecord({ codegraphId: String(edge.id), upstreamKind: isKnownEdgeKind(edge.kind) ? undefined : edge.kind, metadata: parseJsonObject(edge.metadata, `metadata for edge ${edge.id}`), line: edge.line, column: edge.col, provenance: edge.provenance });
+          const ev = evidenceFor('codegraph.relationship', 'edge', id, level, nodeFilePaths.get(edge.source), edge.line, { codegraphId: String(edge.id), upstreamProvenance: edge.provenance }, String(edge.id));
+          if (edge.col !== undefined && edge.col >= 0) ev.column = edge.col + 1;
+          addEdge({ id, workspaceId: workspace.id, sourceId, targetId, kind, properties: { ...occurrence, occurrences: [occurrence] }, evidence: [{ type: ev.type, ...(ev.uri ? { uri: ev.uri } : {}), ...(ev.line ? { line: ev.line } : {}), level: ev.level }], level }, ev);
         }
         for (const file of normalizedFiles) {
           const segments = file.normalizedPath.split('/');
           const fileId = fileIds.get(file.normalizedPath)!;
           const parentPath = segments.slice(0, -1).join('/');
-          addDerivedContains(parentPath ? directoryIds.get(parentPath)! : workspaceNodeId, fileId, file.normalizedPath);
-          if (!parentPath) addDerivedContains(repositoryId, fileId, file.normalizedPath);
+          addDerivedContains(parentPath ? directoryIds.get(parentPath)! : repositoryId, fileId, file.normalizedPath);
         }
         for (const path of [...directories].sort()) {
           const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-          addDerivedContains(parent ? directoryIds.get(parent)! : workspaceNodeId, directoryIds.get(path)!, path);
-          if (!parent) addDerivedContains(repositoryId, directoryIds.get(path)!, path);
+          addDerivedContains(parent ? directoryIds.get(parent)! : repositoryId, directoryIds.get(path)!, path);
         }
         const sourceContainments = new Set(graphEdges.filter((edge) => edge.kind === 'contains').map((edge) => `${edge.sourceId}\0${edge.targetId}`));
         for (const node of nodes) {
@@ -168,10 +184,12 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         for (const node of graphNodes.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`n\0${JSON.stringify(node)}\n`);
         for (const edge of graphEdges.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`e\0${JSON.stringify(edge)}\n`);
         db.exec('COMMIT'); inTransaction = false;
-        return { sourceRevision: sourceHash.digest('hex'), nodes: graphNodes, edges: graphEdges, evidence, diagnostics };
+        const result = { sourceRevision: sourceHash.digest('hex'), nodes: graphNodes, edges: graphEdges, evidence, diagnostics } satisfies AnalysisResult;
+        if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_TOTAL_BYTES) throw new Error(`Serialized CodeGraph analyzer result exceeds ${MAX_TOTAL_BYTES} bytes.`);
+        return result;
 
         function addDerivedContains(sourceId: string, targetId: string, path: string): void {
-          const id = stableId(workspace.id, 'contains', `${sourceId}:${targetId}`);
+          const id = identity.relationship(workspace.id, sourceId, targetId, 'contains');
           const ev = evidenceFor('codegraph.contains', 'edge', id, 'DERIVED', path, undefined, { derivedFrom: 'CodeGraph file paths' });
           addEdge({ id, workspaceId: workspace.id, sourceId, targetId, kind: 'contains', properties: { derived: true }, evidence: [{ type: ev.type, uri: path, level: ev.level }], level: 'DERIVED' }, ev);
         }
@@ -266,8 +284,8 @@ function edgeLevel(edge: EdgeRecord): EvidenceLevel {
   return 'DIRECT';
 }
 function bool(value: number | undefined): boolean | undefined { return value === undefined ? undefined : value !== 0; }
-function evidenceFor(type: string, subjectKind: 'node' | 'edge', subjectId: string, level: EvidenceLevel, uri?: string, line?: number, provenance?: Record<string, unknown>): AnalysisEvidence {
-  return { id: stableId(subjectId, 'evidence', type), subjectKind, subjectId, level, type, ...(uri ? { uri } : {}), ...(line && line > 0 ? { line } : {}), ...(provenance ? { provenance: jsonRecord(provenance) } : {}) };
+function evidenceFor(type: string, subjectKind: 'node' | 'edge', subjectId: string, level: EvidenceLevel, uri?: string, line?: number, provenance?: Record<string, unknown>, occurrenceId?: string): AnalysisEvidence {
+  return { id: identity.node(subjectId, `evidence:${subjectKind}`, occurrenceId ? `${type}:${occurrenceId}` : type), subjectKind, subjectId, level, type, ...(uri ? { uri } : {}), ...(line && line > 0 ? { line } : {}), ...(provenance ? { provenance: jsonRecord(provenance) } : {}) };
 }
 function loadCodeGraphSdk(packageRoot: string): CodeGraphSdk {
   const root = resolve(packageRoot);
@@ -309,6 +327,5 @@ class SerializedBudget {
     this.counts[key]++;
   }
 }
-function stableId(workspaceId: string, type: string, value: string): string { return `codegraph-${createHash('sha256').update(`${workspaceId}\0${type}\0${value}`).digest('hex').slice(0, 40)}`; }
 function jsonRecord(value: Record<string, unknown>): Record<string, JsonValue> { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as Record<string, JsonValue>; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

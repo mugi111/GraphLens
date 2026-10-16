@@ -34,6 +34,8 @@ export type AnalysisContext = {
 export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
 export type ArchitectureInputGeneration = AnalysisInputGeneration & {
   sourceRevision?: string;
+  identityVersion?: number;
+  inputGenerations?: readonly AnalysisInputGeneration[];
   nodes: readonly GraphNode[];
   edges: readonly GraphEdge[];
   evidence: readonly AnalysisEvidence[];
@@ -103,6 +105,7 @@ export type Analyzer = {
 /** Machine-readable failures returned by the analyzer host. */
 export type AnalysisErrorCode =
   | 'ANALYZER_NOT_FOUND'
+  | 'ANALYZER_RETIRED'
   | 'API_VERSION_UNSUPPORTED'
   | 'DUPLICATE_ANALYZER'
   | 'INVALID_DESCRIPTOR'

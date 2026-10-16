@@ -37,6 +37,11 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     }
   });
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
+  app.get('/api/v1/workspaces/:workspaceId/reanalysis', (c) => {
+    const workspaceId = c.req.param('workspaceId');
+    const state = store.sourceReanalysisState(workspaceId);
+    return state ? c.json(state) : c.json({ error: 'Workspace not found.', code: 'WORKSPACE_NOT_FOUND' }, 404);
+  });
   app.post('/api/v1/sync', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaces?: string[]; demo?: boolean };
     if (body.demo !== true) return c.json({ error: 'This endpoint only activates the local demo fixture. Use analysis runs for source analyzers.' }, 400);
@@ -51,7 +56,7 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     const body = await c.req.json().catch(() => ({})) as { workspaceId?: string; analyzerId?: string; sourceRevision?: string; config?: Record<string, never> };
     if (typeof body.workspaceId !== 'string' || typeof body.analyzerId !== 'string' || (body.sourceRevision !== undefined && typeof body.sourceRevision !== 'string') || (body.config !== undefined && (!body.config || Array.isArray(body.config)))) return c.json({ error: 'workspaceId and analyzerId are required; config must be an object.' }, 400);
     try { return c.json(analyzerRunner.start({ workspaceId: body.workspaceId, analyzerId: body.analyzerId, sourceRevision: body.sourceRevision, config: body.config }), 202); }
-    catch (error) { if (error instanceof AnalysisError) return c.json({ error: error.message, code: error.code, diagnostics: error.diagnostics }, error.code === 'RUN_ALREADY_ACTIVE' ? 409 : error.code === 'WORKSPACE_NOT_FOUND' || error.code === 'ANALYZER_NOT_FOUND' ? 404 : 400); throw error; }
+    catch (error) { if (error instanceof AnalysisError) return c.json({ error: error.message, code: error.code, diagnostics: error.diagnostics }, error.code === 'ANALYZER_RETIRED' ? 410 : error.code === 'RUN_ALREADY_ACTIVE' ? 409 : error.code === 'WORKSPACE_NOT_FOUND' || error.code === 'ANALYZER_NOT_FOUND' ? 404 : 400); throw error; }
   });
   app.get('/api/v1/analysis-runs', (c) => c.json({ runs: store.analysisRuns(c.req.query('workspace'), runLimit(c.req.query('limit'))) }));
   app.get('/api/v1/analysis-runs/:runId', (c) => { const run = store.analysisRun(c.req.param('runId')); return run ? c.json({ ...run, diagnostics: store.analysisDiagnostics(run.id) }) : c.json({ error: 'Analysis run not found' }, 404); });
