@@ -4,6 +4,7 @@ import type { Workspace } from '../domain/graph.js';
 import type { GraphStore, AnalysisRun } from '../infrastructure/sqlite/graph-store.js';
 import { AnalyzerRegistry } from './analyzer-registry.js';
 import { validateAnalysisResult } from './analyzer-result-validator.js';
+import { CodeGraphSourceCatalogReader } from '../infrastructure/codegraph/source-catalog.js';
 
 export type StartAnalysisRequest = { workspaceId: string; analyzerId: string; sourceRevision?: string; config?: Record<string, JsonValue> };
 
@@ -33,6 +34,7 @@ export class AnalyzerRunner {
         sourceRevision,
         config,
         architectureInputProvider: { snapshot: (analyzerIds) => this.store.snapshot(workspace.id, analyzerIds) },
+        sourceCatalogReader: new CodeGraphSourceCatalogReader(this.store, workspace.id),
       });
       if (sourceRevision !== undefined && result.sourceRevision !== undefined && sourceRevision !== result.sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed source revision does not match the requested revision.' }]);
       const endpointIds = result.inputGenerations === undefined

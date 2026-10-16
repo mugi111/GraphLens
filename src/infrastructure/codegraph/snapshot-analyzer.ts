@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { AnalysisDiagnostic, AnalysisResult, Analyzer, AnalysisEvidence, EvidenceLevel, JsonValue } from '../../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
+import { GraphIdentityFactory } from '../../core/graph-identity.js';
 
 const CODEGRAPH_VERSION = '1.6.2';
 const SCHEMA_VERSION = 15;
@@ -13,6 +14,7 @@ const MAX_CONTRIBUTIONS = 9_000;
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const MAX_FIELD_BYTES = 10_000;
 const FILE_ONLY_LANGUAGES = ['yaml', 'twig', 'properties'] as const;
+const identity = new GraphIdentityFactory();
 const SUPPORTED_LANGUAGES = 'typescript javascript tsx jsx arkts python go rust java c cpp csharp razor php ruby swift kotlin dart svelte vue astro liquid pascal scala lua luau objc r solidity nix yaml twig xml properties cfml cfscript cfquery cobol vbnet erlang terraform'.split(' ');
 
 type DbCounts = { nodes: number; edges: number; files: number; pending: number; failed: number; bytes: number; oversizedFields: number; directoryPotential: number };
@@ -70,6 +72,7 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         if (counts.pending) throw new Error(`CodeGraph has ${counts.pending} unresolved references pending; the index is incomplete.`);
         const files = readBounded<FileRecord>(db, `SELECT path, content_hash, language, size, modified_at, indexed_at, node_count, errors, generated FROM files ORDER BY path LIMIT ?`, counts.files, 'files');
         const normalizedFiles = files.map((file) => ({ ...file, normalizedPath: normalizeRelativePath(file.path) }));
+        if (new Set(normalizedFiles.map((file) => file.normalizedPath)).size !== normalizedFiles.length) throw new Error('CodeGraph source paths collide after canonical path validation.');
         const directories = makeDirectories(normalizedFiles.map((file) => file.normalizedPath));
         validateContributionBudget(counts, directories.size);
         const nodes = readBounded<NodeRecord>(db, `SELECT id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column, end_column, signature, visibility, is_exported, is_async, is_static, is_abstract, decorators, type_parameters, return_type, updated_at FROM nodes ORDER BY id LIMIT ?`, counts.nodes, 'nodes');
@@ -107,6 +110,10 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         const addEdge = (edge: GraphEdge, ev: AnalysisEvidence) => { outputMeter.addEdge(edge); outputMeter.addEvidence(ev); graphEdges.push(edge); evidence.push(ev); };
         const workspaceNodeId = stableId(workspace.id, 'workspace', workspace.id);
         addNode({ id: workspaceNodeId, workspaceId: workspace.id, kind: 'workspace', label: workspace.name.normalize('NFC'), properties: { workspacePath: workspace.path.normalize('NFC') }, level: 'DIRECT' }, evidenceFor('codegraph.workspace', 'node', workspaceNodeId, 'DIRECT', workspace.path));
+        const repositoryKey = 'root';
+        const repositoryId = stableId(workspace.id, 'repository', repositoryKey);
+        addNode({ id: repositoryId, workspaceId: workspace.id, kind: 'repository', label: workspace.name, properties: { repositoryKey, relativeRoot: '.', scope: 'workspace-source-root' }, level: 'DERIVED' }, evidenceFor('codegraph.repository', 'node', repositoryId, 'DERIVED', undefined, undefined, { workspaceId: workspace.id, repositoryKey }));
+        addDerivedContains(workspaceNodeId, repositoryId, '.');
         const directoryIds = new Map<string, string>();
         for (const path of [...directories].sort()) {
           const id = stableId(workspace.id, 'directory', path); directoryIds.set(path, id);
@@ -144,10 +151,19 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
           const fileId = fileIds.get(file.normalizedPath)!;
           const parentPath = segments.slice(0, -1).join('/');
           addDerivedContains(parentPath ? directoryIds.get(parentPath)! : workspaceNodeId, fileId, file.normalizedPath);
+          if (!parentPath) addDerivedContains(repositoryId, fileId, file.normalizedPath);
         }
         for (const path of [...directories].sort()) {
           const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
           addDerivedContains(parent ? directoryIds.get(parent)! : workspaceNodeId, directoryIds.get(path)!, path);
+          if (!parent) addDerivedContains(repositoryId, directoryIds.get(path)!, path);
+        }
+        const sourceContainments = new Set(graphEdges.filter((edge) => edge.kind === 'contains').map((edge) => `${edge.sourceId}\0${edge.targetId}`));
+        for (const node of nodes) {
+          if (node.kind === 'file') continue;
+          const fileId = fileIds.get(nodeFilePaths.get(node.id) ?? '');
+          const symbolId = mapped.get(node.id);
+          if (fileId && symbolId && !sourceContainments.has(`${fileId}\0${symbolId}`)) addDerivedContains(fileId, symbolId, nodeFilePaths.get(node.id)!);
         }
         for (const node of graphNodes.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`n\0${JSON.stringify(node)}\n`);
         for (const edge of graphEdges.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`e\0${JSON.stringify(edge)}\n`);
@@ -196,8 +212,8 @@ function validateInputBudget(counts: DbCounts): void {
   if (counts.oversizedFields) throw new Error(`CodeGraph snapshot contains fields larger than ${MAX_FIELD_BYTES} bytes.`);
 }
 function validateContributionBudget(counts: DbCounts, directories: number): void {
-  const nodeCount = 1 + directories + counts.files + counts.nodes;
-  const edgeCount = directories + counts.files + counts.edges;
+  const nodeCount = 2 + directories + counts.files + counts.nodes;
+  const edgeCount = 1 + directories + counts.files + counts.edges;
   if (nodeCount + edgeCount > MAX_CONTRIBUTIONS || nodeCount + edgeCount > MAX_ITEMS) throw new Error(`Derived CodeGraph snapshot exceeds the ${MAX_CONTRIBUTIONS}-contribution limit.`);
   if (nodeCount + edgeCount > MAX_ITEMS) throw new Error(`Derived CodeGraph snapshot exceeds the ${MAX_ITEMS}-item limit.`);
 }

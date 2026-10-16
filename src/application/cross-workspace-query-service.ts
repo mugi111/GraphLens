@@ -4,6 +4,7 @@ import type { ArchitectureEdgeKind, CrossWorkspaceEvidence, CrossWorkspaceResolu
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import { CrossWorkspaceResolutionError, resolveCrossWorkspace } from './cross-workspace-resolver.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type CrossWorkspaceRoot = 'contract' | 'endpoint';
 export type CrossWorkspaceArchitectureQuery = {
@@ -38,60 +39,74 @@ export class CrossWorkspaceQueryService {
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
     if (cursor && (JSON.stringify(cursor.workspaces) !== JSON.stringify(workspaceIds) || cursor.filters !== filterHash)) throw new CrossWorkspaceQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace set and query.', 400);
 
-    const snapshot = this.readSnapshot(workspaceIds);
+    const offset = cursor?.offset ?? 0;
+    let selected: ReturnType<GraphStore['crossWorkspaceArchitecturePage']>;
+    try { selected=this.store.crossWorkspaceArchitecturePage(workspaceIds,{...query,offset},cursor?.snapshotId); }
+    catch(error){const message=error instanceof Error?error.message:String(error);if(message==='CROSS_WORKSPACE_SNAPSHOT_CHANGED')throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED','An active architecture generation changed while paging.',409);if(error instanceof GraphProjectionError||(error instanceof Error&&message==='UNIFIED_GRAPH_LIMIT_EXCEEDED'))throw tooLarge();if(/^Workspace not found:/.test(message))throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND',message,404);throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','Could not select bounded cross-workspace contract candidates.',500);}
+    const snapshot = selected.snapshot;
     if (cursor && cursor.snapshotId !== snapshot.snapshotId) throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED', 'An active architecture generation changed while paging.', 409);
+    if (cursor && offset >= selected.rootCount) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
     if (snapshot.generations.length < 2) throw new CrossWorkspaceQueryError('INSUFFICIENT_ACTIVE_ARCHITECTURE_WORKSPACES', 'At least two selected workspaces need an active architecture generation.', 409);
 
     let resolution: CrossWorkspaceResolution;
-    try { resolution = resolveCrossWorkspace(snapshot); }
+    try { resolution = resolveCrossWorkspace(snapshot,{contractKeys:selected.contractKeys}); }
     catch (error) {
       if (error instanceof CrossWorkspaceResolutionError && error.code === 'CROSS_WORKSPACE_LIMIT_EXCEEDED') throw tooLarge();
       throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not resolve the cross-workspace architecture graph.', 500);
     }
-    const graph = buildSystemGraph(snapshot, resolution, query.includeEvidence);
+    const graph = buildSystemGraph(snapshot, resolution, false);
     const workspaceNames = new Map(snapshot.generations.map((item) => [item.workspace.id, item.workspace.name]));
     const roots = selectRoots(graph.nodes, graph.edges, query, workspaceIds, workspaceNames);
-    const offset = cursor?.offset ?? 0;
-    if (cursor && offset >= roots.length) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
-    const pageRoots = roots.slice(offset, offset + query.limit);
+    const selectedRootKeys=new Set(selected.pageRootKeys.map((key)=>query.root==='contract'?`global\0${key}`:key));
+    const pageRoots = roots.filter((node)=>selectedRootKeys.has(node.scope==='workspace'?systemNodeKey(node.workspaceId,node.id):`global\0${node.id}`));
+    if (pageRoots.length !== selected.pageRootKeys.length) throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','SQL-selected federation roots could not be projected consistently.',500);
     const closure = buildClosure(graph.nodes, graph.edges, pageRoots, query.depth);
-    if (closure.nodes.length > 3000 || closure.edges.length > 6000) throw tooLarge();
-    const evidenceCount = closure.edges.reduce((total, edge) => total + edge.evidence.reduce((count, item) => count + 1 + item.sources.reduce((sourceCount, source) => sourceCount + source.evidenceIds.length, 0), 0), 0);
-    if (query.includeEvidence && evidenceCount > 5000) throw tooLarge();
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw tooLarge();
+    const selectedNodeKeys=new Set(closure.nodes.filter((node)=>node.scope==='workspace').map((node)=>systemNodeKey(node.workspaceId,node.id)));
+    const selectedEdgeKeys=new Set(closure.edges.filter((edge)=>edge.scope==='workspace').map((edge)=>edge.id));
+    const sourceNodes=snapshot.generations.flatMap((item)=>item.nodes.filter((node)=>selectedNodeKeys.has(systemNodeKey(item.workspace.id,node.id))));
+    const sourceEdges=snapshot.generations.flatMap((item)=>item.edges.filter((edge)=>selectedEdgeKeys.has(systemEdgeKey(item.workspace.id,edge.id))));
+    let hydrated;
+    try { hydrated=this.store.projectGraphAtSnapshot(sourceNodes,sourceEdges,[...snapshot.activeGenerationVector],query.includeEvidence); }
+    catch(error){if(error instanceof Error&&error.message==='UNIFIED_GRAPH_SNAPSHOT_CHANGED')throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED','An active architecture generation changed while paging.',409);if(error instanceof GraphProjectionError||(error instanceof Error&&error.message==='UNIFIED_GRAPH_LIMIT_EXCEEDED'))throw tooLarge();throw error;}
+    const hydratedNodes=new Map(hydrated.nodes.map((node)=>[systemNodeKey(node.workspaceId,node.id),node]));
+    const hydratedEdges=new Map(hydrated.edges.map((edge)=>[systemEdgeKey(edge.workspaceId,edge.id),edge]));
+    let selectedCrossEdges=new Map<string,SystemEdge>();
+    if(query.includeEvidence){try{const evidenceSnapshot=withHydratedEvidence(snapshot,hydrated.nodes,hydrated.edges);selectedCrossEdges=new Map(resolveCrossWorkspace(evidenceSnapshot,{contractKeys:selected.contractKeys}).edges.filter((edge)=>edge.scope==='cross-workspace').map((edge)=>[edge.id,edge]));}catch(error){if(error instanceof CrossWorkspaceResolutionError&&error.code==='CROSS_WORKSPACE_LIMIT_EXCEEDED')throw tooLarge();throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','Could not resolve selected evidence provenance.',500);}}
+    const outputNodes=closure.nodes.map((node)=>{if(node.scope!=='workspace')return node;const source=hydratedNodes.get(systemNodeKey(node.workspaceId,node.id));return source?{...node,properties:source.properties,level:source.level??node.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts}:node;});
+    const workspaceById=new Map(snapshot.generations.map((item)=>[item.workspace.id,item]));
+    const outputEdges=closure.edges.map((edge)=>{if(edge.scope==='cross-workspace')return selectedCrossEdges.get(edge.id)??edge;const original=sourceEdges.find((item)=>systemEdgeKey(item.workspaceId,item.id)===edge.id);const source=original?hydratedEdges.get(systemEdgeKey(original.workspaceId,original.id)):undefined;if(!original||!source)return edge;const workspace=workspaceById.get(original.workspaceId)!;return {...edge,properties:source.properties,level:source.level??edge.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts,evidence:query.includeEvidence?[toCrossEvidence(workspace,original.sourceId,edge.id,'edge',source.evidence??[])]:[]};});
+    const evidenceCost=outputEdges.reduce((total,edge)=>total+edge.evidence.reduce((sum,item)=>sum+1+item.sources.reduce((sourceCount,source)=>sourceCount+source.evidenceIds.length,0),0),0);
+    if(query.includeEvidence&&evidenceCost>5000)throw tooLarge();
     const diagnostics = query.includeDiagnostics ? relevantDiagnostics(resolution.diagnostics, closure.nodes) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + pageRoots.length;
-    const nextCursor = nextOffset < roots.length ? encodeCursor({ v: 1, workspaces: workspaceIds, filters: filterHash, snapshotId: snapshot.snapshotId, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < selected.rootCount ? encodeCursor({ v: 1, workspaces: workspaceIds, filters: filterHash, snapshotId: snapshot.snapshotId, offset: nextOffset }) : undefined;
     const workspaceMetadata = workspaceIds.map((id) => {
       const active = snapshot.generations.find((item) => item.workspace.id === id);
       const workspace = active?.workspace ?? this.store.getWorkspace(id);
       if (!workspace) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', `Workspace '${id}' was not found.`, 404);
       return { id: workspace.id, name: workspace.name };
     });
-    return {
+    const response = {
       scope: { workspaceIds, workspaces: workspaceMetadata, missingArchitectureWorkspaceIds: [...snapshot.missingArchitectureWorkspaceIds] },
       snapshot: {
         id: snapshot.snapshotId,
         generations: snapshot.generations.map((item) => item.generation),
+        activeGenerations: snapshot.activeGenerationVector,
         inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
       },
       query: { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.workspace !== undefined ? { workspace: query.workspace } : {}), depth: query.depth },
-      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
+      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: selected.rootCount, ...(nextCursor ? { nextCursor } : {}) },
       rootIds: pageRoots.map((node) => node.id),
-      nodes: closure.nodes,
-      edges: closure.edges,
+      nodes: outputNodes,
+      edges: outputEdges,
       ...(diagnostics ? { diagnostics } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 3 * 1_048_576) throw tooLarge();
+    return response;
   }
 
-  private readSnapshot(workspaceIds: string[]): CrossWorkspaceSnapshot {
-    try { return this.store.crossWorkspaceArchitectureSnapshot(workspaceIds); }
-    catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/^Workspace not found:/.test(message)) throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND', message, 404);
-      throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not read the cross-workspace architecture snapshot.', 500);
-    }
-  }
 }
 
 export function parseCrossWorkspaceArchitectureQuery(params: URLSearchParams): { query: CrossWorkspaceArchitectureQuery } | { error: string; code: 'WORKSPACES_REQUIRED' | 'INVALID_CROSS_WORKSPACE_QUERY' } {
@@ -139,7 +154,7 @@ function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWor
     if (!edgeAllowlist.has(edge.kind as ArchitectureEdgeKind)) continue;
     const items = sourceEvidence.get(`${workspace.workspace.id}\0edge\0${edge.id}`) ?? [];
     const id = systemEdgeKey(workspace.workspace.id, edge.id);
-    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: dominant(items), properties: edge.properties, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
+    edges.set(id, { id, scope: 'workspace', sourceId: edge.sourceId, targetId: edge.targetId, sourceWorkspaceId: workspace.workspace.id, targetWorkspaceId: workspace.workspace.id, kind: edge.kind as ArchitectureEdgeKind, level: edge.level ?? dominant(items), properties: edge.properties, contributors: edge.contributors, propertySources: edge.propertySources, propertyConflicts: edge.propertyConflicts, evidence: includeEvidence ? [toCrossEvidence(workspace, edge.sourceId, id, 'edge', items)] : [] });
   }
   for (const node of resolution.nodes) nodes.set(node.scope === 'global' ? `global\0${node.id}` : systemNodeKey(node.workspaceId, node.id), node);
   for (const edge of resolution.edges) {
@@ -150,12 +165,46 @@ function buildSystemGraph(snapshot: CrossWorkspaceSnapshot, resolution: CrossWor
 }
 
 function projectSystemNode(workspace: WorkspaceArchitectureSnapshot, node: GraphNode, items: readonly AnalysisEvidence[]): SystemNode {
-  return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(items) };
+  return { scope: 'workspace', workspaceId: workspace.workspace.id, id: node.id, kind: node.kind, label: node.label, properties: node.properties, level: node.level ?? dominant(items), contributors: node.contributors, propertySources: node.propertySources, propertyConflicts: node.propertyConflicts };
 }
 function toCrossEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
-  const ids = items.map((item) => item.id).sort();
-  return { id: `cross-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [{ workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: ids }] };
+  const grouped = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; nodeId: string; evidenceIds: Set<string> }>();
+  const references = new Map<string, { workspaceId: string; analyzerId: string; generationId: number; evidenceIds: Set<string> }>();
+  let sourceLocationsUnavailable = false;
+  const addReference = (analyzerId: unknown, generationId: unknown, evidenceId: unknown, hasUri: boolean, requireInput: boolean) => {
+    if (!hasUri || typeof analyzerId !== 'string' || typeof generationId !== 'number' || !Number.isSafeInteger(generationId) || typeof evidenceId !== 'string' || !evidenceId) { sourceLocationsUnavailable = true; return; }
+    if (!workspace.activeGenerations.some((active) => active.analyzerId === analyzerId && active.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    if (requireInput && !workspace.inputGenerations.some((input) => input.analyzerId === analyzerId && input.generationId === generationId)) { sourceLocationsUnavailable = true; return; }
+    const key = `${analyzerId}\0${generationId}`;
+    const entry = references.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, evidenceIds: new Set<string>() };
+    entry.evidenceIds.add(evidenceId); references.set(key, entry);
+  };
+  for (const item of items) {
+    const analyzerId = item.analyzerId ?? workspace.generation.analyzerId;
+    const generationId = item.generationId ?? workspace.generation.generationId;
+    const key = `${analyzerId}\0${generationId}`;
+    const source = grouped.get(key) ?? { workspaceId: workspace.workspace.id, analyzerId, generationId, nodeId, evidenceIds: new Set<string>() };
+    source.evidenceIds.add(item.id); grouped.set(key, source);
+    const provenance = item.provenance;
+    if (typeof item.uri === 'string' && analyzerId !== workspace.generation.analyzerId) addReference(analyzerId, generationId, item.id, true, false);
+    else if (provenance && typeof provenance === 'object') {
+      if (typeof provenance.analyzerId === 'string' && typeof provenance.generationId === 'number' && typeof provenance.sourceEvidenceId === 'string') addReference(provenance.analyzerId, provenance.generationId, provenance.sourceEvidenceId, typeof item.uri === 'string', true);
+      else if (Array.isArray(provenance.sources)) {
+        if (!provenance.sources.length) sourceLocationsUnavailable = true;
+        for (const value of provenance.sources) {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) { sourceLocationsUnavailable = true; continue; }
+          const candidate = value as Record<string, unknown>;
+          const input = workspace.inputGenerations.find((entry) => entry.analyzerId === candidate.analyzerId);
+          addReference(candidate.analyzerId, input?.generationId, candidate.evidenceId, typeof candidate.uri === 'string', true);
+        }
+      } else sourceLocationsUnavailable = true;
+    } else if (typeof item.uri === 'string') addReference(analyzerId, generationId, item.id, true, false);
+    else sourceLocationsUnavailable = true;
+  }
+  if (!grouped.size) grouped.set(`${workspace.generation.analyzerId}\0${workspace.generation.generationId}`, { workspaceId: workspace.workspace.id, analyzerId: workspace.generation.analyzerId, generationId: workspace.generation.generationId, nodeId, evidenceIds: new Set() });
+  return { id: `cross-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence', sources: [...grouped.values()].map((source) => ({ ...source, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId, a.nodeId], [b.workspaceId, b.analyzerId, b.generationId, b.nodeId])), sourceReferences: [...references.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))), sourceLocationsUnavailable };
 }
+
 function selectRoots(nodes: SystemNode[], edges: SystemEdge[], query: CrossWorkspaceArchitectureQuery, workspaceIds: string[], workspaceNames: Map<string, string>) {
   const globalWorkspaceOwners = new Map<string, Set<string>>();
   for (const edge of edges) if (edge.scope === 'cross-workspace') {
@@ -212,6 +261,11 @@ function buildClosure(allNodes: SystemNode[], allEdges: SystemEdge[], roots: Sys
 }
 function systemNodeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
 function systemEdgeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
+function withHydratedEvidence(snapshot:CrossWorkspaceSnapshot,nodes:GraphNode[],edges:GraphEdge[]):CrossWorkspaceSnapshot{
+  const nodeMap=new Map(nodes.map((item)=>[systemNodeKey(item.workspaceId,item.id),item]));const edgeMap=new Map(edges.map((item)=>[systemEdgeKey(item.workspaceId,item.id),item]));
+  const generations=snapshot.generations.map((workspace)=>{const selectedNodes=workspace.nodes.map((item)=>nodeMap.get(systemNodeKey(workspace.workspace.id,item.id))??item);const selectedEdges=workspace.edges.map((item)=>edgeMap.get(systemEdgeKey(workspace.workspace.id,item.id))??item);const evidence=[...selectedNodes.flatMap((item)=>item.evidence??[]),...selectedEdges.flatMap((item)=>item.evidence??[])];return {...workspace,nodes:selectedNodes,edges:selectedEdges,evidence};});
+  return {...snapshot,generations};
+}
 function relevantDiagnostics(items: readonly AnalysisDiagnostic[], nodes: SystemNode[]) {
   const contracts = new Set(nodes.filter((node) => node.scope === 'global').map((node) => JSON.stringify(node.properties)));
   return items.filter((item) => {
