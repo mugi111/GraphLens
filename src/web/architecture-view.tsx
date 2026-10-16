@@ -79,7 +79,14 @@ function validateItem(value: unknown): asserts value is Record<string, unknown> 
 function isEvidence(value: unknown): value is Evidence { return isRecord(value) && isText(value.id) && isText(value.subjectId) && (value.subjectKind === 'node' || value.subjectKind === 'edge') && isText(value.type) && ['DIRECT','DERIVED','INFERRED'].includes(String(value.level)); }
 function isDiagnostic(value: unknown): value is Diagnostic { return isRecord(value) && ['info','warning','error'].includes(String(value.severity)) && isText(value.message) && (value.code === undefined || isText(value.code)) && (value.uri === undefined || isText(value.uri)) && (value.line === undefined || isCount(value.line)); }
 type PageTransition = { type: 'next'; previous: string | undefined } | { type: 'previous' } | { type: 'restart' };
-function cssToken(name: string) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function cssToken(name: string) {
+  const probe = document.createElement('span');
+  probe.style.color = `var(${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}
 
 export function ArchitectureView({ workspaces }: { workspaces: Workspace[] }) {
   const { t } = useI18n();
