@@ -96,7 +96,7 @@ export function parseArchitectureQuery(params: URLSearchParams): { query: Archit
 function selectRoots(snapshot: Snapshot, query: ArchitectureQuery): GraphNode[] {
   if (query.node !== undefined) return snapshot.nodes.filter((node) => node.id === query.node).sort((a, b) => cmp([a.id], [b.id]));
   const handledFunctions = new Set(snapshot.edges.filter((edge) => edge.kind === 'handled_by').map((edge) => edge.targetId));
-  const kinds: Record<ArchitectureRoot, string[]> = { endpoint: ['api_endpoint'], handler: ['python_function', 'python_async_function'], model: ['sqlalchemy_model'], table: ['sqlalchemy_table'], finding: ['architecture_contract_gap', 'architecture_contract_ambiguous', 'architecture_contract_unresolved', 'architecture_contract_mismatch'] };
+  const kinds: Record<ArchitectureRoot, string[]> = { endpoint: ['api_endpoint'], handler: ['python_function', 'python_async_function', 'code.function'], model: ['sqlalchemy_model'], table: ['sqlalchemy_table'], finding: ['architecture_contract_gap', 'architecture_contract_ambiguous', 'architecture_contract_unresolved', 'architecture_contract_mismatch'] };
   return snapshot.nodes.filter((node) => {
     if (!kinds[query.root].includes(node.kind) || (query.root === 'handler' && !handledFunctions.has(node.id))) return false;
     const p = node.properties;
