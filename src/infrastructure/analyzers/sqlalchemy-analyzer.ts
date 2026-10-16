@@ -4,6 +4,7 @@ import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { canonicalSqlAlchemyName, collectSqlAlchemyFiles, collectSqlAlchemySource, expressionName, importsAt, localAssignmentValue, sqlAlchemyConfig } from './sqlalchemy-source-collector.js';
 import type { SqlAlchemyCollectedFile, SqlAlchemyModelFact } from './sqlalchemy-source-types.js';
 import type { PythonExpressionFact } from './python-source-types.js';
+import { semanticSourceRevision } from './source-catalog-adoption.js';
 
 const identity = new GraphIdentityFactory();
 
@@ -16,7 +17,9 @@ export const sqlAlchemyAnalyzer: Analyzer = {
       const files = collectSqlAlchemyFiles(snapshot);
       const diagnostics = [...snapshot.diagnostics];
       const collected = collectModels(files, diagnostics);
-      return projectModels(context, config.databaseNamespace, snapshot.sourceRevision, snapshot.sourceCatalog.input, files, collected.models, diagnostics, collected.ambiguousClasses);
+      const sourceRevision = semanticSourceRevision('builtin.sqlalchemy', 'sqlalchemy-codegraph-v2+python-parser-v1+identity-map-v1', { ...snapshot.scanConfig, ...config }, snapshot.files, snapshot.sourceCatalog, snapshot.sourceRevision);
+      if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed SQLAlchemy source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed SQLAlchemy source revision does not match the requested revision.' }]);
+      return projectModels(context, config.databaseNamespace, sourceRevision, { analyzerId: 'builtin.codegraph', generationId: snapshot.sourceCatalog.input.generationId }, files, collected.models, diagnostics, collected.ambiguousClasses);
     } catch (error) {
       if (error instanceof AnalysisError) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -222,21 +225,16 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     const candidateIds: string[] = [];
     for (const item of group) {
       const sourceClass = item.node;
-      candidateIds.push(sourceClass.id);
-      if (!nodesById.has(sourceClass.id)) { const sourceNode={...sourceClass,kind:String(sourceClass.properties.codegraphKind??sourceClass.kind)};nodesById.set(sourceClass.id, sourceNode); nodes.push(sourceNode); }
-      const source = item.file.evidenceBySubject.get(sourceClass.id);
-      if (source) evidence.push(projectEvidence('node', sourceClass.id, source, 'sqlalchemy.class-candidate', `candidate/${item.path}/${item.qualifiedName}`));
+      if (sourceClass.properties.sourceMapping === 'mapped') candidateIds.push(sourceClass.id);
     }
     addNode(group[0]!.path, 'sqlalchemy_ambiguous_model', group[0]!.qualifiedName, `ambiguous-model/${group[0]!.module}.${group[0]!.qualifiedName}`, { module: group[0]!.module, qualifiedName: group[0]!.qualifiedName, candidateClassIds: candidateIds, resolved: false }, group[0]!.file.evidenceBySubject.get(group[0]!.node.id), 'sqlalchemy.unresolved-model');
   }
   for (const model of models) {
     const sourceClass = files.flatMap((file) => file.classes).find((node) => node.id === model.classId);
     if (!sourceClass) continue;
-    if (!nodesById.has(sourceClass.id)) { const sourceNode={...sourceClass,kind:String(sourceClass.properties.codegraphKind??sourceClass.kind)};nodesById.set(sourceClass.id, sourceNode); nodes.push(sourceNode); }
-    if (model.sourceEvidence) evidence.push({ ...model.sourceEvidence, id: identity.node(sourceClass.id, 'evidence:node', 'sqlalchemy.source-class'), subjectId: sourceClass.id, type: 'sqlalchemy.source-class' });
     const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, tableResolved: model.tableResolved ?? !!model.tableName }, model.sourceEvidence, 'sqlalchemy.mapping', 'DERIVED');
     projectedModels.set(`${model.module}.${model.qualifiedName}`, modelNode);
-    if (sourceClass.properties.sourceMapping !== 'unverified') addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
+    if (sourceClass.properties.sourceMapping === 'mapped') addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
     if (!model.tableName || model.tableResolved === false) continue;
     const tableKey = `table/${model.schema ? `${model.schema}.` : ''}${model.tableName}`;
     const table = addNode(databaseNamespace, 'sqlalchemy_table', `${model.schema ? `${model.schema}.` : ''}${model.tableName}`, tableKey, { databaseNamespace, schema: model.schema ?? null, tableName: model.tableName }, model.tableEvidence ?? model.sourceEvidence, 'sqlalchemy.table');
