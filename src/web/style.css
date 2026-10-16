@@ -21,15 +21,10 @@ pre { max-width: 100%; margin: var(--space-2xs) 0; padding: var(--space-xs); ove
 .app-shell { display: grid; grid-template-columns: 13rem minmax(0, 1fr); min-height: 100dvh; }
 .app-rail { position: sticky; top: 0; display: flex; height: 100dvh; min-width: 0; flex-direction: column; padding: var(--space-md) max(var(--space-sm), env(safe-area-inset-right)) var(--space-md) max(var(--space-sm), env(safe-area-inset-left)); border-inline-end: 1px solid var(--color-rule); background: var(--color-paper-2); }
 .view-nav { display: grid; gap: var(--space-3xs); }
-.view-nav-item { display: flex; min-height: 2.75rem; align-items: center; gap: var(--space-xs); padding: 0 var(--space-xs); border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--color-ink-2); font-size: var(--text-sm); text-align: left; text-decoration: none; white-space: nowrap; transition: color var(--dur-short) var(--ease-out), background-color var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out); }
+.view-nav-item { display: flex; min-height: 2.75rem; align-items: center; padding: 0 var(--space-xs); border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: var(--color-ink-2); font-size: var(--text-sm); text-align: left; text-decoration: none; white-space: nowrap; transition: color var(--dur-short) var(--ease-out), background-color var(--dur-short) var(--ease-out), border-color var(--dur-short) var(--ease-out); }
 .view-nav-item:hover { border-color: var(--color-rule); background: var(--color-paper); color: var(--color-ink); }
 .view-nav-item:active { background: var(--color-paper-3); }
 .view-nav-item.is-active { border-color: var(--color-rule); background: var(--color-paper); color: var(--color-ink); font-weight: 600; }
-.nav-glyph { position: relative; width: 1rem; height: 1rem; flex: 0 0 auto; border: 1px solid currentColor; }
-.nav-glyph-overview { border-radius: 50%; }
-.nav-glyph-architecture { transform: rotate(45deg) scale(.78); }
-.nav-glyph-impact { border-inline-start-width: 3px; border-block-end-width: 3px; }
-.view-nav-item.is-active .nav-glyph { color: var(--color-accent); }
 .locale-control { display: grid; gap: var(--space-3xs); color: var(--color-muted); font-size: var(--text-xs); }
 select, input:not([type="checkbox"]):not([type="range"]) { min-width: 0; min-height: 2.5rem; padding: .45rem .6rem; border: 1px solid var(--color-rule); border-radius: var(--radius-control); background: var(--color-paper); color: var(--color-ink); }
 select:hover, input:not([type="checkbox"]):not([type="range"]):hover { border-color: var(--color-ink-2); }
@@ -82,7 +77,7 @@ select:invalid, input:invalid { border-color: var(--color-focus); }
   .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .app-rail { position: relative; display: flex; height: auto; flex-direction: row; align-items: center; gap: var(--space-sm); padding: var(--space-2xs) var(--space-sm); border-inline-end: 0; border-block-end: 1px solid var(--color-rule); }
   .view-nav { display: flex; min-width: 0; justify-content: end; gap: var(--space-3xs); }
-  .view-nav-item { min-height: 2.5rem; gap: var(--space-2xs); padding-inline: var(--space-2xs); }
+  .view-nav-item { min-height: 2.5rem; padding-inline: var(--space-2xs); }
   .app-content { min-height: calc(100dvh - 3.5rem); }
   .app-toolbar { padding-inline: var(--space-sm); }
   .app-footer { padding-inline-start: max(var(--space-sm), env(safe-area-inset-left)); padding-inline-end: max(var(--space-sm), env(safe-area-inset-right)); }
@@ -91,9 +86,8 @@ select:invalid, input:invalid { border-color: var(--color-focus); }
 @media (max-width: 39.999rem) {
   .app-rail { grid-template-columns: minmax(0, 1fr); gap: var(--space-2xs); padding-block: var(--space-2xs); padding-inline-start: max(var(--space-sm), env(safe-area-inset-left)); padding-inline-end: max(var(--space-sm), env(safe-area-inset-right)); }
   .view-nav { justify-content: stretch; }
-  .view-nav-item { flex: 1; justify-content: center; gap: var(--space-3xs); padding-inline: var(--space-3xs); font-size: var(--text-xs); }
+  .view-nav-item { flex: 1; justify-content: center; padding-inline: var(--space-3xs); font-size: var(--text-xs); }
   .nav-label { white-space: nowrap; }
-  .nav-glyph { width: .8rem; height: .8rem; }
   .app-toolbar { align-items: flex-start; flex-direction: column; gap: var(--space-2xs); padding-block: var(--space-2xs); }
   .connection-state { flex-wrap: wrap; }
   .view-content { min-height: 0; }

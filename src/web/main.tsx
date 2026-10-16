@@ -125,7 +125,7 @@ function App() {
     <aside className="app-rail">
       <nav className="view-nav" aria-label={t('Main view')}>
         {(['overview', 'architecture', 'impact'] as const).map(key => <a key={key} href={viewHref(key)} className={view === key ? 'view-nav-item is-active' : 'view-nav-item'} aria-label={t(key === 'overview' ? 'Overview' : key === 'architecture' ? 'Architecture' : 'Impact')} aria-current={view === key ? 'page' : undefined} onClick={event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); selectView(key); }}>
-          <span className={`nav-glyph nav-glyph-${key}`} aria-hidden="true" /><span className="nav-label">{t(key === 'overview' ? 'Overview' : key === 'architecture' ? 'Architecture' : 'Impact')}</span>
+          <span className="nav-label">{t(key === 'overview' ? 'Overview' : key === 'architecture' ? 'Architecture' : 'Impact')}</span>
         </a>)}
       </nav>
     </aside>
