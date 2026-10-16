@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import cytoscape, { type Core } from 'cytoscape';
 import { ArchitectureView } from './architecture-view.js';
 import { ImpactView } from './impact-view.js';
 import { I18nProvider, useI18n } from './i18n.js';
