@@ -39,8 +39,14 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
   app.get('/api/v1/workspaces', (c) => c.json({ workspaces: store.workspaces() }));
   app.get('/api/v1/workspaces/:workspaceId/reanalysis', (c) => {
     const workspaceId = c.req.param('workspaceId');
-    const state = store.sourceReanalysisState(workspaceId);
-    return state ? c.json(state) : c.json({ error: 'Workspace not found.', code: 'WORKSPACE_NOT_FOUND' }, 404);
+    try {
+      const state = store.sourceReanalysisState(workspaceId);
+      return state ? c.json(state) : c.json({ error: 'Workspace not found.', code: 'WORKSPACE_NOT_FOUND' }, 404);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'SOURCE_REANALYSIS_STATE_TOO_LARGE') return c.json({ error: 'Workspace source state exceeds the 64 KiB response limit.', code: 'SOURCE_STATE_TOO_LARGE' }, 422);
+      if (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') return c.json({ error: 'Workspace active generation metadata exceeds the source state limit.', code: 'SOURCE_STATE_LIMIT_EXCEEDED' }, 422);
+      throw error;
+    }
   });
   app.post('/api/v1/sync', async (c) => {
     const body = await c.req.json().catch(() => ({})) as { workspaces?: string[]; demo?: boolean };

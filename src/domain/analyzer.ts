@@ -32,6 +32,11 @@ export type AnalysisContext = {
 };
 
 export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
+export type SourceMappingSummary = {
+  contractVersion: 'source-mapping-summary-v1';
+  input: { analyzerId: 'builtin.codegraph'; generationId: number };
+  counts: { mapped: number; unresolved: number; unverified: number; ambiguous: number; unsupported: number };
+};
 export type ArchitectureInputGeneration = AnalysisInputGeneration & {
   sourceRevision?: string;
   identityVersion?: number;
@@ -91,6 +96,8 @@ export type AnalysisResult = {
   sourceRevision?: string;
   /** Exact active generations consumed to derive this result. */
   inputGenerations?: AnalysisInputGeneration[];
+  /** Optional bounded summary of source bindings used by this semantic output. */
+  sourceMappingSummary?: SourceMappingSummary;
   nodes: GraphNode[];
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
