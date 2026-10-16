@@ -25,10 +25,11 @@ export type SourceCatalogSnapshot = {
   providerVersion: '1.6.2';
   /** Raw values exposed by the pinned provider; consumers must not normalize or infer semantics. */
   coordinateConvention: 'provider-raw';
-  /** A source identity is adopted only when its complete raw range matches an independently parsed declaration. */
-  declarationAnchorConvention: 'exact-tuple-runtime-validation-only';
+  /** Candidate starts are provider-raw and accepted only after exact start, kind, unique-candidate, and name checks. */
+  declarationAnchorConvention: 'provider-raw-start-kind-name-unique';
   workspaceId: string;
   input: AnalysisInputGeneration & { analyzerId: 'builtin.codegraph' };
+  sourceRevision: string;
   repositoryKey: string;
   files: readonly SourceCatalogFile[];
   symbols: readonly SourceCatalogSymbol[];
