@@ -49,16 +49,30 @@ export class CrossWorkspaceQueryService {
       if (error instanceof CrossWorkspaceResolutionError && error.code === 'CROSS_WORKSPACE_LIMIT_EXCEEDED') throw tooLarge();
       throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED', 'Could not resolve the cross-workspace architecture graph.', 500);
     }
-    const graph = buildSystemGraph(snapshot, resolution, query.includeEvidence);
+    const graph = buildSystemGraph(snapshot, resolution, false);
     const workspaceNames = new Map(snapshot.generations.map((item) => [item.workspace.id, item.workspace.name]));
     const roots = selectRoots(graph.nodes, graph.edges, query, workspaceIds, workspaceNames);
     const offset = cursor?.offset ?? 0;
     if (cursor && offset >= roots.length) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
     const pageRoots = roots.slice(offset, offset + query.limit);
     const closure = buildClosure(graph.nodes, graph.edges, pageRoots, query.depth);
-    if (closure.nodes.length > 3000 || closure.edges.length > 6000) throw tooLarge();
-    const evidenceCount = closure.edges.reduce((total, edge) => total + edge.evidence.reduce((count, item) => count + 1 + item.sources.reduce((sourceCount, source) => sourceCount + source.evidenceIds.length, 0), 0), 0);
-    if (query.includeEvidence && evidenceCount > 5000) throw tooLarge();
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw tooLarge();
+    const selectedNodeKeys=new Set(closure.nodes.filter((node)=>node.scope==='workspace').map((node)=>systemNodeKey(node.workspaceId,node.id)));
+    const selectedEdgeKeys=new Set(closure.edges.filter((edge)=>edge.scope==='workspace').map((edge)=>edge.id));
+    const sourceNodes=snapshot.generations.flatMap((item)=>item.nodes.filter((node)=>selectedNodeKeys.has(systemNodeKey(item.workspace.id,node.id))));
+    const sourceEdges=snapshot.generations.flatMap((item)=>item.edges.filter((edge)=>selectedEdgeKeys.has(systemEdgeKey(item.workspace.id,edge.id))));
+    let hydrated;
+    try { hydrated=this.store.projectGraphAtSnapshot(sourceNodes,sourceEdges,[...snapshot.activeGenerationVector],query.includeEvidence); }
+    catch(error){if(error instanceof Error&&error.message==='UNIFIED_GRAPH_SNAPSHOT_CHANGED')throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED','An active architecture generation changed while paging.',409);if(error instanceof GraphProjectionError||(error instanceof Error&&error.message==='UNIFIED_GRAPH_LIMIT_EXCEEDED'))throw tooLarge();throw error;}
+    const hydratedNodes=new Map(hydrated.nodes.map((node)=>[systemNodeKey(node.workspaceId,node.id),node]));
+    const hydratedEdges=new Map(hydrated.edges.map((edge)=>[systemEdgeKey(edge.workspaceId,edge.id),edge]));
+    let selectedCrossEdges=new Map<string,SystemEdge>();
+    if(query.includeEvidence){try{const evidenceSnapshot=withHydratedEvidence(snapshot,hydrated.nodes,hydrated.edges);selectedCrossEdges=new Map(resolveCrossWorkspace(evidenceSnapshot).edges.filter((edge)=>edge.scope==='cross-workspace').map((edge)=>[edge.id,edge]));}catch(error){if(error instanceof CrossWorkspaceResolutionError&&error.code==='CROSS_WORKSPACE_LIMIT_EXCEEDED')throw tooLarge();throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','Could not resolve selected evidence provenance.',500);}}
+    const outputNodes=closure.nodes.map((node)=>{if(node.scope!=='workspace')return node;const source=hydratedNodes.get(systemNodeKey(node.workspaceId,node.id));return source?{...node,properties:source.properties,level:source.level??node.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts}:node;});
+    const workspaceById=new Map(snapshot.generations.map((item)=>[item.workspace.id,item]));
+    const outputEdges=closure.edges.map((edge)=>{if(edge.scope==='cross-workspace')return selectedCrossEdges.get(edge.id)??edge;const original=sourceEdges.find((item)=>systemEdgeKey(item.workspaceId,item.id)===edge.id);const source=original?hydratedEdges.get(systemEdgeKey(original.workspaceId,original.id)):undefined;if(!original||!source)return edge;const workspace=workspaceById.get(original.workspaceId)!;return {...edge,properties:source.properties,level:source.level??edge.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts,evidence:query.includeEvidence?[toCrossEvidence(workspace,original.sourceId,edge.id,'edge',source.evidence??[])]:[]};});
+    const evidenceCost=outputEdges.reduce((total,edge)=>total+edge.evidence.reduce((sum,item)=>sum+1+item.sources.reduce((sourceCount,source)=>sourceCount+source.evidenceIds.length,0),0),0);
+    if(query.includeEvidence&&evidenceCost>5000)throw tooLarge();
     const diagnostics = query.includeDiagnostics ? relevantDiagnostics(resolution.diagnostics, closure.nodes) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + pageRoots.length;
@@ -74,14 +88,14 @@ export class CrossWorkspaceQueryService {
       snapshot: {
         id: snapshot.snapshotId,
         generations: snapshot.generations.map((item) => item.generation),
-        activeGenerations: snapshot.generations.flatMap((item) => item.activeGenerations.map((generation) => ({ workspaceId: item.workspace.id, ...generation }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
+        activeGenerations: snapshot.activeGenerationVector,
         inputGenerations: snapshot.generations.flatMap((item) => item.inputGenerations.map((input) => ({ workspaceId: item.workspace.id, ...input }))).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
       },
       query: { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.workspace !== undefined ? { workspace: query.workspace } : {}), depth: query.depth },
       page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
       rootIds: pageRoots.map((node) => node.id),
-      nodes: closure.nodes,
-      edges: closure.edges,
+      nodes: outputNodes,
+      edges: outputEdges,
       ...(diagnostics ? { diagnostics } : {}),
     };
     if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 3 * 1_048_576) throw tooLarge();
@@ -89,7 +103,7 @@ export class CrossWorkspaceQueryService {
   }
 
   private readSnapshot(workspaceIds: string[]): CrossWorkspaceSnapshot {
-    try { return this.store.crossWorkspaceArchitectureSnapshot(workspaceIds); }
+    try { return this.store.crossWorkspaceArchitectureSnapshot(workspaceIds, false); }
     catch (error) {
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
       const message = error instanceof Error ? error.message : String(error);
@@ -251,6 +265,11 @@ function buildClosure(allNodes: SystemNode[], allEdges: SystemEdge[], roots: Sys
 }
 function systemNodeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
 function systemEdgeKey(workspaceId: string, id: string) { return `${workspaceId}\0${id}`; }
+function withHydratedEvidence(snapshot:CrossWorkspaceSnapshot,nodes:GraphNode[],edges:GraphEdge[]):CrossWorkspaceSnapshot{
+  const nodeMap=new Map(nodes.map((item)=>[systemNodeKey(item.workspaceId,item.id),item]));const edgeMap=new Map(edges.map((item)=>[systemEdgeKey(item.workspaceId,item.id),item]));
+  const generations=snapshot.generations.map((workspace)=>{const selectedNodes=workspace.nodes.map((item)=>nodeMap.get(systemNodeKey(workspace.workspace.id,item.id))??item);const selectedEdges=workspace.edges.map((item)=>edgeMap.get(systemEdgeKey(workspace.workspace.id,item.id))??item);const evidence=[...selectedNodes.flatMap((item)=>item.evidence??[]),...selectedEdges.flatMap((item)=>item.evidence??[])];return {...workspace,nodes:selectedNodes,edges:selectedEdges,evidence};});
+  return {...snapshot,generations};
+}
 function relevantDiagnostics(items: readonly AnalysisDiagnostic[], nodes: SystemNode[]) {
   const contracts = new Set(nodes.filter((node) => node.scope === 'global').map((node) => JSON.stringify(node.properties)));
   return items.filter((item) => {
