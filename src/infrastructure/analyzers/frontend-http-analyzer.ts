@@ -28,7 +28,7 @@ export const frontendHttpAnalyzer: Analyzer = {
       catch { throw new Error(`Frontend source '${file.path}' is not valid UTF-8.`); }
       return { file, source };
     });
-    const sourceCatalog = requireSourceCatalog(context, decodedSources.map(({ file, source }) => ({ path: file.path, source, hash: file.hash })));
+    const sourceCatalog = requireSourceCatalog(context, decodedSources.map(({ file, source }) => ({ path: file.path, source, bytes: file.bytes, hash: file.hash })));
     const catalogFiles = new Map(sourceCatalog.files.map((file) => [file.relativePath, file]));
     const nodes: GraphNode[] = [], edges: GraphEdge[] = [], evidence: AnalysisEvidence[] = [], diagnostics: AnalysisDiagnostic[] = [];
     const nodeMap = new Map<string, GraphNode>();
