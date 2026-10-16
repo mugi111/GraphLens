@@ -24,6 +24,7 @@ export type WorkspaceArchitectureSnapshot = {
 export type CrossWorkspaceSnapshot = {
   snapshotId: string;
   requestedWorkspaceIds: readonly string[];
+  activeGenerationVector: readonly { workspaceId: string; analyzerId: string; generationId: number }[];
   generations: readonly WorkspaceArchitectureSnapshot[];
   missingArchitectureWorkspaceIds: readonly string[];
 };
