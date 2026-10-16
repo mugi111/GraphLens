@@ -39,7 +39,7 @@ export class DatabaseSchemaService {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
     let page: ReturnType<GraphStore['databaseQueryPage']>;
-    try { page = this.store.databaseQueryPage(query, cursor?.offset ?? 0) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
+    try { page = this.store.databaseQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
       if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', error.message, 422);
       throw error;
     }
@@ -54,10 +54,8 @@ export class DatabaseSchemaService {
     const pageRoots = page.rootIds;
     const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
     if (closure.nodes.length > 250 || closure.edges.length > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
-    let projection: ReturnType<GraphStore['projectGraph']>;
-    try { projection = this.store.projectGraph(closure.nodes, closure.edges, query.includeEvidence || query.includeDiagnostics); }
-    catch (error) { if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema projection exceeds evidence or property limits.', 422); throw error; }
-    const evidence = [...projection.nodes.flatMap((node) => node.evidence ?? []), ...projection.edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
+    const projection = { nodes: closure.nodes, edges: closure.edges };
+    const evidence = snapshot.evidence;
     const nextOffset = offset + pageRoots.length;
     const nextCursor = nextOffset < page.totalRootCount ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
