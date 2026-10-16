@@ -44,12 +44,12 @@ export function architectureConfig(input: Record<string, unknown>): Architecture
   return output;
 }
 
-export type ArchitectureSources = { workspaceId: string; fastApi?: ArchitectureInputGeneration; openApi?: ArchitectureInputGeneration; sqlAlchemy?: ArchitectureInputGeneration; frontendHttp?: ArchitectureInputGeneration };
+export type ArchitectureSources = { workspaceId: string; codeGraph?: ArchitectureInputGeneration; fastApi?: ArchitectureInputGeneration; openApi?: ArchitectureInputGeneration; sqlAlchemy?: ArchitectureInputGeneration; frontendHttp?: ArchitectureInputGeneration };
 export type ArchitectureResolution = { nodes: GraphNode[]; edges: GraphEdge[]; evidence: AnalysisEvidence[]; diagnostics: AnalysisDiagnostic[]; inputGenerations: AnalysisInputGeneration[] };
 
 export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Record<string, unknown>): ArchitectureResolution {
   const config = architectureConfig(rawConfig);
-  const inputs = [sources.fastApi, sources.openApi, sources.sqlAlchemy, sources.frontendHttp].filter((x): x is ArchitectureInputGeneration => !!x);
+  const inputs = [sources.codeGraph, sources.fastApi, sources.openApi, sources.sqlAlchemy, sources.frontendHttp].filter((x): x is ArchitectureInputGeneration => !!x);
   const inputGenerations = inputs.map(({ analyzerId, generationId }) => ({ analyzerId, generationId })).sort((a, b) => a.analyzerId.localeCompare(b.analyzerId));
   const diagnostics: AnalysisDiagnostic[] = [];
   const nodes: GraphNode[] = [];
@@ -334,19 +334,23 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
     if (!generation || processedClosures.has(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`)) return;
     processedClosures.add(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`);
-    const byId = new Map(generation.nodes.map((node) => [node.id, node]));
-    const allowedKinds = new Set(['api_endpoint', 'fastapi_route', 'openapi_operation', 'python_function', 'python_class', 'api_parameter', 'api_request_body', 'api_response', 'api_security_requirement', 'api_security_scheme', 'api_schema_reference', 'api_schema', 'sqlalchemy_model', 'sqlalchemy_table', 'frontend_file', 'frontend.http_request']);
+    const byId = new Map([...generation.nodes, ...(sources.codeGraph?.nodes ?? [])].map((node) => [node.id, node]));
+    const codeGraphEdges = sources.codeGraph?.edges.filter((edge) => edge.kind === 'calls' || edge.kind === 'references') ?? [];
+    const codeGraphNodeIds = new Set(sources.codeGraph?.nodes.map((node) => node.id) ?? []);
+    const codeGraphEdgeIds = new Set(codeGraphEdges.map((edge) => edge.id));
+    const closureEdges = [...generation.edges, ...codeGraphEdges];
+    const allowedKinds = new Set(['api_endpoint', 'fastapi_route', 'openapi_operation', 'python_function', 'python_class', 'code.function', 'code.class', 'file', 'api_parameter', 'api_request_body', 'api_response', 'api_security_requirement', 'api_security_scheme', 'api_schema_reference', 'api_schema', 'sqlalchemy_model', 'sqlalchemy_table', 'frontend_file', 'frontend.http_request']);
     const allowedEdges = new Set(['exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'http_request']);
     const addNode = (node: GraphNode | undefined) => {
       if (!node || !allowedKinds.has(node.kind)) return;
       const safe: Record<string, unknown> = {};
       const fields: Record<string, string[]> = {
-        api_endpoint: ['namespace', 'method', 'path', 'pathShape', 'operationId', 'securityMode'], fastapi_route: ['namespace', 'path', 'pathShape', 'methods', 'operationId'],
+        api_endpoint: ['namespace', 'method', 'path', 'pathShape', 'operationId', 'securityMode'], fastapi_route: ['namespace', 'path', 'pathShape', 'methods', 'operationId'], 'code.function': ['qualifiedName', 'language', 'signature', 'isAsync'], 'code.class': ['qualifiedName', 'language'],
         openapi_operation: ['documentPath', 'method', 'path', 'operationId', 'securityMode'], python_function: ['module', 'qualifiedName', 'async'], python_async_function: ['module', 'qualifiedName', 'async'], python_class: ['module', 'qualifiedName'], openapi_schema: ['name'],
         api_parameter: ['name', 'alias', 'in', 'required', 'contentTypes'], api_request_body: ['required', 'contentTypes', 'model'], api_response: ['status', 'statusCode', 'model'],
         api_security_requirement: ['alternative', 'scopes', 'requirementGroup', 'mode', 'required'], api_security_scheme: ['constructor', 'scheme', 'type', 'name', 'in'], api_schema_reference: ['ref', 'referenceKind'], api_schema: ['name'],
         sqlalchemy_model: ['module', 'qualifiedName', 'tableName', 'schema', 'databaseNamespace'], sqlalchemy_table: ['tableName', 'schema', 'databaseNamespace'],
-        frontend_file: ['path'], 'frontend.http_request': ['path', 'method', 'filePath', 'offset'],
+        frontend_file: ['path'], file: ['path', 'language'], 'frontend.http_request': ['path', 'method', 'filePath', 'offset'],
       };
       for (const key of fields[node.kind] ?? []) if (node.properties[key] !== undefined && (typeof node.properties[key] !== 'object' || node.properties[key] === null)) safe[key] = node.properties[key];
       let projected = projectedNodesById.get(node.id);
@@ -368,8 +372,9 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         projected.properties = merged;
       }
       addSourceEvidence(generation, node.id, 'node');
+      if (codeGraphNodeIds.has(node.id) && sources.codeGraph) addSourceEvidence(sources.codeGraph, node.id, 'node');
     };
-    const addEdge = (edge: GraphEdge) => {
+    const addEdge = (edge: GraphEdge, sourceGeneration: ArchitectureInputGeneration = codeGraphEdgeIds.has(edge.id) ? sources.codeGraph! : generation) => {
       if (!allowedEdges.has(edge.kind)) return;
       const endpoints = [byId.get(edge.sourceId), byId.get(edge.targetId)];
       const newNodes = new Set(endpoints.filter((node): node is GraphNode => !!node && allowedKinds.has(node.kind) && !projectedNodesById.has(node.id)).map(({ id }) => id)).size;
@@ -377,11 +382,12 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       addNode(endpoints[0]); addNode(endpoints[1]);
       if (!projectedNodesById.has(edge.sourceId) || !projectedNodesById.has(edge.targetId)) return;
       if (!projectedEdgesById.has(edge.id)) {
-        const projectedEdge = { ...edge, analyzerId: generation.analyzerId, generationId: generation.generationId, level: 'DERIVED' };
+        const projectedEdge = { ...edge, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, level: 'DERIVED' };
         projectedEdgesById.set(edge.id, projectedEdge);
         edges.push(projectedEdge);
       }
-      addSourceEvidence(generation, edge.id, 'edge');
+      addSourceEvidence(sourceGeneration, edge.id, 'edge');
+      if (codeGraphEdgeIds.has(edge.id) && generation.edges.some((item) => item.id === edge.id)) addSourceEvidence(generation, edge.id, 'edge');
     };
     function addSourceEvidence(sourceGeneration: ArchitectureInputGeneration, subjectId: string, subjectKind: 'node' | 'edge') {
       const sourcesForSubject = sourceGeneration.evidence.filter((item) => item.subjectKind === subjectKind && item.subjectId === subjectId).sort((a, b) => a.id.localeCompare(b.id));
@@ -394,14 +400,14 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       }
     }
     addNode(endpoint);
-    const outgoing = (id: string) => generation.edges.filter((edge) => edge.sourceId === id && allowedEdges.has(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
-    const incoming = (id: string, kind: string) => generation.edges.filter((edge) => edge.targetId === id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
+    const outgoing = (id: string) => closureEdges.filter((edge) => edge.sourceId === id && allowedEdges.has(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
+    const incoming = (id: string, kind: string) => closureEdges.filter((edge) => edge.targetId === id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
     const callsQueue: Array<{ id: string; depth: number }> = [];
     const reachedClasses = new Set<string>();
     for (const edge of outgoing(endpoint.id)) {
       addEdge(edge);
-      if (edge.kind === 'depends_on' && byId.get(edge.targetId)?.kind === 'python_function') callsQueue.push({ id: edge.targetId, depth: 0 });
-      if (byId.get(edge.targetId)?.kind === 'python_class') reachedClasses.add(edge.targetId);
+      if (edge.kind === 'depends_on' && ['python_function','code.function'].includes(byId.get(edge.targetId)?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: 0 });
+      if (['python_class','code.class'].includes(byId.get(edge.targetId)?.kind ?? '')) reachedClasses.add(edge.targetId);
       if (edge.kind === 'maps_to' && byId.get(edge.targetId)?.kind === 'sqlalchemy_model') {
         for (const relation of outgoing(edge.targetId)) if (relation.kind === 'contains' && byId.get(relation.targetId)?.kind === 'sqlalchemy_table') addEdge(relation);
       }
@@ -436,8 +442,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         if (!['calls', 'references', 'depends_on'].includes(edge.kind)) continue;
         addEdge(edge);
         const target = byId.get(edge.targetId);
-        if (target?.kind === 'python_function' && current.depth < config.maxTraversalDepth) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
-        if (target?.kind === 'python_class') reachedClasses.add(target.id);
+        if (['python_function','code.function'].includes(target?.kind ?? '') && current.depth < config.maxTraversalDepth) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
+        if (['python_class','code.class'].includes(target?.kind ?? '')) reachedClasses.add(target!.id);
       }
     }
     if (sources.sqlAlchemy && generation.analyzerId === 'builtin.fastapi') for (const classId of reachedClasses) {

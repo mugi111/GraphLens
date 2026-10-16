@@ -13,6 +13,7 @@ export class AnalyzerRunner {
   constructor(private readonly store: GraphStore, private readonly registry: AnalyzerRegistry) {}
   list(): AnalyzerDescriptor[] { return this.registry.list(); }
   start(request: StartAnalysisRequest): AnalysisRun {
+    if (request.analyzerId === 'builtin.python-source') throw new AnalysisError('ANALYZER_RETIRED', 'builtin.python-source is retired. Run builtin.codegraph, then the semantic analyzers that consume its source catalog.');
     const analyzer = this.registry.get(request.analyzerId);
     if (!analyzer) throw new AnalysisError('ANALYZER_NOT_FOUND', `Analyzer '${request.analyzerId}' is not registered.`);
     const workspace = this.store.getWorkspace(request.workspaceId);
