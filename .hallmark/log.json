@@ -1,0 +1,10 @@
+{
+  "scope": "app",
+  "designSystem": "design.md",
+  "genre": "modern-minimal",
+  "macrostructure": "Map / Diagram",
+  "theme": "Cobalt",
+  "navigation": "N3 Side-rail",
+  "footer": "Ft2 Inline",
+  "pages": ["Overview", "Architecture", "Impact"]
+}

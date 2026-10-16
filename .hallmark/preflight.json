@@ -1,0 +1,9 @@
+{
+  "scannedAt": "2026-10-16",
+  "fontStack": "Inter with system sans fallbacks (src/web/style.css)",
+  "palette": "dark navy base, teal accent, blue/green/amber graph categories (src/web/style.css, src/web/architecture.css, src/web/impact.css)",
+  "motion": "motion-cut; no motion library detected in package.json",
+  "spacing": "no named spacing tokens detected; spacing uses rem/clamp values",
+  "framework": "React 19 with Vite 7 (package.json)",
+  "designSystem": "no design.md, DESIGN.md, or .hallmark/log.json found"
+}
