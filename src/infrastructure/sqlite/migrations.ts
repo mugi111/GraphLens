@@ -372,3 +372,19 @@ export const sourceMappingSummaryMigration: SchemaMigration = {
     db.exec('ALTER TABLE analysis_generations ADD COLUMN source_mapping_summary_json TEXT');
   },
 };
+
+/** Deactivates legacy fixture data so real-data views cannot present it as current analysis. */
+export const realDataOnlyMigration: SchemaMigration = {
+  version: 10,
+  name: 'deactivate-legacy-demo-generations',
+  up(db) {
+    db.exec(`
+      WITH RECURSIVE fixture_derived(generation_id) AS (
+        SELECT g.id FROM analysis_generations g JOIN analysis_runs r ON r.id=g.run_id WHERE r.analyzer_id='builtin.demo'
+        UNION
+        SELECT inputs.generation_id FROM analysis_generation_inputs inputs JOIN fixture_derived parent ON parent.generation_id=inputs.input_generation_id
+      )
+      DELETE FROM active_analysis_generations WHERE analyzer_id='builtin.demo' OR generation_id IN (SELECT generation_id FROM fixture_derived);
+    `);
+  },
+};

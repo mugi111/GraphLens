@@ -26,7 +26,7 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
     const location = point(region.from, offsets);
     return { code: 'PYTHON_SYNTAX_RECOVERED', severity: 'warning', message: 'Python syntax error; facts intersecting the damaged syntax were omitted.', uri: file.path, line: location.line, detail: { startOffset: region.from, endOffset: region.to } };
   });
-  const addNode = (uri: string, kind: string, label: string, range: Range, properties: Record<string, unknown> = {}) => {
+  const addNode = (uri: string, kind: string, label: string, range: Range, properties: Record<string, unknown> = {}): GraphNode => {
     const id = identity.node(workspace.id, `python://${file.path}#${uri}`, kind);
     const existing = nodesById.get(id);
     if (existing) return existing;

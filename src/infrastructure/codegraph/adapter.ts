@@ -27,15 +27,6 @@ export class CodeGraphAdapter {
   }
 }
 export function workspaceFor(path: string, id?: string): Workspace { const absolute = resolve(path); return { id: id ?? stable('workspace', absolute), path: absolute, name: basename(absolute) || absolute }; }
-export function demoSnapshot(path: string): GraphSnapshot {
-  const workspace = workspaceFor(path);
-  const n = (id: string, label: string, kind: string, properties = {}) => ({ id: stable(workspace.id, id), workspaceId: workspace.id, label, kind, properties, evidence: [{ type: 'demo', detail: 'Local preview fixture; not CodeGraph data.' }] });
-  const a = n('app', 'Application', 'module', { role: 'entrypoint' });
-  const b = n('api', 'HTTP API', 'module', { role: 'transport' });
-  const c = n('store', 'Graph Store', 'database', { role: 'persistence' });
-  const e = (id: string, sourceId: string, targetId: string) => ({ id: stable(workspace.id, id), workspaceId: workspace.id, sourceId, targetId, kind: 'depends_on', properties: { fixture: true } });
-  return { workspace, source: 'demo', nodes: [a,b,c], edges: [e('app-api', a.id,b.id),e('api-store',b.id,c.id)] };
-}
 function stable(scope: string, value: string) { return createHash('sha256').update(`${scope}:${value}`).digest('hex').slice(0, 24); }
 function unsupported(detail: string): CodeGraphStatus { return { configured: false, connected: false, fullEnumeration: { supported: false, detail }, detail }; }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }

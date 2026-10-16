@@ -10,7 +10,7 @@ import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 import { normalizeRelativeSourcePath } from '../../core/source-path.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { projectEdgeContributions, projectNodeContributions } from '../../application/unified-graph-projection.js';
-import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations, sourceMappingSummaryMigration } from './migrations.js';
+import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations, sourceMappingSummaryMigration, realDataOnlyMigration } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -38,7 +38,7 @@ export class GraphStore implements ArchitectureInputProvider {
       this.db = new Database(file);
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('journal_mode = WAL');
-      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, sourceMappingSummaryMigration]);
+      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, sourceMappingSummaryMigration, realDataOnlyMigration]);
       if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
     }
     this.db.function('valid_contract_namespace', (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 256 && value !== 'default' && !value.includes('\0') ? 1 : 0);
@@ -48,7 +48,7 @@ export class GraphStore implements ArchitectureInputProvider {
   private assertReadOnlySchema(): void {
     const versions = this.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
     const applied = new Set(versions.map(({ version }) => version));
-    if (versions.some(({ version }) => version > 9) || [1, 2, 3, 4, 5, 6, 7, 8, 9].some((version) => !applied.has(version))) {
+    if (versions.some(({ version }) => version > 10) || [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].some((version) => !applied.has(version))) {
       throw new Error('Database schema is not initialized or is incompatible with this GraphLens version.');
     }
     const required: Record<string, string[]> = {
@@ -108,7 +108,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const insertEvidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
       for (const snapshot of snapshots) {
         this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name').run(snapshot.workspace.id, snapshot.workspace.path, snapshot.workspace.name, now);
-        const analyzerId = snapshot.source === 'demo' ? 'builtin.demo' : 'builtin.codegraph';
+        const analyzerId = 'builtin.codegraph';
         const runId = randomUUID();
         start.run(runId, snapshot.workspace.id, analyzerId, '1.0.0', 'succeeded', null, '{}', now, now);
         const result = generation.run(runId, snapshot.workspace.id, analyzerId, now, snapshot.nodes.length, snapshot.edges.length);
@@ -379,7 +379,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const diagnostics = (this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
       if (diagnostics.length > 1000) throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
       const inputGenerations = (this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id LIMIT 257').all(generationId) as any[]).map((row)=>({analyzerId:row.analyzerId,generationId:Number(row.generationId)}));
-      return { snapshot: { workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes:projection.nodes,edges:projection.edges,evidence:[...projection.nodes.flatMap((node)=>node.evidence??[]),...projection.edges.flatMap((edge)=>edge.evidence??[])],diagnostics,inputGenerations,activeGenerations,projectionSnapshotId } as DatabaseSchemaSnapshot & { inputGenerations:Array<{analyzerId:string;generationId:number}> },rootIds,totalRootCount };
+      return { snapshot: { workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes:projection.nodes,edges:projection.edges,evidence:[...projection.nodes.flatMap((node)=>node.evidence??[]),...projection.edges.flatMap((edge)=>edge.evidence??[])] as unknown as AnalysisEvidence[],diagnostics,inputGenerations,activeGenerations,projectionSnapshotId } as DatabaseSchemaSnapshot & { inputGenerations:Array<{analyzerId:string;generationId:number}> },rootIds,totalRootCount };
     });
     return read();
   }
@@ -455,7 +455,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const projection=this.unifiedPage(selectedIds.map((id)=>({workspaceId:input.workspace,id})),edgeRows.map((edge)=>({workspaceId:edge.workspace_id,id:edge.id})),input.includeEvidence);
       const diagnostics=(this.db.prepare('SELECT sequence,generation_id,code,severity,message,uri,line,detail_json FROM diagnostics WHERE run_id=? ORDER BY sequence LIMIT 1001').all(active.run_id) as any[]).map((row)=>({sequence:row.sequence,generationId:row.generation_id??undefined,code:row.code,severity:row.severity,message:row.message,uri:row.uri??undefined,line:row.line??undefined,detail:row.detail_json?JSON.parse(row.detail_json):undefined} as StoredAnalysisDiagnostic));
       if(diagnostics.length>1000)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
-      return {snapshot:{workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes:projection.nodes,edges:projection.edges,evidence:[...projection.nodes.flatMap((node)=>node.evidence??[]),...projection.edges.flatMap((edge)=>edge.evidence??[])],diagnostics,activeGenerations,projectionSnapshotId} satisfies DatabaseSchemaSnapshot,rootIds,totalRootCount};
+      return {snapshot:{workspace:{id:active.workspace_id,name:active.name},analysis:{analyzerId:active.analyzer_id,analyzerVersion:active.analyzer_version,generationId,runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},nodes:projection.nodes,edges:projection.edges,evidence:[...projection.nodes.flatMap((node)=>node.evidence??[]),...projection.edges.flatMap((edge)=>edge.evidence??[])] as unknown as AnalysisEvidence[],diagnostics,activeGenerations,projectionSnapshotId} satisfies DatabaseSchemaSnapshot,rootIds,totalRootCount};
     });
     return read();
   }
@@ -501,7 +501,7 @@ export class GraphStore implements ArchitectureInputProvider {
         const projection = this.unifiedPage(nodeKeys, edgeKeys, includeEvidence);
         const nodes = projection.nodes;
         const edges = projection.edges;
-        const evidence = [...nodes.flatMap((node) => node.evidence ?? []), ...edges.flatMap((edge) => edge.evidence ?? [])] as AnalysisEvidence[];
+        const evidence = [...nodes.flatMap((node) => node.evidence ?? []), ...edges.flatMap((edge) => edge.evidence ?? [])] as unknown as AnalysisEvidence[];
         projectedOwners += [...nodes, ...edges].reduce((sum, item) => sum + (item.contributors?.length ?? 1), 0);
         projectedEvidence += evidence.length;
         projectedPropertyBytes += Buffer.byteLength(JSON.stringify([...nodes.map((item) => item.properties), ...edges.map((item) => item.properties)]), 'utf8');

@@ -49,10 +49,9 @@ export function createApp(store: GraphStore, adapter: CodeGraphAdapter, graphSer
     }
   });
   app.post('/api/v1/sync', async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { workspaces?: string[]; demo?: boolean };
-    if (body.demo !== true) return c.json({ error: 'This endpoint only activates the local demo fixture. Use analysis runs for source analyzers.' }, 400);
+    const body = await c.req.json().catch(() => ({})) as { workspaces?: string[] };
     const paths = Array.isArray(body.workspaces) ? body.workspaces : workspacePaths;
-    const { run, alreadyRunning } = graphService.startSync(paths, body.demo === true);
+    const { run, alreadyRunning } = graphService.startSync(paths);
     return c.json(run, alreadyRunning ? 409 : 202);
   });
   app.get('/api/v1/sync/:runId', (c) => { const run = store.run(c.req.param('runId')); return run ? c.json(run) : c.json({ error: 'Sync run not found' }, 404); });

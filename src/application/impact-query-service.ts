@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AnalysisEvidence } from '../domain/analyzer.js';
 import type { CrossWorkspaceEvidence, CrossWorkspaceSnapshot, SystemEdge, SystemNode, WorkspaceArchitectureSnapshot } from '../domain/federation.js';
-import type { GraphNode } from '../domain/graph.js';
+import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import { CrossWorkspaceResolutionError, MAX_CONTRACT_NAMESPACE_LENGTH, MAX_CONTRACT_PATH_LENGTH, resolveCrossWorkspace } from './cross-workspace-resolver.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
 import { GraphProjectionError } from './unified-graph-projection.js';
@@ -65,8 +65,8 @@ export class ImpactQueryService {
     let selectedCrossEdges=new Map<string,SystemEdge>();
     if(query.includeEvidence){try{selectedCrossEdges=new Map(resolveCrossWorkspace(withHydratedEvidence(snapshot,hydrated.nodes,hydrated.edges)).edges.filter((edge)=>edge.scope==='cross-workspace').map((edge)=>[edge.id,edge]));}catch(error){if(error instanceof CrossWorkspaceResolutionError&&error.code==='CROSS_WORKSPACE_LIMIT_EXCEEDED')throw tooLarge();throw new ImpactQueryError('IMPACT_QUERY_FAILED','Could not resolve selected evidence provenance.',500);}}
     const outputNodes=nodes.map((node)=>{if(node.scope!=='workspace')return node;const source=hydratedNodes.get(`${node.workspaceId}\0${node.id}`);return source?{...node,properties:source.properties,level:source.level??node.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts}:node;});
-    let outputEdges=result.edges.map((edge)=>{const sourceKey=result.sourceEdgeIds.get(edge.id);if(edge.scope==='cross-workspace')return selectedCrossEdges.get(edge.id)??edge;if(!sourceKey)return edge;const source=hydratedEdges.get(sourceKey);if(!source)return edge;const sourceRecord=sourceEdges.find((item)=>`${item.workspaceId}\0${item.id}`===sourceKey);const workspace=sourceRecord&&snapshot.generations.find((item)=>item.workspace.id===sourceRecord.workspaceId);if(!sourceRecord||!workspace)return edge;return {...edge,properties:source.properties,level:source.level??edge.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts,evidence:query.includeEvidence?[toEvidence(workspace,sourceRecord.sourceId,edge.id,'edge',source.evidence??[])]:[]};});
-    let evidence = query.includeEvidence ? [...hydrated.nodes.flatMap((node)=>{const workspace=snapshot.generations.find((item)=>item.workspace.id===node.workspaceId);return workspace&&node.evidence?.length?[toEvidence(workspace,node.id,node.id,'node',node.evidence)]:[];}), ...outputEdges.flatMap((edge) => edge.evidence)] : undefined;
+    let outputEdges=result.edges.map((edge)=>{const sourceKey=result.sourceEdgeIds.get(edge.id);if(edge.scope==='cross-workspace')return selectedCrossEdges.get(edge.id)??edge;if(!sourceKey)return edge;const source=hydratedEdges.get(sourceKey);if(!source)return edge;const sourceRecord=sourceEdges.find((item)=>`${item.workspaceId}\0${item.id}`===sourceKey);const workspace=sourceRecord&&snapshot.generations.find((item)=>item.workspace.id===sourceRecord.workspaceId);if(!sourceRecord||!workspace)return edge;return {...edge,properties:source.properties,level:source.level??edge.level,contributors:source.contributors,propertySources:source.propertySources,propertyConflicts:source.propertyConflicts,evidence:query.includeEvidence?[toEvidence(workspace,sourceRecord.sourceId,edge.id,'edge',(source.evidence??[]) as unknown as AnalysisEvidence[])]:[]};});
+    let evidence = query.includeEvidence ? [...hydrated.nodes.flatMap((node)=>{const workspace=snapshot.generations.find((item)=>item.workspace.id===node.workspaceId);return workspace&&node.evidence?.length?[toEvidence(workspace,node.id,node.id,'node',node.evidence as unknown as AnalysisEvidence[])]:[];}), ...outputEdges.flatMap((edge) => edge.evidence)] : undefined;
     if (evidence && evidence.reduce((sum, item) => sum + 1 + item.sources.reduce((n, source) => n + source.evidenceIds.length, 0), 0) > 5000) throw tooLarge();
     if (evidence) {
       const edgeEvidenceCount = outputEdges.reduce((count, edge) => count + edge.evidence.length, 0);
@@ -260,7 +260,7 @@ function isCanonicalContractId(value: string) {
 function createEdgeIdentity(edgeId: string, endpointId: string) { return createHash('sha256').update(`${edgeId}\0${endpointId}`).digest('hex'); }
 function withHydratedEvidence(snapshot:CrossWorkspaceSnapshot,nodes:GraphNode[],edges:GraphEdge[]):CrossWorkspaceSnapshot{
   const nodeMap=new Map(nodes.map((item)=>[`${item.workspaceId}\0${item.id}`,item]));const edgeMap=new Map(edges.map((item)=>[`${item.workspaceId}\0${item.id}`,item]));
-  const generations=snapshot.generations.map((workspace)=>{const selectedNodes=workspace.nodes.map((item)=>nodeMap.get(`${workspace.workspace.id}\0${item.id}`)??item);const selectedEdges=workspace.edges.map((item)=>edgeMap.get(`${workspace.workspace.id}\0${item.id}`)??item);const evidence=[...selectedNodes.flatMap((item)=>item.evidence??[]),...selectedEdges.flatMap((item)=>item.evidence??[])];return {...workspace,nodes:selectedNodes,edges:selectedEdges,evidence};});
+  const generations=snapshot.generations.map((workspace)=>{const selectedNodes=workspace.nodes.map((item)=>nodeMap.get(`${workspace.workspace.id}\0${item.id}`)??item);const selectedEdges=workspace.edges.map((item)=>edgeMap.get(`${workspace.workspace.id}\0${item.id}`)??item);const evidence=[...selectedNodes.flatMap((item)=>item.evidence??[]),...selectedEdges.flatMap((item)=>item.evidence??[])] as unknown as AnalysisEvidence[];return {...workspace,nodes:selectedNodes,edges:selectedEdges,evidence};});
   return {...snapshot,generations};
 }
 function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, subjectId: string, subjectKind: 'node' | 'edge', items: readonly AnalysisEvidence[]): CrossWorkspaceEvidence {
@@ -304,7 +304,7 @@ function toEvidence(workspace: WorkspaceArchitectureSnapshot, nodeId: string, su
   return {
     id: `impact-evidence://${workspace.workspace.id}/${subjectKind}/${encodeURIComponent(subjectId)}`, subjectKind, subjectId, level: 'DERIVED', type: 'architecture.source_evidence',
     sources: [...groupedSources.values()].map((source) => ({ ...source, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId, a.nodeId], [b.workspaceId, b.analyzerId, b.generationId, b.nodeId])),
-    sourceReferences: [...sourceEvidence.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId))),
+    sourceReferences: [...sourceEvidence.values()].map((source) => ({ workspaceId: source.workspaceId, analyzerId: source.analyzerId, generationId: source.generationId, evidenceIds: [...source.evidenceIds].sort() })).sort((a, b) => cmp([a.workspaceId, a.analyzerId, a.generationId], [b.workspaceId, b.analyzerId, b.generationId])),
     sourceLocationsUnavailable,
   };
 }

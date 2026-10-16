@@ -28,7 +28,7 @@ If a legacy database exists at `.graphlens/graphlens.sqlite` in the current dire
 
 Each successful sync writes a new immutable generation and switches the active generation within one SQLite transaction. A failed sync never replaces the current graph, so the browser continues to show the last successful snapshot.
 
-`POST /api/v1/sync` activates the local demo fixture, and `GET /api/v1/sync/:runId` returns its state. Source indexing uses the analyzer run API described below. The UI uses these read APIs:
+`GET /api/v1/sync/:runId` returns sync state. Source indexing uses the analyzer run API described below. The UI uses these read APIs:
 
 - `GET /api/v1/status`
 - `GET /api/v1/workspaces`
@@ -72,7 +72,7 @@ Plugins are exact-version npm packages stored under `<data-dir>/plugins/<plugin-
 
 **Security boundary:** package authors' analyzer code runs in-process with GraphLens permissions. This is not a sandbox. `--ignore-scripts` prevents npm lifecycle scripts, but it does not make imported plugin code safe; only install packages from sources you trust. GraphLens loads only packages already marked enabled in the selected database and never installs or updates packages automatically. Disabling/removing a plugin first clears its active graph contributions so they cannot remain visible after package removal.
 
-The built-in `builtin.demo` analyzer provides the same clearly labelled local fixture graph used by `--demo`. Startup records every supplied workspace even before it has an active generation.
+Startup records every supplied workspace even before it has an active generation. GraphLens does not generate placeholder graph data: graph views contain only results from analyzers run against registered workspaces. CodeGraph remains unavailable as a snapshot analyzer because its verified MCP interface does not expose a documented complete export operation.
 
 ### CodeGraph source requirements
 
@@ -114,7 +114,7 @@ Use the additive analyzer endpoints to run and poll an analyzer:
 curl http://127.0.0.1:4174/api/v1/analyzers
 curl -X POST http://127.0.0.1:4174/api/v1/analysis-runs \
   -H 'content-type: application/json' \
-  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.demo"}'
+  -d '{"workspaceId":"<workspace-id>","analyzerId":"builtin.python-source"}'
 curl http://127.0.0.1:4174/api/v1/analysis-runs/<run-id>
 ```
 
@@ -159,11 +159,14 @@ graphlens --workspace /repo \
 
 The command must start an MCP server that uses line-delimited JSON-RPC over stdin/stdout. GraphLens uses the connection and tool list for diagnostics only. MCP connection status is separate from the full snapshot imported by the SDK analyzer.
 
-For UI preview only, `--demo` loads a visibly labelled three-node fixture. It is never identified as CodeGraph data:
+## Package development
 
 ```sh
-npx graphlens --workspace . --demo
+npm run build
+npm run pack:check
 ```
+
+The published package includes compiled server and web assets. `npm start` requires a preceding build when running from a checkout.
 
 ### FastAPI source analyzer
 

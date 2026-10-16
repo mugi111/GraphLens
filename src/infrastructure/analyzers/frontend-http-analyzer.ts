@@ -52,8 +52,9 @@ export const frontendHttpAnalyzer: Analyzer = {
     for (const { file, source } of decodedSources) {
       const scriptKind = file.path.endsWith('.tsx') ? ts.ScriptKind.TSX : file.path.endsWith('.jsx') ? ts.ScriptKind.JSX : file.path.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS;
       const ast = ts.createSourceFile(file.path, source, ts.ScriptTarget.Latest, true, scriptKind);
-      if (ast.parseDiagnostics.length) {
-        const diagnostic = ast.parseDiagnostics[0]!;
+      const parseDiagnostics = (ast as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
+      if (parseDiagnostics.length) {
+        const diagnostic = parseDiagnostics[0]!;
         throw new Error(`Frontend source '${file.path}' has a parse error at line ${lineOfDiagnostic(ast, diagnostic)}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, ' ')}.`);
       }
       const fileNode = addNode('frontend_file', file.path, file.path, { path: file.path });
@@ -187,7 +188,7 @@ async function readStableBoundedFile(root: string, path: string, filePath: strin
     await handle.close();
   }
 }
-function assertSameFile(left: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number; ctimeMs: number }, right: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number; ctimeMs: number }, path: string) {
+function assertSameFile(left: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number | bigint; ctimeMs: number | bigint }, right: { dev: number | bigint; ino: number | bigint; size: number | bigint; mtimeMs: number | bigint; ctimeMs: number | bigint }, path: string) {
   if (left.dev !== right.dev || left.ino !== right.ino || left.size !== right.size || left.mtimeMs !== right.mtimeMs || left.ctimeMs !== right.ctimeMs) throw new Error(`Frontend path '${path}' changed identity or metadata during analysis.`);
 }
 async function assertNoSymlinkAncestors(root: string, path: string) {
@@ -253,7 +254,7 @@ function hasFetchBinding(ast: ts.SourceFile, file: string, budget: AstBudget) {
       if (name && ts.isIdentifier(name) && name.text === 'fetch') found = true;
     }
     if (ts.isImportSpecifier(node) && node.propertyName?.text === 'fetch') found = true;
-    if (ts.isBinaryExpression(node) && ts.isAssignmentOperator(node.operatorToken.kind) && containsFetchIdentifier(node.left, file, budget, depth + 1)) found = true;
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment && containsFetchIdentifier(node.left, file, budget, depth + 1)) found = true;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'eval') found = true;
     if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
       if ([ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator) && containsFetchIdentifier(node.operand, file, budget, depth + 1)) found = true;

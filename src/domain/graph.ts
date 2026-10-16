@@ -59,7 +59,7 @@ export type GraphSnapshot = {
   workspace: Workspace;
   nodes: GraphNode[];
   edges: GraphEdge[];
-  source: 'codegraph' | 'demo';
+  source: 'codegraph';
 };
 
 export type Workspace = { id: string; path: string; name: string };
