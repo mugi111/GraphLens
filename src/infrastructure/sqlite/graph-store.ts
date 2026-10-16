@@ -41,6 +41,8 @@ export class GraphStore implements ArchitectureInputProvider {
       runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration]);
       if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
     }
+    this.db.function('valid_contract_namespace', (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 256 && value !== 'default' && !value.includes('\0') ? 1 : 0);
+    this.db.function('valid_contract_path', (value: unknown) => typeof value === 'string' && value.startsWith('/') && value.length <= 2048 && !/[\u0000-\u001f\u007f?#]/.test(value) ? 1 : 0);
   }
   close() { this.db.close(); }
   private assertReadOnlySchema(): void {
@@ -541,6 +543,82 @@ export class GraphStore implements ArchitectureInputProvider {
     });
     return read.deferred(requestedWorkspaceIds);
   }
+  /** Select one federation root page and all participants for its contract keys in SQL before payload hydration. */
+  crossWorkspaceArchitecturePage(workspaceIds: readonly string[], query: { root: 'contract' | 'endpoint'; namespace?: string; method?: string; path?: string; workspace?: string; depth: number; limit: number; offset: number }) {
+    if (!Array.isArray(workspaceIds) || workspaceIds.length < 2 || workspaceIds.length > 16 || new Set(workspaceIds).size !== workspaceIds.length) throw new Error('Cross-workspace snapshot requires 2–16 unique workspace IDs.');
+    const requested = [...workspaceIds].sort();
+    return this.db.transaction(() => {
+      const ph = requested.map(() => '?').join(',');
+      const workspaceRows = this.db.prepare(`SELECT id,name FROM workspaces WHERE id IN (${ph}) ORDER BY id`).all(...requested) as Array<{id:string;name:string}>;
+      if (workspaceRows.length !== requested.length) throw new Error(`Workspace not found: ${requested.filter((id)=>!workspaceRows.some((row)=>row.id===id)).join(', ')}.`);
+      const activeRows = this.db.prepare(`SELECT a.workspace_id,w.name,g.id AS generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id IN (${ph}) AND a.analyzer_id='builtin.architecture' ORDER BY a.workspace_id`).all(...requested) as any[];
+      const generationVector = this.activeGenerationVector(requested);
+      const snapshotId = createHash('sha256').update(JSON.stringify({ requested, generationVector })).digest('hex');
+      const missingArchitectureWorkspaceIds = requested.filter((id)=>!activeRows.some((row)=>row.workspace_id===id));
+      if (activeRows.length < 2) {
+        const empty = { snapshotId, requestedWorkspaceIds: requested, activeGenerationVector:generationVector, generations:[], missingArchitectureWorkspaceIds } satisfies CrossWorkspaceSnapshot;
+        return { snapshot: empty, rootCount: 0, pageRootKeys: [], contractKeys: [] as string[] };
+      }
+      const nodeBase = projectedNodesSql(`WHERE a.workspace_id IN (${ph})`, true);
+      const edgeBase = projectedEdgesSql(`WHERE a.workspace_id IN (${ph})`, true);
+      const methods = "'GET','HEAD','POST','PUT','DELETE','CONNECT','OPTIONS','TRACE','PATCH'";
+      const participantCte = `WITH nodes AS (${nodeBase}), edges AS (${edgeBase}), participants AS (
+        SELECT e.workspace_id,CAST(json_extract(ep.properties_json,'$.namespace') AS TEXT) namespace,CAST(json_extract(ep.properties_json,'$.method') AS TEXT) method,CAST(json_extract(ep.properties_json,'$.path') AS TEXT) path,owner.id owner_id,ep.id endpoint_id,e.id edge_id,e.kind edge_kind
+        FROM edges e JOIN nodes owner ON owner.workspace_id=e.workspace_id AND owner.id=e.source_id JOIN nodes ep ON ep.workspace_id=e.workspace_id AND ep.id=e.target_id
+        WHERE e.kind='exposes' AND owner.kind IN ('fastapi_route','openapi_operation') AND ep.kind='api_endpoint'
+        UNION ALL
+        SELECT e.workspace_id,CAST(json_extract(ep.properties_json,'$.namespace') AS TEXT),CAST(json_extract(ep.properties_json,'$.method') AS TEXT),CAST(json_extract(ep.properties_json,'$.path') AS TEXT),owner.id,ep.id,e.id,e.kind
+        FROM edges e JOIN nodes owner ON owner.workspace_id=e.workspace_id AND owner.id=e.source_id JOIN nodes ep ON ep.workspace_id=e.workspace_id AND ep.id=e.target_id
+        WHERE e.kind='http_request' AND owner.kind='frontend.http_request' AND ep.kind='api_endpoint'
+      ), valid AS (SELECT * FROM participants WHERE valid_contract_namespace(namespace)=1 AND method IN (${methods}) AND valid_contract_path(path)=1), shared AS (SELECT namespace,method,path FROM valid GROUP BY namespace,method,path HAVING COUNT(DISTINCT workspace_id)>=2)`;
+      const filterParts: string[]=[]; const filterArgs: unknown[]=[];
+      if(query.namespace!==undefined){filterParts.push('namespace=?');filterArgs.push(query.namespace)}
+      if(query.method!==undefined){filterParts.push('method=?');filterArgs.push(query.method)}
+      if(query.path!==undefined){filterParts.push('path=?');filterArgs.push(query.path)}
+      if(query.root==='endpoint'){
+        if(query.workspace!==undefined){filterParts.push('workspace_id=?');filterArgs.push(query.workspace)}
+        const where=filterParts.length?`AND ${filterParts.join(' AND ')}`:'';
+        const countSql=`${participantCte} SELECT COUNT(*) count FROM (SELECT DISTINCT workspace_id,endpoint_id FROM valid WHERE 1=1 ${where})`;
+        const rootCount=Number((this.db.prepare(countSql).get(...requested,...requested,...filterArgs) as any).count);
+        const rows=this.db.prepare(`${participantCte} SELECT DISTINCT v.workspace_id,v.endpoint_id,v.namespace,v.method,v.path,w.name workspace_name FROM valid v JOIN workspaces w ON w.id=v.workspace_id WHERE 1=1 ${where} ORDER BY v.workspace_id,w.name,v.namespace,v.method,v.path,v.endpoint_id LIMIT ? OFFSET ?`).all(...requested,...requested,...filterArgs,query.limit,query.offset) as any[];
+        const pageRootKeys=rows.map((row)=>`${row.workspace_id}\0${row.endpoint_id}`);
+        const contractKeys=[...new Set(rows.map((row)=>contractIdentity(row.namespace,row.method,row.path)))];
+        return this.hydrateCrossWorkspaceCandidates(requested,activeRows,generationVector,snapshotId,missingArchitectureWorkspaceIds,participantCte,nodeBase,edgeBase,query,rootCount,pageRootKeys,contractKeys);
+      }
+      if(query.workspace!==undefined){filterParts.push('EXISTS (SELECT 1 FROM valid vw WHERE vw.namespace=s.namespace AND vw.method=s.method AND vw.path=s.path AND vw.workspace_id=?)');filterArgs.push(query.workspace)}
+      const where=filterParts.length?`WHERE ${filterParts.join(' AND ')}`:'';
+      const rootCount=Number((this.db.prepare(`${participantCte} SELECT COUNT(*) count FROM shared s ${where}`).get(...requested,...requested,...filterArgs) as any).count);
+      const rows=this.db.prepare(`${participantCte} SELECT s.namespace,s.method,s.path FROM shared s ${where} ORDER BY s.namespace,s.method,s.path LIMIT ? OFFSET ?`).all(...requested,...requested,...filterArgs,query.limit,query.offset) as any[];
+      const contractKeys=rows.map((row)=>contractIdentity(row.namespace,row.method,row.path));
+      const pageRootKeys=contractKeys.map((key)=>key);
+      return this.hydrateCrossWorkspaceCandidates(requested,activeRows,generationVector,snapshotId,missingArchitectureWorkspaceIds,participantCte,nodeBase,edgeBase,query,rootCount,pageRootKeys,contractKeys);
+    })();
+  }
+  private hydrateCrossWorkspaceCandidates(requested:string[],activeRows:any[],generationVector:Array<{workspaceId:string;analyzerId:string;generationId:number}>,snapshotId:string,missingArchitectureWorkspaceIds:string[],participantCte:string,nodeBase:string,edgeBase:string,query:{depth:number;limit:number;offset:number},rootCount:number,pageRootKeys:string[],contractKeys:string[]){
+    const participants=contractKeys.length?this.db.prepare(`${participantCte} SELECT DISTINCT v.workspace_id,v.owner_id,v.endpoint_id,v.edge_id FROM valid v WHERE (v.namespace,v.method,v.path) IN (${contractKeys.map(()=>'(?,?,?)').join(',')}) ORDER BY v.workspace_id,v.endpoint_id,v.owner_id,v.edge_id LIMIT 251`).all(...requested,...requested,...contractKeys.flatMap(parseContractIdentity)) as any[]:[];
+    if(participants.length>250)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+    const nodeKeys=new Set<string>();const edgeKeys=new Set<string>();
+    for(const row of participants){nodeKeys.add(`${row.workspace_id}\0${row.owner_id}`);nodeKeys.add(`${row.workspace_id}\0${row.endpoint_id}`);edgeKeys.add(`${row.workspace_id}\0${row.edge_id}`)}
+    if(nodeKeys.size>250||edgeKeys.size>200)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+    // Add the bounded local context around selected participants; the resolver is separately restricted to contractKeys.
+    const allowed=['implements_contract','architecture_contract_finding','exposes','handled_by','depends_on','calls','references','accepts','returns','uses_schema','secured_by','uses_scheme','maps_to','contains','accesses_model','http_request'];
+    for(let depth=0;depth<query.depth;depth++){
+      const byWorkspace=new Map<string,string[]>();for(const key of nodeKeys){const split=key.indexOf('\0');const ws=key.slice(0,split),id=key.slice(split+1);byWorkspace.set(ws,[...(byWorkspace.get(ws)??[]),id])}
+      let added=0;
+      for(const [ws,ids] of byWorkspace){const idPh=ids.map(()=>'?').join(',');const rows=this.db.prepare(`SELECT * FROM (${edgeBase}) e WHERE e.workspace_id=? AND e.kind IN (${allowed.map(()=>'?').join(',')}) AND (e.source_id IN (${idPh}) OR e.target_id IN (${idPh})) ORDER BY e.id LIMIT 201`).all(...requested,...requested,ws,...allowed,...ids,...ids) as any[];if(rows.length>200)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');for(const edge of rows){const ek=`${ws}\0${edge.id}`;if(!edgeKeys.has(ek)){edgeKeys.add(ek);added++}nodeKeys.add(`${ws}\0${edge.source_id}`);nodeKeys.add(`${ws}\0${edge.target_id}`)}}
+      if(nodeKeys.size>250||edgeKeys.size>200)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');if(!added)break;
+    }
+    const keyPairs=[...nodeKeys].map((key)=>{const split=key.indexOf('\0');return [key.slice(0,split),key.slice(split+1)]});
+    const nodes:any[]=keyPairs.length?this.db.prepare(`SELECT * FROM (${nodeBase}) WHERE (workspace_id,id) IN (${keyPairs.map(()=>'(?,?)').join(',')}) ORDER BY workspace_id,id`).all(...requested,...keyPairs.flat()) as any[]:[];
+    const edgePairs=[...edgeKeys].map((key)=>{const split=key.indexOf('\0');return [key.slice(0,split),key.slice(split+1)]});
+    const edges:any[]=edgePairs.length?this.db.prepare(`SELECT * FROM (${edgeBase}) WHERE (workspace_id,id) IN (${edgePairs.map(()=>'(?,?)').join(',')}) ORDER BY workspace_id,id`).all(...requested,...edgePairs.flat()) as any[]:[];
+    if(nodes.length>1000||edges.length>2000)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+    const unified=this.unifiedPage(nodes.map((n)=>({workspaceId:n.workspace_id,id:n.id})),edges.map((e)=>({workspaceId:e.workspace_id,id:e.id})),false);
+    const generations:WorkspaceArchitectureSnapshot[]=activeRows.map((active)=>{const nodeSet=new Set(unified.nodes.filter((n)=>n.workspaceId===active.workspace_id).map((n)=>n.id));const edgeSet=new Set(unified.edges.filter((e)=>e.workspaceId===active.workspace_id).map((e)=>e.id));const diagnostics:AnalysisDiagnostic[]=[];const inputs=this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(Number(active.generation_id)) as any[];return {workspace:{id:active.workspace_id,name:active.name},generation:{workspaceId:active.workspace_id,analyzerId:'builtin.architecture',generationId:Number(active.generation_id),runId:active.run_id,sourceRevision:active.source_revision??undefined,completedAt:active.completed_at},inputGenerations:inputs.map((i)=>({analyzerId:i.analyzerId,generationId:Number(i.generationId)})),activeGenerations:generationVector.filter((i)=>i.workspaceId===active.workspace_id).map(({analyzerId,generationId})=>({analyzerId,generationId})),nodes:unified.nodes.filter((n)=>nodeSet.has(n.id)),edges:unified.edges.filter((e)=>edgeSet.has(e.id)),evidence:[],diagnostics};});
+    const snapshot={snapshotId,requestedWorkspaceIds:requested,activeGenerationVector:generationVector,generations,missingArchitectureWorkspaceIds} satisfies CrossWorkspaceSnapshot;
+    if(Buffer.byteLength(JSON.stringify(snapshot),'utf8')>3*1_048_576)throw new Error('UNIFIED_GRAPH_LIMIT_EXCEEDED');
+    return {snapshot,rootCount,pageRootKeys,contractKeys};
+  }
   private activeGenerationVector(workspaceIds: readonly string[]) {
     if (!workspaceIds.length) return [];
     const placeholders = workspaceIds.map(() => '?').join(',');
@@ -787,6 +865,8 @@ function evidenceId(workspaceId: string, analyzerId: string, subjectKind: 'node'
   return evidence.id ?? createHash('sha256').update(JSON.stringify([workspaceId, analyzerId, subjectKind, subjectId, evidence, index])).digest('hex').slice(0, 32);
 }
 function escapeLike(value: string) { return value.replace(/[\\%_]/g, (character) => `\\${character}`); }
+function contractIdentity(namespace:string,method:string,path:string){return `api-contract://${encodeURIComponent(namespace)}/${method}/${encodeURIComponent(path)}`;}
+function parseContractIdentity(identity:string):[string,string,string]{const match=/^api-contract:\/\/([^/]+)\/([^/]+)\/(.+)$/.exec(identity);if(!match)throw new Error('Invalid SQL-selected contract identity.');return [decodeURIComponent(match[1]!),match[2]!,decodeURIComponent(match[3]!)];}
 
 function projectedNodesSql(where: string, includeProperties = true) {
   return `WITH contribution_levels AS (
