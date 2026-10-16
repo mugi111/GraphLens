@@ -4,7 +4,7 @@ import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { canonicalSqlAlchemyName, collectSqlAlchemyFiles, collectSqlAlchemySource, expressionName, importsAt, localAssignmentValue, sqlAlchemyConfig } from './sqlalchemy-source-collector.js';
 import type { SqlAlchemyCollectedFile, SqlAlchemyModelFact } from './sqlalchemy-source-types.js';
 import type { PythonExpressionFact } from './python-source-types.js';
-import { semanticSourceRevision } from './source-catalog-adoption.js';
+import { semanticSourceRevision, SourceMappingUsage, sourceMappingCategory } from './source-catalog-adoption.js';
 
 const identity = new GraphIdentityFactory();
 
@@ -196,6 +196,7 @@ function inheritedAssignments(model: SqlAlchemyModelFact, owningFile: SqlAlchemy
 }
 
 function projectModels(context: AnalysisContext, databaseNamespace: string, sourceRevision: string, codeGraphInput: { analyzerId: 'builtin.codegraph'; generationId: number }, files: SqlAlchemyCollectedFile[], models: SqlAlchemyModelFact[], diagnostics: AnalysisDiagnostic[], ambiguousClasses: Array<Array<{ file: SqlAlchemyCollectedFile; node: GraphNode; path: string; module: string; qualifiedName: string; label: string }>>): AnalysisResult {
+  const sourceMappingUsage = new SourceMappingUsage();
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
@@ -222,6 +223,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     evidence.push(projectEvidence('edge', id, source, `sqlalchemy.${kind}`, key, level));
   };
   for (const group of ambiguousClasses) {
+    sourceMappingUsage.record(`ambiguous-class:${group[0]!.module}.${group[0]!.qualifiedName}`, 'ambiguous');
     const candidateIds: string[] = [];
     for (const item of group) {
       const sourceClass = item.node;
@@ -232,6 +234,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
   for (const model of models) {
     const sourceClass = files.flatMap((file) => file.classes).find((node) => node.id === model.classId);
     if (!sourceClass) continue;
+    sourceMappingUsage.record(`declaration:${sourceClass.id}`, sourceMappingCategory(sourceClass) ?? 'unverified');
     const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, tableResolved: model.tableResolved ?? !!model.tableName }, model.sourceEvidence, 'sqlalchemy.mapping', 'DERIVED');
     projectedModels.set(`${model.module}.${model.qualifiedName}`, modelNode);
     if (sourceClass.properties.sourceMapping === 'mapped') addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
@@ -310,7 +313,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
   if (evidence.length > 10_000) throw new Error('SQLAlchemy evidence exceeds the result limit (10000).');
   if (diagnostics.length > 10_000) throw new Error('SQLAlchemy diagnostics exceed the result limit (10000).');
   const uniqueDiagnostics = [...new Map(diagnostics.map((item) => [`${item.code ?? ''}\u0000${item.uri ?? ''}\u0000${item.line ?? ''}\u0000${item.message}`, item])).values()];
-  return { sourceRevision, inputGenerations: [codeGraphInput], nodes, edges, evidence, diagnostics: uniqueDiagnostics };
+  return { sourceRevision, inputGenerations: [codeGraphInput], sourceMappingSummary: sourceMappingUsage.summary(codeGraphInput.generationId), nodes, edges, evidence, diagnostics: uniqueDiagnostics };
 }
 
 function classBases(node: GraphNode): string[] { return Array.isArray(node.properties.bases) ? node.properties.bases.map(expressionName).filter((name): name is string => !!name) : []; }
