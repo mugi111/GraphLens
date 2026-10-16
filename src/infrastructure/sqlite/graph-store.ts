@@ -6,7 +6,7 @@ import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type Ana
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import type { CrossWorkspaceSnapshot, WorkspaceArchitectureSnapshot } from '../../domain/federation.js';
-import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
+import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, realDataOnlyMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -32,7 +32,7 @@ export class GraphStore implements ArchitectureInputProvider {
       this.db = new Database(file);
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('journal_mode = WAL');
-      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration]);
+      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, realDataOnlyMigration]);
       if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
     }
   }
@@ -80,7 +80,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const insertEvidence = this.db.prepare('INSERT INTO evidence(id,generation_id,subject_kind,subject_id,level,payload_json) VALUES(?,?,?,?,?,?)');
       for (const snapshot of snapshots) {
         this.db.prepare('INSERT INTO workspaces(id,path,name,created_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,name=excluded.name').run(snapshot.workspace.id, snapshot.workspace.path, snapshot.workspace.name, now);
-        const analyzerId = snapshot.source === 'demo' ? 'builtin.demo' : 'builtin.codegraph';
+        const analyzerId = 'builtin.codegraph';
         const runId = randomUUID();
         start.run(runId, snapshot.workspace.id, analyzerId, '1.0.0', 'succeeded', null, '{}', now, now);
         const result = generation.run(runId, snapshot.workspace.id, analyzerId, now, snapshot.nodes.length, snapshot.edges.length);

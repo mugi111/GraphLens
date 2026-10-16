@@ -19,7 +19,7 @@ function cssToken(name: string) {
   return color;
 }
 
-function OverviewView({ status, refreshKey }: { status: any; refreshKey: number }) {
+function OverviewView({ status }: { status: any }) {
   const { locale, t } = useI18n();
   const graphElement = useRef<HTMLDivElement>(null);
   const cy = useRef<Core>();
@@ -31,7 +31,7 @@ function OverviewView({ status, refreshKey }: { status: any; refreshKey: number 
     if (response.ok) setGraph(await response.json());
   };
 
-  useEffect(() => { void load(); }, [refreshKey]);
+  useEffect(() => { void load(); }, []);
   useEffect(() => {
     if (!graphElement.current) return;
     cy.current?.destroy();
@@ -83,7 +83,7 @@ function OverviewView({ status, refreshKey }: { status: any; refreshKey: number 
       <section className="canvas" aria-label={t('Architecture graph')}>
         <div ref={graphElement} className="graph" aria-hidden="true" />
         <div className="canvas-tools"><button type="button" className="button button-quiet" onClick={() => cy.current?.fit(undefined, 40)}>{t('Fit graph')}</button></div>
-        {!graph.nodes.length && <div className="empty"><h2>{t('No graph snapshot yet')}</h2><p>{t('Start with a CodeGraph bridge that supports complete snapshots, or load the labelled local demo.')}</p></div>}
+        {!graph.nodes.length && <div className="empty"><h2>{t('No graph snapshot yet')}</h2><p>{t('Register a workspace and run an analyzer to create a graph snapshot.')}</p></div>}
         {!!graph.nodes.length && <label className="graph-jump">{t('Node selector')}<select name="overviewNode" autoComplete="off" value={selectedId} onChange={event => selectNode(event.target.value)}><option value="">{t('Choose a node')}</option>{graph.nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {node.kind}</option>)}</select></label>}
       </section>
       <aside className="inspector" aria-label={t('Node inspector')}>
@@ -98,7 +98,6 @@ function App() {
   const { locale, setLocale, t } = useI18n();
   const [status, setStatus] = useState<any>();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [refreshKey, setRefreshKey] = useState(0);
   const [view, setView] = useState(() => ['architecture', 'impact'].includes(new URLSearchParams(location.search).get('view') ?? '') ? new URLSearchParams(location.search).get('view')! : 'overview');
   useEffect(() => { void Promise.all([fetch('/api/v1/status').then(response => response.json()), fetch('/api/v1/workspaces').then(response => response.json())]).then(([nextStatus, nextWorkspaces]) => { setStatus(nextStatus); setWorkspaces(nextWorkspaces.workspaces ?? []); }); }, []);
   useEffect(() => { document.documentElement.lang = locale; }, [locale]);
@@ -114,12 +113,6 @@ function App() {
     setView(next);
   };
   const viewHref = (next: string) => { const params = new URLSearchParams(location.search); params.set('view', next); return `${location.pathname}?${params}`; };
-  const syncDemo = async () => {
-    const response = await fetch('/api/v1/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ demo: true, workspaces: ['.'] }) });
-    if (!response.ok) alert((await response.json()).message);
-    setRefreshKey(key => key + 1);
-  };
-
   return <div className="app-shell">
     <a className="skip-link" href="#app-content">{t('Skip to analysis')}</a>
     <aside className="app-rail">
@@ -133,12 +126,11 @@ function App() {
       <header className="app-toolbar">
         <div className="connection-state" role="status"><span className={status?.codegraph?.connected ? 'connection-mark is-connected' : 'connection-mark'} aria-hidden="true" /><span>{status?.codegraph?.connected ? t('CodeGraph connected') : t('CodeGraph not connected')}</span><span className="connection-detail">{t(status?.codegraph?.detail ?? 'Checking CodeGraph capability…')}</span></div>
         <div className="toolbar-actions">
-          {view === 'overview' && <button type="button" className="button button-primary" onClick={syncDemo}>{t('Load demo graph')}</button>}
           <label className="locale-control"><span>{t('Language')}</span><select aria-label={t('Language')} value={locale} onChange={event => setLocale(event.target.value as 'en' | 'ja')}><option value="en">{t('English')}</option><option value="ja">{t('Japanese')}</option></select></label>
         </div>
       </header>
       <div className="view-content">
-        {view === 'overview' ? <OverviewView status={status} refreshKey={refreshKey}/> : view === 'architecture' ? <ArchitectureView workspaces={workspaces}/> : <ImpactView workspaces={workspaces}/>}
+        {view === 'overview' ? <OverviewView status={status}/> : view === 'architecture' ? <ArchitectureView workspaces={workspaces}/> : <ImpactView workspaces={workspaces}/>}
       </div>
       <footer className="app-footer"><span>GraphLens</span></footer>
     </main>
