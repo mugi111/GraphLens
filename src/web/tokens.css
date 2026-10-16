@@ -1,0 +1,48 @@
+:root {
+  color-scheme: light;
+  --color-paper: oklch(98.5% 0.004 250);
+  --color-paper-2: oklch(96.5% 0.006 250);
+  --color-paper-3: oklch(93.5% 0.008 250);
+  --color-ink: oklch(24% 0.02 258);
+  --color-ink-2: oklch(34% 0.018 257);
+  --color-muted: oklch(45% 0.012 255);
+  --color-rule: oklch(78% 0.01 250);
+  --color-rule-soft: oklch(88% 0.008 250);
+  --color-accent: oklch(58% 0.2 256);
+  --color-accent-ink: oklch(99% 0.004 250);
+  --color-focus: oklch(52% 0.2 256);
+  --color-graphite: oklch(22% 0.016 260);
+  --color-graphite-ink: oklch(96% 0.006 250);
+  --color-graph-node: oklch(91% 0.008 250);
+  --color-graph-edge: oklch(56% 0.012 255);
+
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --space-2xl: 4.5rem;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.25rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-short: 140ms;
+  --dur-ui: 180ms;
+
+  --radius-panel: 2px;
+  --radius-control: 4px;
+}

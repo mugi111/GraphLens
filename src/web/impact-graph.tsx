@@ -1,8 +1,14 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import cytoscape, { type Core } from 'cytoscape';
 import type { ImpactEdge, ImpactNode, ImpactPath } from './impact-types.js';
+import { useI18n } from './i18n.js';
+
+function cssToken(name: string) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 export function ImpactGraph({ nodes, edges, paths, workspaceNames, selectedId, pathId, onSelect }: { nodes: ImpactNode[]; edges: ImpactEdge[]; paths: ImpactPath[]; workspaceNames: Map<string, string>; selectedId?: string; pathId?: string; onSelect: (item: ImpactNode | ImpactEdge) => void }) {
+  const { t } = useI18n();
   const element = useRef<HTMLDivElement>(null);
   const cy = useRef<Core>();
   const path = useMemo(() => paths.find((item) => item.nodeId === pathId), [paths, pathId]);
@@ -22,22 +28,22 @@ export function ImpactGraph({ nodes, edges, paths, workspaceNames, selectedId, p
       classes: edge.scope === 'cross-workspace' ? 'workspace-transition' : '',
     }));
     cy.current = cytoscape({ container: element.current, elements: [...parents, ...positioned, ...edgeData], style: [
-      { selector: 'node', style: { 'background-color': '#51687e', label: 'data(label)', color: '#e9eff5', 'font-size': 10, 'text-wrap': 'wrap', 'text-max-width': 130, width: 24, height: 24, 'text-valign': 'bottom', 'text-margin-y': 5, 'border-width': 2, 'border-color': '#b9c7d4' } },
-      { selector: 'node.target', style: { shape: 'round-rectangle', width: 34, height: 34, 'border-width': 4, 'border-color': '#f0b36b' } },
-      { selector: 'node.dependent', style: { shape: 'ellipse', 'background-color': '#57c7b7' } },
-      { selector: 'node.dependency', style: { shape: 'hexagon', 'background-color': '#80a9e8' } },
-      { selector: 'node.global-hub', style: { shape: 'diamond', 'background-color': '#d59b5b', width: 38, height: 38, 'border-style': 'double' } },
-      { selector: 'node[level = "DIRECT"]', style: { 'border-style': 'solid', 'border-color': '#e5f5f2', 'border-width': 3 } },
-      { selector: 'node[level = "DERIVED"]', style: { 'border-style': 'dotted', 'border-color': '#8cdbcc', 'border-width': 3 } },
-      { selector: 'node[level = "INFERRED"]', style: { 'border-style': 'dashed', 'border-color': '#e2b96f', 'border-width': 3 } },
-      { selector: 'node.workspace-group', style: { shape: 'round-rectangle', 'background-opacity': 0.13, 'background-color': '#8cdbcc', 'border-color': '#536173', 'border-style': 'dashed', 'border-width': 1, label: 'data(label)', color: '#b8c8d6', 'font-size': 12, 'text-valign': 'top', 'text-halign': 'center', padding: 24 } },
-      { selector: 'edge', style: { width: 2, 'line-color': '#8798aa', 'target-arrow-color': '#8798aa', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', color: '#d0dae4', 'font-size': 8, 'text-background-color': '#10151d', 'text-background-opacity': 1 } },
+      { selector: 'node', style: { 'background-color': cssToken('--color-graph-node'), label: 'data(label)', color: cssToken('--color-ink'), 'font-size': 10, 'text-wrap': 'wrap', 'text-max-width': 130, width: 24, height: 24, 'text-valign': 'bottom', 'text-margin-y': 5, 'border-width': 2, 'border-color': cssToken('--color-ink-2') } },
+      { selector: 'node.target', style: { shape: 'round-rectangle', width: 34, height: 34, 'border-width': 4, 'border-color': cssToken('--color-accent') } },
+      { selector: 'node.dependent', style: { shape: 'ellipse' } },
+      { selector: 'node.dependency', style: { shape: 'hexagon' } },
+      { selector: 'node.global-hub', style: { shape: 'diamond', width: 38, height: 38, 'border-style': 'double' } },
+      { selector: 'node[level = "DIRECT"]', style: { 'border-style': 'solid', 'border-color': cssToken('--color-ink-2'), 'border-width': 3 } },
+      { selector: 'node[level = "DERIVED"]', style: { 'border-style': 'dotted', 'border-color': cssToken('--color-ink-2'), 'border-width': 3 } },
+      { selector: 'node[level = "INFERRED"]', style: { 'border-style': 'dashed', 'border-color': cssToken('--color-ink-2'), 'border-width': 3 } },
+      { selector: 'node.workspace-group', style: { shape: 'round-rectangle', 'background-opacity': 1, 'background-color': cssToken('--color-paper-2'), 'border-color': cssToken('--color-rule'), 'border-style': 'dashed', 'border-width': 1, label: 'data(label)', color: cssToken('--color-ink-2'), 'font-size': 12, 'text-valign': 'top', 'text-halign': 'center', padding: 24 } },
+      { selector: 'edge', style: { width: 2, 'line-color': cssToken('--color-graph-edge'), 'target-arrow-color': cssToken('--color-graph-edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', color: cssToken('--color-ink-2'), 'font-size': 8, 'text-background-color': cssToken('--color-paper'), 'text-background-opacity': 1 } },
       { selector: 'edge[level = "DERIVED"]', style: { 'line-style': 'dotted' } },
-      { selector: 'edge[level = "INFERRED"]', style: { 'line-style': 'dashed', 'line-color': '#e2b96f', 'target-arrow-color': '#e2b96f' } },
+      { selector: 'edge[level = "INFERRED"]', style: { 'line-style': 'dashed' } },
       { selector: 'edge.workspace-transition', style: { width: 3, 'target-arrow-shape': 'triangle-tee' } },
-      { selector: '.selected-item', style: { 'underlay-color': '#f0b36b', 'underlay-opacity': 0.32, 'underlay-padding': 6 } },
-      { selector: 'edge.path-item', style: { 'underlay-color': '#8cdbcc', 'underlay-opacity': 0.24, 'underlay-padding': 5, width: 3 } },
-      { selector: 'node.path-item', style: { 'underlay-color': '#8cdbcc', 'underlay-opacity': 0.24, 'underlay-padding': 5 } },
+      { selector: '.selected-item', style: { 'underlay-color': cssToken('--color-accent'), 'underlay-opacity': 0.24, 'underlay-padding': 6 } },
+      { selector: 'edge.path-item', style: { 'underlay-color': cssToken('--color-accent'), 'underlay-opacity': 0.2, 'underlay-padding': 5, width: 3 } },
+      { selector: 'node.path-item', style: { 'underlay-color': cssToken('--color-accent'), 'underlay-opacity': 0.2, 'underlay-padding': 5 } },
     ], layout: { name: 'cose', animate: false, padding: 36, nodeRepulsion: () => 5000, idealEdgeLength: () => 120 } });
     cy.current.on('tap', 'node, edge', (event) => {
       const id = event.target.id();
@@ -60,14 +66,14 @@ export function ImpactGraph({ nodes, edges, paths, workspaceNames, selectedId, p
     for (const node of nodes) { const key = node.scope === 'global' ? 'Global API contracts' : node.workspaceId ?? 'Workspace'; result.set(key, [...(result.get(key) ?? []), node]); }
     return [...result.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [nodes]);
-  return <section className="impact-graph-panel" aria-label="Impact graph and keyboard node index">
-    <div className="impact-legend" aria-label="Graph legend"><span><i className="legend-target"/>Target · double outline</span><span><i className="legend-dependent"/>Dependent · circle</span><span><i className="legend-dependency"/>Dependency · hexagon</span><span><i className="legend-global"/>Global contract · diamond</span><span>Solid DIRECT · dotted DERIVED · dashed INFERRED</span><span>Wider arrow with tee: workspace transition</span></div>
+  return <section className="impact-graph-panel" aria-label={t('Impact graph and keyboard node index')}>
+    <div className="impact-legend" aria-label={t('Graph legend')}><span><i className="legend-target"/>{t('Target · double outline')}</span><span><i className="legend-dependent"/>{t('Dependent · circle')}</span><span><i className="legend-dependency"/>{t('Dependency · hexagon')}</span><span><i className="legend-global"/>{t('Global contract · diamond')}</span><span>{t('Solid DIRECT · dotted DERIVED · dashed INFERRED')}</span><span>{t('Wider arrow with tee: workspace transition')}</span></div>
     <div ref={element} className="impact-canvas" aria-hidden="true" />
-    <div className="impact-node-index" aria-label="Keyboard-accessible graph index">
+    <div className="impact-node-index" aria-label={t('Keyboard-accessible graph index')}>
       {groups.map(([label, items]) => <section key={label}><h3>{label}</h3><ul>{items.map((node) => <li key={node.id}><button type="button" className="impact-index-item" aria-pressed={selectedId === node.id} onClick={() => onSelect(node)}>
         <strong>{node.impactRole}: {node.label}</strong><small>{node.kind} · distance {node.distance} · {node.level}{node.impactRole === 'dependent' ? ' · depends on selected target' : node.impactRole === 'dependency' ? ' · required by selected target' : ''}</small>
       </button></li>)}</ul></section>)}
     </div>
-    <details className="impact-edge-index"><summary>Keyboard-accessible relationships · {edges.length}</summary><ul>{edges.map((edge) => <li key={edge.id}><button type="button" className="impact-index-item" aria-pressed={selectedId === edge.id} onClick={() => onSelect(edge)}><strong>{nodeLabels.get(edge.sourceId) ?? edge.sourceId} → {nodeLabels.get(edge.targetId) ?? edge.targetId}</strong><small>{edge.kind} · {edge.level} · {edge.scope === 'cross-workspace' ? 'workspace transition' : 'within workspace'}</small></button></li>)}</ul></details>
+    <details className="impact-edge-index"><summary>{t('Keyboard-accessible relationships')} · {edges.length}</summary><ul>{edges.map((edge) => <li key={edge.id}><button type="button" className="impact-index-item" aria-pressed={selectedId === edge.id} onClick={() => onSelect(edge)}><strong>{nodeLabels.get(edge.sourceId) ?? edge.sourceId} → {nodeLabels.get(edge.targetId) ?? edge.targetId}</strong><small>{edge.kind} · {edge.level} · {t(edge.scope === 'cross-workspace' ? 'workspace transition' : 'within workspace')}</small></button></li>)}</ul></details>
   </section>;
 }
