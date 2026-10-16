@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence } from '../../domain/analyzer.js';
 import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
-import type { GraphNode } from '../../domain/graph.js';
+import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 const ids = new GraphIdentityFactory();
 
 /** Enforces the v2 source contract before a semantic analyzer emits cross-analyzer facts. */
-export function requireSourceCatalog(context: AnalysisContext, files: Array<{ path: string; source: string; hash: string }>): SourceCatalogSnapshot {
+export function requireSourceCatalog(context: AnalysisContext, files: Array<{ path: string; source: string; bytes: Buffer; hash: string }>): SourceCatalogSnapshot {
   const catalog = context.sourceCatalogReader?.snapshot();
   if (!catalog || catalog.identityVersion !== 2 || catalog.provider !== 'codegraph' || catalog.providerVersion !== '1.6.2' || catalog.coordinateConvention !== 'provider-raw' || catalog.declarationAnchorConvention !== 'exact-tuple-runtime-validation-only' || catalog.workspaceId !== context.workspace.id || catalog.input.analyzerId !== 'builtin.codegraph') {
     throw new Error('A current CodeGraph 1.6.2 identity-v2 source catalog is required. Run builtin.codegraph for this workspace first.');
@@ -34,7 +34,9 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
     const path = node.properties.path;
     if (!source || typeof path !== 'string' || !fileByPath.has(path)) continue;
     const compatible = node.kind === 'python_class' ? new Set(['code.class']) : new Set(['code.function']);
-    const matches = catalog.symbols.filter((symbol) => symbol.relativePath === path && compatible.has(symbol.kind) && symbol.startLine === source.line && symbol.startColumn === source.column && symbol.endLine === source.endLine && symbol.endColumn === source.endColumn);
+    const parserStartColumn = source.column === undefined ? undefined : source.column - 1;
+    const parserEndColumn = source.endColumn === undefined ? undefined : source.endColumn - 1;
+    const matches = catalog.symbols.filter((symbol) => symbol.relativePath === path && compatible.has(symbol.kind) && symbol.startLine === source.line && symbol.startColumn === parserStartColumn && symbol.endLine === source.endLine && symbol.endColumn === parserEndColumn);
     if (matches.length !== 1 || matches[0]!.name !== node.label) {
       diagnostics.push({ code: matches.length > 1 ? 'CODEGRAPH_SOURCE_ANCHOR_AMBIGUOUS' : 'CODEGRAPH_SOURCE_ANCHOR_UNVERIFIED', severity: 'warning', message: `Source declaration '${node.label}' in '${path}' has no unique exact CodeGraph declaration anchor.`, uri: path, line: source.line });
       node.properties.sourceMapping = 'unverified';
