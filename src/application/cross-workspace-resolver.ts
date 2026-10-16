@@ -247,13 +247,13 @@ function sourceReferences(snapshot: CrossWorkspaceSnapshot, sources: CrossWorksp
 function resolverOptions(input: Partial<CrossWorkspaceResolverOptions>): CrossWorkspaceResolverOptions {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !Object.hasOwn({ ...defaults, contractKeys: true }, key))) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'Cross-workspace resolver options contain unsupported fields.');
   const output = { ...defaults };
-  for (const key of Object.keys(defaults) as Array<keyof typeof defaults>) {
+  for (const key of Object.keys(input).filter((field): field is keyof typeof defaults => Object.hasOwn(defaults, field)) as Array<keyof typeof defaults>) {
     const value = input[key];
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > hardLimits[key]) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', `${key} must be an integer between 1 and ${hardLimits[key]}.`);
     output[key] = value;
   }
   const contractKeys = input.contractKeys;
-  if (contractKeys !== undefined && (!Array.isArray(contractKeys) || contractKeys.length > hardLimits.maxContracts || contractKeys.some((key) => typeof key !== 'string' || key.length > 4096) || new Set(contractKeys).size !== contractKeys.length)) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'contractKeys must be a unique bounded list of contract identities.');
+  if (contractKeys !== undefined && (!Array.isArray(contractKeys) || contractKeys.length > hardLimits.maxContracts || contractKeys.some((key) => typeof key !== 'string' || !isCanonicalContractIdentity(key)) || new Set(contractKeys).size !== contractKeys.length)) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'contractKeys must be a unique bounded list of canonical contract identities.');
   return { ...output, ...(contractKeys !== undefined ? { contractKeys } : {}) };
 }
 
@@ -294,6 +294,12 @@ function contractKey(node: GraphNode): ApiContractKey | undefined {
 }
 function contractKeyString(key: ApiContractKey) { return contractId(key); }
 function contractId(key: ApiContractKey) { return `api-contract://${encodeURIComponent(key.namespace)}/${key.method}/${encodeURIComponent(key.path)}`; }
+function isCanonicalContractIdentity(identity:string){
+  if(identity.length>21_000)return false;
+  const match=/^api-contract:\/\/([^/]+)\/([^/]+)\/(.+)$/.exec(identity);
+  if(!match)return false;
+  try{const key={namespace:decodeURIComponent(match[1]!),method:match[2]!,path:decodeURIComponent(match[3]!)};return allowedMethods.has(key.method)&&key.namespace.length>0&&key.namespace.length<=MAX_CONTRACT_NAMESPACE_LENGTH&&key.namespace!=='default'&&!key.namespace.includes('\0')&&key.path.startsWith('/')&&key.path.length<=MAX_CONTRACT_PATH_LENGTH&&!/[\u0000-\u001f\u007f?#]/.test(key.path)&&contractId(key)===identity;}catch{return false;}
+}
 function workspaceNodeKey(workspaceId: string, nodeId: string) { return `workspace\0${workspaceId}\0${nodeId}`; }
 function workspaceEdgeId(workspaceId: string, edgeId: string) { return `system-edge://${hash(`${workspaceId}\0${edgeId}`)}`; }
 function contractEdgeId(workspaceId: string, sourceId: string, targetId: string, kind: string) { return `system-edge://${hash(`${workspaceId}\0${sourceId}\0${targetId}\0${kind}`)}`; }
