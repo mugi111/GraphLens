@@ -480,7 +480,7 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = directReferenceName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
-      const bindingId = dependencyBindingUseSite(currentFile.path, String(current.properties.qualifiedName ?? ''), `param:${parameter.name}:${dependencyIndex}`);
+      const bindingId = dependencyBindingUseSite(currentFile.path, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, `param:${parameter.name}:${dependencyIndex}`);
       const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
       if (!next || !nextFile) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
