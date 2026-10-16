@@ -2,6 +2,7 @@ import type { AnalysisContext, AnalysisEvidence, JsonValue } from '../../domain/
 import type { GraphNode } from '../../domain/graph.js';
 import { collectPythonSourceSnapshot, type PythonSourceSnapshot } from './python-source-snapshot.js';
 import { parsePythonSourceFile } from './python-source-parser.js';
+import { adoptDeclarationIdentities } from './source-catalog-adoption.js';
 import { expressionName } from './sqlalchemy-source-collector.js';
 import type { PythonCallFact, PythonDecoratorFact, PythonExpressionFact, PythonImportFact } from './python-source-types.js';
 
@@ -52,6 +53,7 @@ export function collectFastApiFiles(snapshot: PythonSourceSnapshot, workspace: A
   return snapshot.parsedFiles.map(({ file }) => {
     // Defaults are parsed only for this analyzer; arbitrary defaults are never added to the Python source index.
     const parsed = parsePythonSourceFile(workspace, file, { includeParameterDefaults: true });
+    const replacements = adoptDeclarationIdentities(workspace.id, snapshot.sourceCatalog, parsed.nodes, parsed.edges, parsed.evidence, parsed.diagnostics);
     const nodes = parsed.nodes;
     const classes = nodes.filter((node) => node.kind === 'python_class');
     const functions = nodes.filter((node) => node.kind === 'python_function' || node.kind === 'python_async_function');
@@ -62,6 +64,7 @@ export function collectFastApiFiles(snapshot: PythonSourceSnapshot, workspace: A
     const owners = new Map(nodes.map((node) => [node.id, node]));
     const bindings: FastApiBinding[] = [];
     for (const imported of parsed.imports) {
+      imported.ownerId = replacements.get(imported.ownerId) ?? imported.ownerId;
       const owner = owners.get(imported.ownerId);
       const scope = isScopeNode(owner) ? String(owner.properties.qualifiedName ?? '') : '';
       const local = imported.imported ? imported.alias ?? imported.imported : imported.alias ?? imported.module.split('.')[0]!;

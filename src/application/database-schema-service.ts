@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { DatabaseSchemaSnapshot, GraphStore, StoredAnalysisDiagnostic } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type DatabaseSchemaQuery = {
   workspace: string;
@@ -16,13 +17,13 @@ export type DatabaseSchemaQuery = {
   includeDiagnostics: boolean;
 };
 
-type CursorPayload = { v: 1; workspace: string; analyzerId: 'builtin.sqlalchemy'; generationId: number; filters: string; offset: number };
+type CursorPayload = { v: 1; workspace: string; analyzerId: 'builtin.sqlalchemy'; generationId: number; projectionSnapshotId: string; filters: string; offset: number };
 type SchemaQueryFilter = Pick<DatabaseSchemaQuery, 'root' | 'namespace' | 'schema' | 'table' | 'model' | 'includeEvidence' | 'includeDiagnostics'>;
 type SchemaNode = GraphNode & { evidenceCount: number };
 type SchemaEdge = GraphEdge & { evidenceCount: number };
 
 export class DatabaseSchemaError extends Error {
-  constructor(public readonly code: 'WORKSPACE_NOT_FOUND' | 'DATABASE_ANALYSIS_NOT_FOUND' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'DATABASE_SNAPSHOT_CHANGED' | 'DATABASE_QUERY_FAILED', message: string, public readonly status: 400 | 404 | 409 | 500 = 404) { super(message); }
+  constructor(public readonly code: 'WORKSPACE_NOT_FOUND' | 'DATABASE_ANALYSIS_NOT_FOUND' | 'INVALID_CURSOR' | 'CURSOR_QUERY_MISMATCH' | 'DATABASE_SNAPSHOT_CHANGED' | 'DATABASE_QUERY_FAILED' | 'DATABASE_QUERY_TOO_LARGE', message: string, public readonly status: 400 | 404 | 409 | 422 | 500 = 404) { super(message); }
 }
 
 export class DatabaseSchemaService {
@@ -37,19 +38,27 @@ export class DatabaseSchemaService {
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.sqlalchemy' || cursor.filters !== filterHash)) {
       throw new DatabaseSchemaError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
     }
-    const snapshot = this.store.databaseSchemaSnapshot(query.workspace);
-    if (!snapshot) {
+    let page: ReturnType<GraphStore['databaseQueryPage']>;
+    try { page = this.store.databaseQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0, cursor?.projectionSnapshotId) as ReturnType<GraphStore['databaseQueryPage']>; } catch (error) {
+      if (error instanceof Error && error.message === 'DATABASE_SNAPSHOT_CHANGED') throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', error.message, 422);
+      throw error;
+    }
+    if (!page) {
       if (cursor) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
       throw new DatabaseSchemaError('DATABASE_ANALYSIS_NOT_FOUND', 'No active SQLAlchemy analysis exists for this workspace.');
     }
-    if (cursor && cursor.generationId !== snapshot.analysis.generationId) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
-    const roots = selectRoots(snapshot, query);
+    const snapshot = page.snapshot;
+    if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new DatabaseSchemaError('DATABASE_SNAPSHOT_CHANGED', 'The active SQLAlchemy snapshot changed while paging.', 409);
     const offset = cursor?.offset ?? 0;
-    if (offset > roots.length) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
-    const pageRoots = roots.slice(offset, offset + query.limit);
-    const closure = buildClosure(snapshot, pageRoots, query.root);
+    if (offset >= page.totalRootCount && cursor) throw new DatabaseSchemaError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
+    const pageRoots = page.rootIds;
+    const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
+    const projection = { nodes: closure.nodes, edges: closure.edges };
+    const evidence = snapshot.evidence;
     const nextOffset = offset + pageRoots.length;
-    const nextCursor = nextOffset < roots.length ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, filters: filterHash, offset: nextOffset }) : undefined;
+    const nextCursor = nextOffset < page.totalRootCount ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
     const result = {
       workspace: snapshot.workspace,
@@ -58,12 +67,13 @@ export class DatabaseSchemaService {
         diagnostics: diagnosticCounts(diagnostics),
       },
       query: queryEcho(query),
-      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: roots.length, ...(nextCursor ? { nextCursor } : {}) },
-      rootIds: pageRoots.map((node) => node.id),
-      nodes: projectNodes(closure.nodes, snapshot.evidence, query.includeEvidence),
-      edges: projectEdges(closure.edges, snapshot.evidence, query.includeEvidence),
-      ...(query.includeDiagnostics ? { diagnostics: relevantDiagnostics(diagnostics, closure.nodes, closure.edges, snapshot.evidence) } : {}),
+      page: { limit: query.limit, rootCount: pageRoots.length, totalRootCount: page.totalRootCount, ...(nextCursor ? { nextCursor } : {}) },
+      rootIds: pageRoots,
+      nodes: projectNodes(projection.nodes, evidence, query.includeEvidence),
+      edges: projectEdges(projection.edges, evidence, query.includeEvidence),
+      ...(query.includeDiagnostics ? { diagnostics: relevantDiagnostics(diagnostics, projection.nodes, projection.edges, evidence) } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 3 * 1_048_576) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema response exceeds the 3 MiB response limit.', 422);
     return result;
   }
 
@@ -86,11 +96,11 @@ export class DatabaseSchemaService {
 
 function isCursor(value: unknown): value is CursorPayload {
   if (!isRecord(value)) return false;
-  const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'v', 'workspace'];
-  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
+  const fields = ['analyzerId', 'filters', 'generationId', 'offset', 'projectionSnapshotId', 'v', 'workspace'];
+  return Object.keys(value).sort().join(',') === fields.join(',') && value.v === 1 && typeof value.workspace === 'string' && value.workspace.length > 0 && value.workspace.length <= 256 && typeof value.analyzerId === 'string' && value.analyzerId.length > 0 && value.analyzerId.length <= 128 && Number.isSafeInteger(value.generationId) && Number(value.generationId) > 0 && typeof value.filters === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.filters) && typeof value.projectionSnapshotId === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.projectionSnapshotId) && Number.isSafeInteger(value.offset) && Number(value.offset) >= 0;
 }
 function filterKey(query: DatabaseSchemaQuery) {
-  return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
+  return JSON.stringify({ root: query.root, namespace: query.namespace ?? null, schema: query.schema === undefined ? null : query.schema, table: query.table ?? null, model: query.model ?? null, limit: query.limit, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics });
 }
 function queryEcho(query: DatabaseSchemaQuery) {
   return { root: query.root, ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.schema !== undefined ? { schema: query.schema } : {}), ...(query.table !== undefined ? { table: query.table } : {}), ...(query.model !== undefined ? { model: query.model } : {}) };
@@ -180,7 +190,7 @@ function buildClosure(snapshot: DatabaseSchemaSnapshot, roots: GraphNode[], root
       }
     }
   }
-  if (selectedNodes.size + selectedEdges.size > 9000) throw new DatabaseSchemaError('DATABASE_QUERY_FAILED', 'Schema closure exceeds the bounded snapshot size.', 500);
+  if (selectedNodes.size > 250 || selectedEdges.size > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
   return { nodes: [...selectedNodes.values()].sort((a, b) => compare([a.kind, a.id], [b.kind, b.id])), edges: [...selectedEdges.values()].sort((a, b) => compare([a.kind, a.sourceId, a.targetId, a.id], [b.kind, b.sourceId, b.targetId, b.id])) };
 }
 function addCompactModelContext(model: GraphNode, nodeById: Map<string, GraphNode>, incoming: Map<string, GraphEdge[]>, outgoing: Map<string, GraphEdge[]>, addNode: (id: string) => GraphNode | undefined, addEdge: (edge: GraphEdge) => void) {
@@ -191,18 +201,12 @@ function addCompactModelContext(model: GraphNode, nodeById: Map<string, GraphNod
 function projectNodes(nodes: GraphNode[], evidence: AnalysisEvidence[], include: boolean): SchemaNode[] {
   const bySubject = new Map<string, AnalysisEvidence[]>();
   for (const item of evidence) if (item.subjectKind === 'node') bySubject.set(item.subjectId, [...(bySubject.get(item.subjectId) ?? []), item]);
-  return nodes.map((node) => {
-    const items = (bySubject.get(node.id) ?? []).sort((a, b) => compare([a.id], [b.id]));
-    return { ...node, level: dominantLevel(items), evidenceCount: items.length, ...(include ? { evidence: items } : { evidence: undefined }) };
-  });
+  return nodes.map((node) => { const { evidence: _evidence, ...base } = node; const items = (bySubject.get(node.id) ?? []).sort((a, b) => compare([a.id], [b.id])); return { ...base, level: node.level ?? dominantLevel(items), evidenceCount: node.evidenceCount ?? items.length, ...(include ? { evidence: items } : {}) }; });
 }
 function projectEdges(edges: GraphEdge[], evidence: AnalysisEvidence[], include: boolean): SchemaEdge[] {
   const bySubject = new Map<string, AnalysisEvidence[]>();
   for (const item of evidence) if (item.subjectKind === 'edge') bySubject.set(item.subjectId, [...(bySubject.get(item.subjectId) ?? []), item]);
-  return edges.map((edge) => {
-    const items = (bySubject.get(edge.id) ?? []).sort((a, b) => compare([a.id], [b.id]));
-    return { ...edge, level: dominantLevel(items), evidenceCount: items.length, ...(include ? { evidence: items } : { evidence: undefined }) };
-  });
+  return edges.map((edge) => { const { evidence: _evidence, ...base } = edge; const items = (bySubject.get(edge.id) ?? []).sort((a, b) => compare([a.id], [b.id])); return { ...base, level: edge.level ?? dominantLevel(items), evidenceCount: edge.evidenceCount ?? items.length, ...(include ? { evidence: items } : {}) }; });
 }
 function dominantLevel(evidence: AnalysisEvidence[]): 'DIRECT' | 'DERIVED' | 'INFERRED' { return evidence.some((item) => item.level === 'DIRECT') ? 'DIRECT' : evidence.some((item) => item.level === 'DERIVED') ? 'DERIVED' : 'INFERRED'; }
 function diagnosticCounts(items: StoredAnalysisDiagnostic[]) { return { total: items.length, info: items.filter((item) => item.severity === 'info').length, warning: items.filter((item) => item.severity === 'warning').length, error: items.filter((item) => item.severity === 'error').length }; }

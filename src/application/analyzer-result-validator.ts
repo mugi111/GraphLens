@@ -14,6 +14,7 @@ export function validateAnalysisResult(result: AnalysisResult, descriptor: Analy
   }
   if (result.sourceRevision !== undefined && (typeof result.sourceRevision !== 'string' || result.sourceRevision.length < 1 || result.sourceRevision.length > 255)) errors.push(diagnostic('INVALID_SOURCE_REVISION', 'Analysis source revision must contain 1 to 255 characters.'));
   const inputKeys = validateInputGenerations(result.inputGenerations, descriptor.id, errors);
+  validateSourceMappingSummary(result, errors);
   if (result.nodes.length > MAX_ITEMS || result.edges.length > MAX_ITEMS || result.evidence.length > MAX_ITEMS || result.diagnostics.length > MAX_ITEMS) fail(['Analysis result exceeds the item limit.']);
   if ((result.nodes.length || result.edges.length) && !descriptor.capabilities.includes('graph')) errors.push(diagnostic('CAPABILITY_GRAPH_REQUIRED', 'Analyzer emitted graph contributions without the graph capability.'));
   if (result.evidence.length && !descriptor.capabilities.includes('evidence')) errors.push(diagnostic('CAPABILITY_EVIDENCE_REQUIRED', 'Analyzer emitted evidence without the evidence capability.'));
@@ -32,6 +33,35 @@ export function validateAnalysisResult(result: AnalysisResult, descriptor: Analy
     else if (item.severity === 'error') errors.push(diagnostic(item.code ?? 'ANALYZER_ERROR_DIAGNOSTIC', item.message));
   }
   if (errors.length) throw new AnalysisError('INVALID_RESULT', errors[0].message, errors);
+}
+
+function validateSourceMappingSummary(result: AnalysisResult, errors: AnalysisDiagnostic[]) {
+  const summary = result.sourceMappingSummary;
+  if (summary === undefined) return;
+  const codeGraphInput = result.inputGenerations?.find((input) => input.analyzerId === 'builtin.codegraph');
+  const counts = summary && typeof summary === 'object' ? summary.counts : undefined;
+  const countKeys = counts && typeof counts === 'object' ? Object.keys(counts).sort().join(',') : '';
+  const shapeValid = !!summary && typeof summary === 'object' && !Array.isArray(summary)
+    && Object.keys(summary).sort().join(',') === 'contractVersion,counts,input'
+    && summary.contractVersion === 'source-mapping-summary-v1'
+    && !!summary.input && typeof summary.input === 'object' && !Array.isArray(summary.input)
+    && Object.keys(summary.input).sort().join(',') === 'analyzerId,generationId'
+    && summary.input.analyzerId === 'builtin.codegraph'
+    && Number.isSafeInteger(summary.input.generationId) && summary.input.generationId > 0
+    && !!counts && typeof counts === 'object' && !Array.isArray(counts)
+    && countKeys === 'ambiguous,mapped,unresolved,unverified,unsupported';
+  if (!shapeValid || !summary || !counts) {
+    errors.push(diagnostic('INVALID_SOURCE_MAPPING_SUMMARY', 'Source mapping summary has an invalid contract shape.'));
+    return;
+  }
+  const values = Object.values(counts);
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 1_000_000)
+    || values.reduce((total, value) => total + value, 0) > 1_000_000
+    || !codeGraphInput || summary.input.generationId !== codeGraphInput.generationId) {
+    errors.push(diagnostic('INVALID_SOURCE_MAPPING_SUMMARY', 'Source mapping counts or exact CodeGraph input are invalid.'));
+    return;
+  }
+  if (Buffer.byteLength(JSON.stringify(summary), 'utf8') > 4 * 1024) errors.push(diagnostic('INVALID_SOURCE_MAPPING_SUMMARY', 'Source mapping summary exceeds 4 KiB.'));
 }
 
 function unique<T extends { id: string }>(items: T[], kind: string, errors: AnalysisDiagnostic[], validate: (item: T) => void) { const ids = new Set<string>(); for (const item of items) { if (!ID.test(item.id)) errors.push(diagnostic('INVALID_ID', `${kind} has an invalid stable id.`)); else if (ids.has(item.id)) errors.push(diagnostic('DUPLICATE_ID', `Duplicate ${kind} id '${item.id}'.`)); ids.add(item.id); validate(item); } return ids; }

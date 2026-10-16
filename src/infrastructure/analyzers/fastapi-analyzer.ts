@@ -5,6 +5,7 @@ import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { PYTHON_SOURCE_LIMITS, type PythonExpressionFact, type PythonParameterFact } from './python-source-types.js';
 import { argsOf, callsOf, canonicalFastApiName, collectFastApiFiles, collectFastApiSource, decoratorsOf, expressionString, expressionValue, fastApiConfig, importsFor, keywordArgs, literalList, resolveFastApiAssignmentSymbol, resolveFastApiSymbol, type FastApiConfig, type FastApiFile } from './fastapi-source.js';
 import { expressionName } from './sqlalchemy-source-collector.js';
+import { semanticSourceRevision, SourceMappingUsage, sourceMappingCategory } from './source-catalog-adoption.js';
 
 const identity = new GraphIdentityFactory();
 const ROUTE_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'TRACE']);
@@ -47,6 +48,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
   const diagnostics: AnalysisDiagnostic[] = [...snapshot.diagnostics];
+  const sourceMappingUsage = new SourceMappingUsage();
   const nodesById = new Map<string, GraphNode>();
   const edgesById = new Set<string>();
   const evidenceIds = new Set<string>();
@@ -73,18 +75,11 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     return node;
   };
   const addSourceNode = (file: FastApiFile, source: GraphNode) => {
-    if (!nodesById.has(source.id)) {
-      const safeProperties: Record<string, unknown> = {};
-      for (const key of ['module', 'qualifiedName', 'async', 'declarationOrdinal']) if (source.properties[key] !== undefined) safeProperties[key] = source.properties[key];
-      const safeNode: GraphNode = { id: source.id, workspaceId: source.workspaceId, kind: source.kind, label: source.label, properties: safeProperties };
-      nodesById.set(safeNode.id, safeNode); nodes.push(safeNode);
-    }
-    const sourceEvidence = file.evidenceBySubject.get(source.id);
-    if (sourceEvidence && !evidenceIds.has(sourceEvidence.id)) { evidenceIds.add(sourceEvidence.id); evidence.push(sourceEvidence); }
+    void file;
     return source;
   };
   const addEdge = (source: GraphNode, target: GraphNode, kind: string, key: string, sourceEvidence?: AnalysisEvidence, properties: Record<string, unknown> = {}, level: 'DIRECT' | 'DERIVED' = 'DIRECT') => {
-    const id = identity.edge(context.workspace.id, source.id, target.id, kind);
+    const id = identity.relationship(context.workspace.id, source.id, target.id, kind);
     if (edgesById.has(id)) return;
     if (nodes.length + edges.length >= PYTHON_SOURCE_LIMITS.maxContributions) throw new Error('FastAPI graph exceeds the combined result limit (9000).');
     edgesById.add(id); edges.push({ id, workspaceId: context.workspace.id, sourceId: source.id, targetId: target.id, kind, properties });
@@ -160,7 +155,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
         if (++effectiveRouteCount > 5000) throw fatalLimit('FASTAPI_ROUTE_LIMIT', 'FastAPI effective route count exceeds 5000.');
         const effectiveResponses = mergeResponses(responses, route.responses);
         const operation = { ...route.operation, responseStatuses: effectiveResponses.map(({ status, description, model }) => ({ status, ...(description ? { description } : {}), ...(model ? { model } : {}) })) };
-        projectRoute(context, config.apiNamespace, { ...route, operation, responses: effectiveResponses }, fullPath, mergeStrings(tags, Array.isArray(route.operation.routeTags) ? route.operation.routeTags as string[] : []), [...dependencies, ...route.dependencies, ...routeDependencies(route)], parentNode, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config);
+        projectRoute(context, config.apiNamespace, { ...route, operation, responses: effectiveResponses }, fullPath, mergeStrings(tags, Array.isArray(route.operation.routeTags) ? route.operation.routeTags as string[] : []), [...dependencies, ...route.dependencies, ...routeDependencies(route)], parentNode, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config, sourceMappingUsage);
       }
       const nextStack = [...stack, object.key];
       for (const include of includesByOwner.get(object.key) ?? []) {
@@ -178,7 +173,9 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
   if (nodes.length + edges.length > 9000) throw new Error('FastAPI graph exceeds the combined result limit (9000).');
   if (evidence.length > 10_000) throw new Error('FastAPI evidence exceeds the result limit (10000).');
   if (diagnostics.length > 10_000) throw new Error('FastAPI diagnostics exceed the result limit (10000).');
-  return { sourceRevision: snapshot.sourceRevision, nodes, edges, evidence, diagnostics: dedupeDiagnostics(diagnostics) };
+  const sourceRevision = semanticSourceRevision('builtin.fastapi', 'fastapi-codegraph-v2+python-parser-v1+identity-map-v1', { ...snapshot.scanConfig, ...config }, snapshot.files, snapshot.sourceCatalog, snapshot.sourceRevision);
+  if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed FastAPI source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed FastAPI source revision does not match the requested revision.' }]);
+  return { sourceRevision, inputGenerations: [{ analyzerId: 'builtin.codegraph', generationId: snapshot.sourceCatalog.input.generationId }], sourceMappingSummary: sourceMappingUsage.summary(snapshot.sourceCatalog.input.generationId), nodes, edges, evidence, diagnostics: dedupeDiagnostics(diagnostics) };
 }
 
 function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], addNode: (...args: any[]) => GraphNode, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void): RouterObject[] {
@@ -200,7 +197,7 @@ function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], ad
     const prefixResolved = kind === 'application' || prefixExpression === undefined || prefix !== undefined;
     if (!prefixResolved) addDiagnostic('FASTAPI_DYNAMIC_ROUTER_PREFIX', `Could not statically resolve prefix for router '${target}'.`, source);
     const tags = stringsFromExpression(keywords.get('tags'));
-    const dependencies = makeDependencyFacts(keywords.get('dependencies'), file, '', offset, source);
+    const dependencies = makeDependencyFacts(keywords.get('dependencies'), file, '', offset, `assignment:${assignment.id}`, source);
     const responses = responseFacts(keywords.get('responses'), source, file, '', offset);
     const logicalKey = `${file.module}.${target}`;
     const key = `${file.path}#${assignment.id}`;
@@ -233,7 +230,7 @@ function collectIncludes(files: FastApiFile[], resolveObject: (file: FastApiFile
       const prefixExpression = keywords.get('prefix');
       const prefix = prefixExpression === undefined ? '' : expressionString(prefixExpression);
       const source = callEvidence(file.path, call.line, call.column);
-      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source });
+      includes.push({ key: `${file.path}:${node.id}:include:${callIndex}`, ownerKey: owner.key, ...(child ? { childKey: child.key, childSourceNodeId: child.sourceNodeId } : {}), file, scope, offset, prefix: prefix ?? '', prefixResolved: prefixExpression === undefined || prefix !== undefined, tags: stringsFromExpression(keywords.get('tags')), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, `include:${node.id}:${callIndex}`, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source });
     });
   }
   return includes;
@@ -263,7 +260,9 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       methods = methods.map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${scope}' has no supported statically known methods.`, source); continue; }
       const operation = operationFacts(keywords, file, scope, offset, addDiagnostic, source);
-      routes.push({ key: `${file.path}:${handler.id}:decorator:${occurrence++}:${last}:${path}`, ownerKey: owner.key, file, handlerFile: file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence });
+      const routeOccurrence = occurrence++;
+      const routeKey = `${file.path}:${handler.id}:decorator:${routeOccurrence}:${last}:${path}`;
+      routes.push({ key: routeKey, ownerKey: owner.key, file, handlerFile: file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation, dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, `route:${routeKey}`, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: routeOccurrence });
     }
   }
   for (const file of files) for (const sourceNode of file.nodes) {
@@ -292,31 +291,34 @@ function collectRoutes(files: FastApiFile[], resolveObject: (file: FastApiFile, 
       if (keywords.has('methods') && !methodList) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has dynamic methods and was not exposed.`, source); return; }
       methods = (methodList ?? methods).map((method) => method.toUpperCase()).filter((method) => ROUTE_METHODS.has(method));
       if (!methods.length) { addDiagnostic('FASTAPI_DYNAMIC_ROUTE_METHODS', `Route '${endpointName}' has no supported statically known methods.`, source); return; }
-      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: callIndex });
+      routes.push({ key: `${file.path}:${sourceNode.id}:add_api_route:${call.callee}:${callIndex}`, ownerKey: owner.key, file, handlerFile: handlerCandidate!.file, handler, operationFile: file, operationScope: scope, operationOffset: offset, path, methods, operation: operationFacts(keywords, file, scope, offset, addDiagnostic, source), dependencies: makeDependencyFacts(keywords.get('dependencies'), file, scope, offset, `add_api_route:${sourceNode.id}:${call.callee}:${callIndex}`, source), responses: responseFacts(keywords.get('responses'), source, file, scope, offset), source, occurrence: callIndex });
     });
   }
   return routes;
 }
 
-function projectRoute(context: AnalysisContext, namespace: string, route: RouteSpec, path: string, tags: string[], dependencies: DependencyFact[], parent: GraphNode, routeKey: string, addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig) {
-  const handler = addSourceNode(route.handlerFile, route.handler);
+function projectRoute(context: AnalysisContext, namespace: string, route: RouteSpec, path: string, tags: string[], dependencies: DependencyFact[], parent: GraphNode, routeKey: string, addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig, sourceMappingUsage: SourceMappingUsage) {
+  const handlerMapped = route.handler.properties.sourceMapping === 'mapped' && typeof route.handler.properties.codegraphKind === 'string';
+  const handler = route.handler;
+  sourceMappingUsage.record(`declaration:${handler.id}`, sourceMappingCategory(handler) ?? 'unverified');
   const source = route.source ?? route.handlerFile.evidenceBySubject.get(route.handler.id);
-  const routeNode = addNode('fastapi_route', route.handler.label, route.handlerFile.path, routeKey, { namespace, path, pathShape: apiPathShape(path), methods: route.methods, tags, ...route.operation, handlerId: handler.id }, source, 'fastapi.route');
+  if (!handlerMapped) addDiagnostic('FASTAPI_UNVERIFIED_HANDLER_ANCHOR', `Route handler '${route.handler.label}' has no verified CodeGraph source anchor; source relationships were omitted.`, source);
+  const routeNode = addNode('fastapi_route', route.handler.label, route.handlerFile.path, routeKey, { namespace, path, pathShape: apiPathShape(path), methods: route.methods, tags, ...route.operation, ...(handlerMapped ? { handlerId: handler.id } : {}) }, source, 'fastapi.route');
   addEdge(parent, routeNode, 'contains', routeKey, source, { path, methods: route.methods });
-  addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
+  if (handlerMapped) addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
   const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
   for (const method of route.methods) {
     const endpoint = addNode('api_endpoint', `${method} ${path}`, apiEndpointUri(namespace, method, path), `${namespace}/${method}/${path}`, { namespace, method, path, pathShape: apiPathShape(path), tags }, source, 'api.endpoint');
     addEdge(routeNode, endpoint, 'exposes', `${routeKey}:${method}`, source, { method, path });
     if (route.operation.operationId) endpoint.properties = { ...endpoint.properties, operationId: route.operation.operationId };
-    addRouteFacts(context, namespace, route, path, endpoint, routeNode, dependencies, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config, dependencyBudget);
+    addRouteFacts(context, namespace, route, path, endpoint, routeNode, dependencies, routeKey, addSourceNode, addNode, addEdge, addDiagnostic, files, config, dependencyBudget, sourceMappingUsage);
   }
-  addCallsAndReferences(handler, route.handler, route.handlerFile, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget, false);
+  if (handlerMapped) addCallsAndReferences(handler, route.handler, route.handlerFile, routeKey, source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget, sourceMappingUsage, false);
 }
 
 function addRouteFacts(context: AnalysisContext, namespace: string, route: RouteSpec, effectivePath: string, endpoint: GraphNode, routeNode: GraphNode, dependencies: DependencyFact[], routeKey: string,
   addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void,
-  addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig, dependencyBudget: DependencyBudget) {
+  addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, files: FastApiFile[], config: FastApiConfig, dependencyBudget: DependencyBudget, sourceMappingUsage: SourceMappingUsage) {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id) ?? route.source;
   const params = Array.isArray(route.handler.properties.parameters) ? route.handler.properties.parameters as PythonParameterFact[] : [];
   const pathNames = [...effectivePath.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]!.split(':')[0]!);
@@ -344,7 +346,7 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
       }, source, 'api.parameter', explicit ? 'DIRECT' : 'DERIVED');
       addEdge(endpoint, node, 'accepts', `${routeKey}:parameter:${param.name}`, source, { in: paramIn }, explicit ? 'DIRECT' : 'DERIVED');
       const schema = param.annotation ? schemaName(param.annotation) : undefined;
-      if (schema) addSchemaReference(schema, route.handlerFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files);
+      if (schema) addSchemaReference(schema, route.handlerFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files, undefined, undefined, sourceMappingUsage);
     }
   }
   const responseName = typeof route.operation.responseModel === 'string' ? route.operation.responseModel : undefined;
@@ -357,14 +359,14 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     const responseFile = responseName ? route.operationFile : route.handlerFile;
     const responseScope = responseName ? route.operationScope : String(route.handler.properties.qualifiedName ?? '');
     const responseOffset = responseName ? route.operationOffset : route.handlerFile.evidenceBySubject.get(route.handler.id)?.startOffset ?? 0;
-    addSchemaReference(response, responseFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files, responseScope, responseOffset);
+    addSchemaReference(response, responseFile, route.handler, node, routeKey, source, addSourceNode, addNode, addEdge, files, responseScope, responseOffset, sourceMappingUsage);
   }
   for (const responseFact of route.responses) {
     const status = responseFact.status;
     const responseSource = responseFact.source ?? source;
     const node = addNode('api_response', `${status} response`, route.file.path, `${routeKey}/response/${status}`, { statusCode: Number(status) || status, ...(responseFact.description ? { description: responseFact.description } : {}), ...(responseFact.model ? { model: responseFact.model } : {}) }, responseSource, 'api.response');
     addEdge(endpoint, node, 'returns', `${routeKey}:response:${status}`, responseSource);
-    if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope, responseFact.offset);
+    if (responseFact.model) addSchemaReference(responseFact.model, responseFact.file ?? route.handlerFile, route.handler, node, routeKey, responseSource, addSourceNode, addNode, addEdge, files, responseFact.scope, responseFact.offset, sourceMappingUsage);
   }
   for (const fact of dependencies) for (const [depIndex, dep] of dependencyExpressions(fact.expression, fact.file, fact.scope, fact.offset).entries()) {
     const canonical = canonicalCall(dep, fact.file, fact.scope, fact.offset);
@@ -373,14 +375,17 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
     const targetName = directReferenceName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
-    const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source) : undefined;
-    if (!fn) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
+    const bindingId = dependencyBindingUseSite(fact.file.path, fact.scope, fact.offset, fact.ordinal ?? `index:${depIndex}`);
+    const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
+    if (!fn) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
+    sourceMappingUsage.record(`declaration:${fn.id}`, sourceMappingCategory(fn) ?? 'unverified');
+    if (fn.properties.sourceMapping !== 'mapped') { addDiagnostic('FASTAPI_UNVERIFIED_DEPENDENCY_ANCHOR', `Router dependency '${symbol}' has no verified CodeGraph source anchor; its source relationship was omitted.`, fact.source ?? source); continue; }
     countDependency(symbol!, dependencyBudget, config, source);
     const dependencyFile = files.find((item) => item.functions.includes(fn))!;
     const sourceFunction = addSourceNode(dependencyFile, fn);
     addEdge(endpoint, sourceFunction, 'depends_on', `${routeKey}:dependency:${symbol}:${fact.file.path}:${fact.scope}:${fact.ordinal ?? '0'}:${depIndex}`, fact.source ?? source);
     countDependency(symbol!, dependencyBudget, config, fact.source ?? source);
-    addCallsAndReferences(sourceFunction, fn, dependencyFile, routeKey, fact.source ?? source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget);
+    addCallsAndReferences(sourceFunction, fn, dependencyFile, routeKey, fact.source ?? source, addSourceNode, addNode, addEdge, files, config, addDiagnostic, dependencyBudget, sourceMappingUsage);
   }
   void context; void namespace; void routeNode;
 }
@@ -436,7 +441,7 @@ function resolveSecurityScheme(expression: PythonExpressionFact | undefined, sco
 }
 
 function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNode, owner: GraphNode, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], resolutionScope?: string, resolutionOffset?: number) {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], resolutionScope: string | undefined, resolutionOffset: number | undefined, sourceMappingUsage: SourceMappingUsage) {
   const scope = resolutionScope ?? String(scopeNode.properties.qualifiedName ?? '');
   const typeNames = schemaTypeNames(name);
   for (const typeName of typeNames) {
@@ -445,18 +450,22 @@ function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNod
     const canonicalType = canonicalFastApiName(typeName, file, scope, offset);
     if (canonicalType.startsWith('typing.') || canonicalType.startsWith('typing_extensions.') || PARAMETER_NAMES.has(canonicalType) || DEPENDENCY_NAMES.has(canonicalType)) continue;
     const matches = symbol ? files.flatMap((item) => item.classes).filter((item) => `${item.properties.module}.${item.properties.qualifiedName}` === symbol) : [];
-    if (matches.length === 1) {
+    if (matches.length === 1 && matches[0]!.properties.sourceMapping === 'mapped') {
+      sourceMappingUsage.record(`declaration:${matches[0]!.id}`, 'mapped');
       const declarationFile = files.find((item) => item.classes.includes(matches[0]!))!;
       addEdge(owner, addSourceNode(declarationFile, matches[0]!), 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: true }, 'DERIVED');
     } else {
-      const schema = addNode('api_schema_reference', typeName, file.path, `${key}/schema/${typeName}`, { qualifiedName: symbol ?? typeName, type: name, resolved: false, ambiguous: matches.length > 1 }, source, 'api.schema_reference', 'DERIVED');
-      addEdge(owner, schema, 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: false, ambiguous: matches.length > 1 }, 'DERIVED');
+      const unverified = matches.length === 1;
+      const category: 'ambiguous' | 'unverified' | 'unresolved' | 'unsupported' = matches.length > 1 ? 'ambiguous' : matches.length === 1 ? sourceMappingCategory(matches[0]!) ?? 'unverified' : 'unresolved';
+      sourceMappingUsage.record(matches.length === 1 ? `declaration:${matches[0]!.id}` : `schema:${file.path}:${scope}:${symbol ?? typeName}`, category);
+      const schema = addNode('api_schema_reference', typeName, file.path, `${key}/schema/${typeName}`, { qualifiedName: symbol ?? typeName, type: name, resolved: false, ambiguous: matches.length > 1, sourceMapping: unverified ? 'unverified' : 'unresolved' }, source, 'api.schema_reference', 'DERIVED');
+      addEdge(owner, schema, 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: false, ambiguous: matches.length > 1, sourceMapping: unverified ? 'unverified' : 'unresolved' }, 'DERIVED');
     }
   }
 }
 
 function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFile, key: string, source: AnalysisEvidence | undefined,
-  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, budget: DependencyBudget, inspectParameters = true) {
+  addSourceNode: (file: FastApiFile, node: GraphNode) => GraphNode, addNode: (...args: any[]) => GraphNode, addEdge: (...args: any[]) => void, files: FastApiFile[], config: FastApiConfig, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, budget: DependencyBudget, sourceMappingUsage: SourceMappingUsage, inspectParameters = true) {
   const walk = (currentFile: FastApiFile, current: GraphNode, depth: number, inspectCurrentParameters = true) => {
     const currentKey = `${current.properties.module}.${current.properties.qualifiedName}`;
     if (budget.visited.has(currentKey)) return;
@@ -471,33 +480,15 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = directReferenceName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
-      const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence) : undefined;
+      const bindingId = dependencyBindingUseSite(currentFile.path, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, `param:${parameter.name}:${dependencyIndex}`);
+      const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
-      if (!next || !nextFile) { addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
+      if (!next || !nextFile) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
+      sourceMappingUsage.record(`declaration:${next.id}`, sourceMappingCategory(next) ?? 'unverified');
+      if (next.properties.sourceMapping !== 'mapped') { addDiagnostic('FASTAPI_UNVERIFIED_DEPENDENCY_ANCHOR', `Dependency '${targetName ?? next.label}' has no verified CodeGraph source anchor; its source relationship was omitted.`, currentEvidence); continue; }
       countDependency(symbol!, budget, config, currentEvidence);
       addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}:${parameter.name}:${dependencyIndex}`, currentEvidence, { parameter: parameter.name });
       walk(nextFile, next, depth + 1);
-    }
-    const refs = Array.isArray(current.properties.references) ? current.properties.references as PythonExpressionFact[] : [];
-    for (const ref of refs) {
-      const referenceName = expressionName(ref);
-      if (!referenceName) continue;
-      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, new Set(), true);
-      const candidates = symbol ? files.flatMap((item) => [...item.functions, ...item.classes].filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol)) : [];
-      const target = candidates.length === 1 ? candidates[0] : undefined;
-      if (candidates.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_REFERENCE', `Source reference '${referenceName}' has multiple declarations.`, source);
-      const targetFile = target ? files.find((item) => [...item.functions, ...item.classes].includes(target)) : undefined;
-      if (target && targetFile) addEdge(owner, addSourceNode(targetFile, target), 'references', `${key}:reference:${symbol}`, source, { name: referenceName }, 'DERIVED');
-    }
-    for (const [callIndex, call] of callsOf(current).entries()) {
-      const callOffset = offsetAt(currentFile.source, call.line, call.column);
-      const symbol = resolveFastApiSymbol(files, currentFile, call.callee, String(current.properties.qualifiedName ?? ''), callOffset, new Set(), true);
-      const target = symbol ? uniqueFunction(files, symbol, addDiagnostic, source) : undefined;
-      const targetFile = target ? files.find((item) => item.functions.includes(target)) : undefined;
-      if (!target || !targetFile) continue;
-      countDependency(symbol!, budget, config, currentEvidence);
-      addEdge(current, addSourceNode(targetFile, target), 'calls', `${key}:call:${symbol}:${callIndex}`, callEvidence(currentFile.path, call.line, call.column), { callee: symbol });
-      walk(targetFile, target, depth + 1);
     }
   };
   walk(file, fn, 1, inspectParameters);
@@ -508,9 +499,9 @@ function countDependency(symbol: string, budget: DependencyBudget, config: FastA
   budget.resolved.add(symbol);
   if (budget.resolved.size > config.maxResolvedFunctionsPerRoute) throw fatalLimit('FASTAPI_DEPENDENCY_FUNCTION_LIMIT', `Dependency traversal exceeded maxResolvedFunctionsPerRoute (${config.maxResolvedFunctionsPerRoute}).`, source);
 }
-function uniqueFunction(files: FastApiFile[], symbol: string, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, source?: AnalysisEvidence) {
+function uniqueFunction(files: FastApiFile[], symbol: string, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, source?: AnalysisEvidence, onAmbiguous?: () => void) {
   const candidates = files.flatMap((item) => item.functions.filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol).map((node) => ({ file: item, node })));
-  if (candidates.length > 1) { addDiagnostic('FASTAPI_AMBIGUOUS_DEPENDENCY', `Function '${symbol}' has multiple source declarations.`, source); return undefined; }
+  if (candidates.length > 1) { onAmbiguous?.(); addDiagnostic('FASTAPI_AMBIGUOUS_DEPENDENCY', `Function '${symbol}' has multiple source declarations.`, source); return undefined; }
   return candidates[0]?.node;
 }
 
@@ -559,14 +550,16 @@ function routeDependencies(route: RouteSpec): DependencyFact[] {
   const source = route.handlerFile.evidenceBySubject.get(route.handler.id);
   const offset = source?.startOffset ?? 0;
   for (const parameter of parameters) {
-    for (const [index, expression] of dependencyExpressions(parameter.default, route.handlerFile, scope, offset).concat(dependencyExpressions(parameter.annotation, route.handlerFile, scope, offset)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `${parameter.name}:${index}`, source });
+    for (const [index, expression] of dependencyExpressions(parameter.default, route.handlerFile, scope, offset).concat(dependencyExpressions(parameter.annotation, route.handlerFile, scope, offset)).entries()) result.push({ expression, file: route.handlerFile, scope, offset, ordinal: `param:${parameter.name}:${index}`, source });
   }
   return result;
 }
 
-function makeDependencyFacts(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number, source?: AnalysisEvidence): DependencyFact[] {
-  return expressionsFromList(expression).map((item, index) => ({ expression: item, file, scope, offset, ordinal: String(index), source }));
+function makeDependencyFacts(expression: PythonExpressionFact | undefined, file: FastApiFile, scope: string, offset: number, declarationAnchor: string, source?: AnalysisEvidence): DependencyFact[] {
+  return expressionsFromList(expression).map((item, index) => ({ expression: item, file, scope, offset, ordinal: `${declarationAnchor}:expression:${index}`, source }));
 }
+
+function dependencyBindingUseSite(path: string, scope: string, offset: number, ordinal: string) { return `dependency-use:${path}:${scope}:offset:${offset}:${ordinal}`; }
 
 function decoratorArguments(decorator: ReturnType<typeof decoratorsOf>[number]) {
   const positional: PythonExpressionFact[] = [];
