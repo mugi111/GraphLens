@@ -41,8 +41,8 @@ export class CrossWorkspaceQueryService {
 
     const offset = cursor?.offset ?? 0;
     let selected: ReturnType<GraphStore['crossWorkspaceArchitecturePage']>;
-    try { selected=this.store.crossWorkspaceArchitecturePage(workspaceIds,{...query,offset}); }
-    catch(error){if(error instanceof GraphProjectionError||(error instanceof Error&&error.message==='UNIFIED_GRAPH_LIMIT_EXCEEDED'))throw tooLarge();const message=error instanceof Error?error.message:String(error);if(/^Workspace not found:/.test(message))throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND',message,404);throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','Could not select bounded cross-workspace contract candidates.',500);}
+    try { selected=this.store.crossWorkspaceArchitecturePage(workspaceIds,{...query,offset},cursor?.snapshotId); }
+    catch(error){const message=error instanceof Error?error.message:String(error);if(message==='CROSS_WORKSPACE_SNAPSHOT_CHANGED')throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED','An active architecture generation changed while paging.',409);if(error instanceof GraphProjectionError||(error instanceof Error&&message==='UNIFIED_GRAPH_LIMIT_EXCEEDED'))throw tooLarge();if(/^Workspace not found:/.test(message))throw new CrossWorkspaceQueryError('WORKSPACE_NOT_FOUND',message,404);throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_QUERY_FAILED','Could not select bounded cross-workspace contract candidates.',500);}
     const snapshot = selected.snapshot;
     if (cursor && cursor.snapshotId !== snapshot.snapshotId) throw new CrossWorkspaceQueryError('CROSS_WORKSPACE_SNAPSHOT_CHANGED', 'An active architecture generation changed while paging.', 409);
     if (cursor && offset >= selected.rootCount) throw new CrossWorkspaceQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
