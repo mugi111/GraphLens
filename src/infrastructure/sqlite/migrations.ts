@@ -363,3 +363,12 @@ export const identityV2ActivationFenceMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Stores optional, validated source-mapping coverage for immutable analyzer generations. */
+export const sourceMappingSummaryMigration: SchemaMigration = {
+  version: 9,
+  name: 'source-mapping-summary',
+  up(db) {
+    db.exec('ALTER TABLE analysis_generations ADD COLUMN source_mapping_summary_json TEXT');
+  },
+};

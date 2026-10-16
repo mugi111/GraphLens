@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisInputGeneration, type AnalysisResult, type AnalyzerDescriptor, type ArchitectureInputProvider, type ArchitectureInputSnapshot } from '../../domain/analyzer.js';
+import { AnalysisError, type AnalysisDiagnostic, type AnalysisEvidence, type AnalysisInputGeneration, type AnalysisResult, type AnalyzerDescriptor, type ArchitectureInputProvider, type ArchitectureInputSnapshot, type SourceMappingSummary } from '../../domain/analyzer.js';
 import type { Evidence, GraphEdge, GraphNode, GraphSnapshot, Workspace } from '../../domain/graph.js';
 import type { GraphLensPluginManifest, PluginInventoryItem } from '../../domain/plugin.js';
 import type { CrossWorkspaceSnapshot, WorkspaceArchitectureSnapshot } from '../../domain/federation.js';
@@ -10,7 +10,7 @@ import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 import { normalizeRelativeSourcePath } from '../../core/source-path.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { projectEdgeContributions, projectNodeContributions } from '../../application/unified-graph-projection.js';
-import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
+import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations, sourceMappingSummaryMigration } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -38,7 +38,7 @@ export class GraphStore implements ArchitectureInputProvider {
       this.db = new Database(file);
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('journal_mode = WAL');
-      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration]);
+      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, sourceMappingSummaryMigration]);
       if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
     }
     this.db.function('valid_contract_namespace', (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 256 && value !== 'default' && !value.includes('\0') ? 1 : 0);
@@ -48,13 +48,13 @@ export class GraphStore implements ArchitectureInputProvider {
   private assertReadOnlySchema(): void {
     const versions = this.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
     const applied = new Set(versions.map(({ version }) => version));
-    if (versions.some(({ version }) => version > 8) || [1, 2, 3, 4, 5, 6, 7, 8].some((version) => !applied.has(version))) {
+    if (versions.some(({ version }) => version > 9) || [1, 2, 3, 4, 5, 6, 7, 8, 9].some((version) => !applied.has(version))) {
       throw new Error('Database schema is not initialized or is incompatible with this GraphLens version.');
     }
     const required: Record<string, string[]> = {
       workspaces: ['id', 'path', 'name'],
       active_analysis_generations: ['workspace_id', 'analyzer_id', 'generation_id'],
-      analysis_generations: ['id', 'run_id', 'workspace_id', 'analyzer_id', 'identity_version'],
+      analysis_generations: ['id', 'run_id', 'workspace_id', 'analyzer_id', 'identity_version', 'source_mapping_summary_json'],
       analysis_runs: ['id', 'workspace_id', 'analyzer_id', 'source_revision', 'completed_at'],
       node_contributions: ['generation_id', 'id', 'workspace_id', 'kind', 'label', 'properties_json'],
       edge_contributions: ['generation_id', 'id', 'workspace_id', 'source_id', 'target_id', 'kind', 'properties_json'],
@@ -770,7 +770,7 @@ export class GraphStore implements ArchitectureInputProvider {
         if (Number(active.generation_id) !== input.generationId) throw new AnalysisError('INPUT_GENERATION_CHANGED', `Input generation '${input.analyzerId}:${input.generationId}' changed during analysis.`);
       }
       const identityVersion = ['builtin.codegraph', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.frontend-http', 'builtin.architecture'].includes(descriptor.id) ? 2 : 1;
-      const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count,identity_version) VALUES(?,?,?,?,?,?,?)').run(id, run.workspaceId, descriptor.id, now, result.nodes.length, result.edges.length, identityVersion);
+      const generation = this.db.prepare('INSERT INTO analysis_generations(run_id,workspace_id,analyzer_id,created_at,node_count,edge_count,identity_version,source_mapping_summary_json) VALUES(?,?,?,?,?,?,?,?)').run(id, run.workspaceId, descriptor.id, now, result.nodes.length, result.edges.length, identityVersion, result.sourceMappingSummary ? JSON.stringify(result.sourceMappingSummary) : null);
       const generationId = Number(generation.lastInsertRowid);
       const insertInput = this.db.prepare('INSERT INTO analysis_generation_inputs(generation_id,input_generation_id,input_analyzer_id) VALUES(?,?,?)');
       for (const input of inputs) insertInput.run(generationId, input.generationId, input.analyzerId);
@@ -829,10 +829,37 @@ export class GraphStore implements ArchitectureInputProvider {
     return !!this.db.prepare('SELECT 1 FROM active_analysis_generations WHERE workspace_id=? AND analyzer_id=? AND generation_id=?').get(workspaceId, analyzerId, generationId);
   }
   sourceReanalysisState(workspaceId: string) {
-    if (!this.getWorkspace(workspaceId)) return undefined;
-    const contract = this.db.prepare('SELECT identity_version AS identityVersion,provider,provider_version AS providerVersion,codegraph_generation_id AS codegraphGenerationId,updated_at AS updatedAt FROM workspace_source_contracts WHERE workspace_id=?').get(workspaceId) as { identityVersion: number; provider: string; providerVersion: string; codegraphGenerationId: number; updatedAt: string } | undefined;
-    const required = this.db.prepare('SELECT analyzer_id AS analyzerId,required_codegraph_generation_id AS requiredCodeGraphGenerationId,reason,created_at AS createdAt FROM workspace_reanalysis_requirements WHERE workspace_id=? ORDER BY analyzer_id').all(workspaceId) as Array<{ analyzerId: string; requiredCodeGraphGenerationId: number; reason: string; createdAt: string }>;
-    return { workspaceId, contract: contract ? { ...contract, codegraphGenerationId: Number(contract.codegraphGenerationId) } : undefined, reanalysisRequired: required.map((item) => ({ ...item, requiredCodeGraphGenerationId: Number(item.requiredCodeGraphGenerationId) })) };
+    const read = this.db.transaction(() => {
+      if (!this.getWorkspace(workspaceId)) return undefined;
+      const relevant = ['builtin.codegraph', 'builtin.sqlalchemy', 'builtin.fastapi', 'builtin.frontend-http', 'builtin.architecture'] as const;
+      const activeSnapshotId = createHash('sha256').update(JSON.stringify(this.activeGenerationVector([workspaceId]))).digest('base64url');
+      const contract = this.db.prepare('SELECT identity_version AS identityVersion,provider,provider_version AS providerVersion,codegraph_generation_id AS codegraphGenerationId,updated_at AS updatedAt FROM workspace_source_contracts WHERE workspace_id=?').get(workspaceId) as { identityVersion: number; provider: string; providerVersion: string; codegraphGenerationId: number; updatedAt: string } | undefined;
+      const required = this.db.prepare('SELECT analyzer_id AS analyzerId,required_codegraph_generation_id AS requiredCodeGraphGenerationId,reason,created_at AS createdAt FROM workspace_reanalysis_requirements WHERE workspace_id=? ORDER BY analyzer_id LIMIT 6').all(workspaceId) as Array<{ analyzerId: string; requiredCodeGraphGenerationId: number; reason: string; createdAt: string }>;
+      const marks = relevant.map(() => '?').join(',');
+      const activeRows = this.db.prepare(`SELECT a.analyzer_id AS analyzerId,a.generation_id AS activeGenerationId,g.source_mapping_summary_json AS mapping,
+          (SELECT i.input_generation_id FROM analysis_generation_inputs i WHERE i.generation_id=a.generation_id AND i.input_analyzer_id='builtin.codegraph') AS inputCodeGraphGenerationId
+        FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
+        JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
+        WHERE a.workspace_id=? AND a.analyzer_id IN (${marks}) ORDER BY a.analyzer_id`).all(workspaceId, ...relevant) as Array<{ analyzerId: string; activeGenerationId: number; inputCodeGraphGenerationId: number | null; mapping: string | null }>;
+      const latestRows = this.db.prepare(`WITH ranked AS (
+          SELECT analyzer_id,id,status,error_code,ROW_NUMBER() OVER(PARTITION BY analyzer_id ORDER BY started_at DESC,id DESC) AS rank
+          FROM analysis_runs WHERE workspace_id=? AND analyzer_id IN (${marks})
+        ) SELECT analyzer_id AS analyzerId,id,status,error_code AS errorCode FROM ranked WHERE rank=1 ORDER BY analyzer_id`).all(workspaceId, ...relevant) as Array<{ analyzerId: string; id: string; status: 'running' | 'succeeded' | 'failed'; errorCode: string | null }>;
+      const activeById = new Map(activeRows.map((row) => [row.analyzerId, row]));
+      const latestById = new Map(latestRows.map((row) => [row.analyzerId, row]));
+      const analyzers = relevant.map((analyzerId) => {
+        const active = activeById.get(analyzerId), latest = latestById.get(analyzerId);
+        return {
+          analyzerId,
+          ...(active ? { activeGenerationId: Number(active.activeGenerationId), ...(active.inputCodeGraphGenerationId === null ? {} : { inputCodeGraphGenerationId: Number(active.inputCodeGraphGenerationId) }), ...(active.mapping === null ? {} : { mapping: JSON.parse(active.mapping) as SourceMappingSummary }) } : {}),
+          ...(latest ? { latestRun: { id: latest.id, status: latest.status, ...(latest.errorCode ? { errorCode: latest.errorCode } : {}) } } : {}),
+        };
+      });
+      const state = { workspaceId, activeSnapshotId, contract: contract ? { ...contract, codegraphGenerationId: Number(contract.codegraphGenerationId) } : undefined, reanalysisRequired: required.map((item) => ({ ...item, requiredCodeGraphGenerationId: Number(item.requiredCodeGraphGenerationId) })), analyzers };
+      if (Buffer.byteLength(JSON.stringify(state), 'utf8') > 64 * 1024) throw new Error('SOURCE_REANALYSIS_STATE_TOO_LARGE');
+      return state;
+    });
+    return read();
   }
   private invalidateDependents(workspaceId: string, generationId: number) {
     this.db.prepare(`WITH RECURSIVE stale(generation_id) AS (

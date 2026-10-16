@@ -61,6 +61,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   const projectedEdgesById = new Map<string, GraphEdge>();
   const issueIds = new Set<string>();
   const processedClosures = new Set<string>();
+  const codeGraphEdges = (sources.codeGraph?.edges ?? []).filter((edge) => ['calls', 'references', 'depends_on'].includes(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
+  const codeGraphNodeById = new Map((sources.codeGraph?.nodes ?? []).map((node) => [node.id, node]));
+  const codeGraphNodeIds = new Set(codeGraphNodeById.keys());
+  const codeGraphEdgeIds = new Set(codeGraphEdges.map((edge) => edge.id));
+  const codeGraphOutgoing = indexEdges(codeGraphEdges, 'sourceId');
+  const codeGraphIncoming = indexEdges(codeGraphEdges, 'targetId');
+  const generationAdjacency = new WeakMap<ArchitectureInputGeneration, { byId: Map<string, GraphNode>; outgoing: Map<string, GraphEdge[]>; incoming: Map<string, GraphEdge[]> }>();
   const matchedPairs: Array<{ fast: GraphNode; spec: GraphNode; match: string }> = [];
   const ambiguousEndpointIds = new Set<string>();
   let totalVisits = 0;
@@ -95,7 +102,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       id: evidenceId(id, `architecture.${method}`), subjectKind: 'edge', subjectId: id, level,
       type: `architecture.${method}`,
       ...(level === 'INFERRED' ? { confidence } : {}),
-      provenance: { sources: [sourceProvenance(sources.fastApi, fastSource), sourceProvenance(sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
+      provenance: { sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastSource), sourceProvenance(sources.workspaceId, sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`),
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
@@ -210,7 +217,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const source = evidenceFor(input, endpoint.id);
     const item: AnalysisEvidence = {
       id: evidenceId(id, `architecture.${kind}`), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: `architecture.${kind}`,
-      provenance: { sources: [sourceProvenance(input, source)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
+      provenance: { sources: [sourceProvenance(sources.workspaceId, input, source)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`), detail: message,
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
@@ -235,8 +242,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const edgeId = ids.edge(sources.workspaceId, fast.id, id, 'architecture_contract_finding');
       edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: 'ARCHITECTURE_CONTRACT_MISMATCH', dimension } });
       const fastEvidence = evidenceFor(sources.fastApi, fast.id); const specEvidence = evidenceFor(sources.openApi, spec.id);
-      evidence.push({ id: evidenceId(id, 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
-      if (evidence.length < 10000) evidence.push({ id: evidenceId(edgeId, 'architecture.contract_mismatch.finding'), subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: 'architecture.contract_mismatch.finding', provenance: { sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      evidence.push({ id: evidenceId(id, 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastEvidence), sourceProvenance(sources.workspaceId, sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      if (evidence.length < 10000) evidence.push({ id: evidenceId(edgeId, 'architecture.contract_mismatch.finding'), subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: 'architecture.contract_mismatch.finding', provenance: { sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastEvidence), sourceProvenance(sources.workspaceId, sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
       diagnostics.push({ code: 'ARCHITECTURE_CONTRACT_MISMATCH', severity: 'warning', message: `Provable ${dimension} contract mismatch for '${fast.label}'.`, detail: { dimension, fastApiEndpointId: fast.id, openApiEndpointId: spec.id } });
     };
     const fastParams = relations(sources.fastApi, fast, 'accepts').map(({ targetId }) => nodeById(sources.fastApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
@@ -334,11 +341,17 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
   function projectClosure(generation: ArchitectureInputGeneration | undefined, endpoint: GraphNode) {
     if (!generation || processedClosures.has(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`)) return;
     processedClosures.add(`${generation.analyzerId}:${generation.generationId}:${endpoint.id}`);
-    const byId = new Map([...generation.nodes, ...(sources.codeGraph?.nodes ?? [])].map((node) => [node.id, node]));
-    const codeGraphEdges = sources.codeGraph?.edges.filter((edge) => edge.kind === 'calls' || edge.kind === 'references') ?? [];
-    const codeGraphNodeIds = new Set(sources.codeGraph?.nodes.map((node) => node.id) ?? []);
-    const codeGraphEdgeIds = new Set(codeGraphEdges.map((edge) => edge.id));
-    const closureEdges = [...generation.edges, ...codeGraphEdges];
+    let indexed = generationAdjacency.get(generation);
+    if (!indexed) {
+      const generationEdges = [...generation.edges].sort((a, b) => a.id.localeCompare(b.id));
+      indexed = {
+        byId: new Map([...codeGraphNodeById, ...generation.nodes.map((node) => [node.id, node] as const)]),
+        outgoing: indexEdges(generationEdges, 'sourceId'),
+        incoming: indexEdges(generationEdges, 'targetId'),
+      };
+      generationAdjacency.set(generation, indexed);
+    }
+    const { byId } = indexed;
     const allowedKinds = new Set(['api_endpoint', 'fastapi_route', 'openapi_operation', 'python_function', 'python_class', 'code.function', 'code.class', 'file', 'api_parameter', 'api_request_body', 'api_response', 'api_security_requirement', 'api_security_scheme', 'api_schema_reference', 'api_schema', 'sqlalchemy_model', 'sqlalchemy_table', 'frontend_file', 'frontend.http_request']);
     const allowedEdges = new Set(['exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'http_request']);
     const addNode = (node: GraphNode | undefined) => {
@@ -396,18 +409,34 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         if (evidenceIds.has(derivedId)) continue;
         if (evidence.length >= 10000) { markOutputLimit(); return; }
         evidenceIds.add(derivedId);
-        evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: source.id, sourceLevel: source.level, sourceProvenance: source.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
+        evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { workspaceId: sources.workspaceId, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: source.id, sourceLevel: source.level, sourceProvenance: source.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
       }
     }
     addNode(endpoint);
-    const outgoing = (id: string) => closureEdges.filter((edge) => edge.sourceId === id && allowedEdges.has(edge.kind)).sort((a, b) => a.id.localeCompare(b.id));
-    const incoming = (id: string, kind: string) => closureEdges.filter((edge) => edge.targetId === id && edge.kind === kind).sort((a, b) => a.id.localeCompare(b.id));
+    // CodeGraph dependency traversal belongs to verified FastAPI handler closures.
+    // SQLAlchemy closures are supplemental ORM context and must not restart the
+    // source walk at depth zero when reached from a handler's class mapping.
+    const traverseCodeGraph = generation.analyzerId === 'builtin.fastapi';
+    const outgoing = (id: string) => mergeIndexedEdges(indexed!.outgoing.get(id), traverseCodeGraph ? codeGraphOutgoing.get(id) : undefined).filter((edge) => allowedEdges.has(edge.kind));
+    const incoming = (id: string, kind: string) => mergeIndexedEdges(indexed!.incoming.get(id), traverseCodeGraph ? codeGraphIncoming.get(id) : undefined).filter((edge) => edge.kind === kind && allowedEdges.has(edge.kind));
     const callsQueue: Array<{ id: string; depth: number }> = [];
     const reachedClasses = new Set<string>();
+    const symbolKinds = new Set(['python_function', 'python_async_function', 'code.function', 'python_class', 'code.class']);
+    if (traverseCodeGraph && symbolKinds.has(endpoint.kind)) callsQueue.push({ id: endpoint.id, depth: 0 });
+    let traversalLimitReported = false;
+    const reportTraversalLimit = () => {
+      if (traversalLimitReported || diagnostics.length >= 10000) return;
+      traversalLimitReported = true;
+      diagnostics.push({ code: 'ARCHITECTURE_TRAVERSAL_LIMIT', severity: 'info', message: 'Bounded handler traversal reached a configured limit; remaining symbols were skipped.', detail: { endpointId: endpoint.id } });
+    };
     for (const edge of outgoing(endpoint.id)) {
       addEdge(edge);
-      if (edge.kind === 'depends_on' && ['python_function','code.function'].includes(byId.get(edge.targetId)?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: 0 });
-      if (['python_class','code.class'].includes(byId.get(edge.targetId)?.kind ?? '')) reachedClasses.add(edge.targetId);
+      const targetKind = byId.get(edge.targetId)?.kind ?? '';
+      if (traverseCodeGraph && edge.kind === 'depends_on' && symbolKinds.has(targetKind)) callsQueue.push({ id: edge.targetId, depth: 0 });
+      if (traverseCodeGraph && symbolKinds.has(targetKind)) {
+        callsQueue.push({ id: edge.targetId, depth: 0 });
+        if (['python_class','code.class'].includes(targetKind)) reachedClasses.add(edge.targetId);
+      }
       if (edge.kind === 'maps_to' && byId.get(edge.targetId)?.kind === 'sqlalchemy_model') {
         for (const relation of outgoing(edge.targetId)) if (relation.kind === 'contains' && byId.get(relation.targetId)?.kind === 'sqlalchemy_table') addEdge(relation);
       }
@@ -421,7 +450,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       if (owner?.kind === 'fastapi_route') {
         for (const relation of outgoing(owner.id)) {
           addEdge(relation);
-          if (relation.kind === 'handled_by') callsQueue.push({ id: relation.targetId, depth: 0 });
+          if (traverseCodeGraph && relation.kind === 'handled_by' && symbolKinds.has(byId.get(relation.targetId)?.kind ?? '')) callsQueue.push({ id: relation.targetId, depth: 0 });
         }
       } else if (owner?.kind === 'openapi_operation') {
         for (const relation of outgoing(owner.id)) addEdge(relation);
@@ -433,16 +462,20 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const current = callsQueue.shift()!;
       if (visited.has(current.id)) continue;
       if (current.depth > config.maxTraversalDepth || visited.size >= config.maxVisitedSymbolsPerEndpoint || totalVisits >= config.maxTotalTraversalVisits) {
-        if (diagnostics.length < 10000) diagnostics.push({ code: 'ARCHITECTURE_TRAVERSAL_LIMIT', severity: 'info', message: 'Bounded handler traversal reached a configured limit; remaining symbols were skipped.', detail: { endpointId: endpoint.id } });
+        reportTraversalLimit();
         break;
       }
       visited.add(current.id); totalVisits++;
       const currentNode = byId.get(current.id); addNode(currentNode);
-      for (const edge of outgoing(current.id)) {
-        if (!['calls', 'references', 'depends_on'].includes(edge.kind)) continue;
+      const dependencyEdges = outgoing(current.id).filter((edge) => ['calls', 'references', 'depends_on'].includes(edge.kind));
+      if (current.depth >= config.maxTraversalDepth) {
+        if (dependencyEdges.some((edge) => symbolKinds.has(byId.get(edge.targetId)?.kind ?? ''))) reportTraversalLimit();
+        continue;
+      }
+      for (const edge of dependencyEdges) {
         addEdge(edge);
         const target = byId.get(edge.targetId);
-        if (['python_function','code.function'].includes(target?.kind ?? '') && current.depth < config.maxTraversalDepth) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
+        if (symbolKinds.has(target?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
         if (['python_class','code.class'].includes(target?.kind ?? '')) reachedClasses.add(target!.id);
       }
     }
@@ -469,7 +502,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
             const derivedId = evidenceId(id, `architecture.accesses_model:${sourceGeneration.analyzerId}:${sourceGeneration.generationId}:${item.id}`);
             if (evidenceIds.has(derivedId)) continue;
             evidenceIds.add(derivedId);
-            evidence.push({ ...item, id: derivedId, subjectKind: 'edge', subjectId: id, level: item.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', type: 'architecture.accesses_model', provenance: { analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: item.id, sourceType: item.type, sourceLevel: item.level, sourceProvenance: item.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
+            evidence.push({ ...item, id: derivedId, subjectKind: 'edge', subjectId: id, level: item.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', type: 'architecture.accesses_model', provenance: { workspaceId: sources.workspaceId, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: item.id, sourceType: item.type, sourceLevel: item.level, sourceProvenance: item.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
           }
           if (sourceFacts.length === 0) {
             const fallbackId = evidenceId(id, 'architecture.accesses_model:identity-facts');
@@ -502,10 +535,23 @@ function matchUnique(fast: Map<string, GraphNode>, spec: Map<string, GraphNode>,
   }
 }
 
+function indexEdges(edges: readonly GraphEdge[], endpoint: 'sourceId' | 'targetId'): Map<string, GraphEdge[]> {
+  const indexed = new Map<string, GraphEdge[]>();
+  for (const edge of edges) indexed.set(edge[endpoint], [...(indexed.get(edge[endpoint]) ?? []), edge]);
+  return indexed;
+}
+
+function mergeIndexedEdges(first: readonly GraphEdge[] = [], second: readonly GraphEdge[] = []): GraphEdge[] {
+  const byId = new Map<string, GraphEdge>();
+  for (const edge of first) byId.set(edge.id, edge);
+  for (const edge of second) if (!byId.has(edge.id)) byId.set(edge.id, edge);
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 function stringProperty(node: GraphNode, key: string): string | undefined { const value = node.properties[key]; return typeof value === 'string' && value.length ? value : undefined; }
 function evidenceFor(generation: ArchitectureInputGeneration | undefined, subjectId: string): AnalysisEvidence | undefined { return generation?.evidence.find((item) => item.subjectKind === 'node' && item.subjectId === subjectId); }
-function sourceProvenance(generation: ArchitectureInputGeneration | undefined, evidence: AnalysisEvidence | undefined) {
-  return evidence ? { analyzerId: generation?.analyzerId ?? null, evidenceId: evidence.id, type: evidence.type, level: evidence.level, uri: evidence.uri ?? null, line: evidence.line ?? null } : null;
+function sourceProvenance(workspaceId: string, generation: ArchitectureInputGeneration | undefined, evidence: AnalysisEvidence | undefined) {
+  return evidence && generation ? { workspaceId, analyzerId: generation.analyzerId, generationId: generation.generationId, evidenceId: evidence.id, type: evidence.type, level: evidence.level, uri: evidence.uri ?? null, line: evidence.line ?? null } : null;
 }
 
 function normalizeScheme(node: GraphNode): string | undefined {

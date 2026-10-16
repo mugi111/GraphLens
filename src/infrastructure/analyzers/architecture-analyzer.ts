@@ -3,10 +3,10 @@ import { AnalysisError, type AnalysisContext, type AnalysisDiagnostic, type Anal
 import { architectureConfig, resolveArchitecture } from './architecture-resolver.js';
 
 const INPUT_IDS = ['builtin.codegraph', 'builtin.fastapi', 'builtin.openapi', 'builtin.sqlalchemy', 'builtin.frontend-http'] as const;
-const VERSION = 'architecture-v2';
+const VERSION = 'architecture-v3';
 
 export const architectureAnalyzer: Analyzer = {
-  descriptor: { id: 'builtin.architecture', version: '1.0.0', apiVersion: '1', capabilities: ['graph', 'evidence', 'diagnostics'] },
+  descriptor: { id: 'builtin.architecture', version: '1.1.0', apiVersion: '1', capabilities: ['graph', 'evidence', 'diagnostics'] },
   async analyze(context: AnalysisContext): Promise<AnalysisResult> {
     if (!context.architectureInputProvider) throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', 'Architecture input provider is unavailable.');
     let snapshot;
