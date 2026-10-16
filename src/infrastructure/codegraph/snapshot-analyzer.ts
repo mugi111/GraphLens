@@ -101,6 +101,7 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
 
         const graphNodes: GraphNode[] = [];
         const graphEdges: GraphEdge[] = [];
+        const graphEdgesById = new Map<string, GraphEdge>();
         const evidence: AnalysisEvidence[] = [];
         const outputMeter = new SerializedBudget(diagnostics);
         const sourceHash = createHash('sha256').update(`${CODEGRAPH_VERSION}:${SCHEMA_VERSION}:${EXTRACTION_VERSION}:`);
@@ -108,7 +109,21 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         const mapped = new Map<string, string>();
         const nodeFilePaths = new Map<string, string>();
         const addNode = (node: GraphNode, ev: AnalysisEvidence) => { outputMeter.addNode(node); outputMeter.addEvidence(ev); graphNodes.push(node); evidence.push(ev); };
-        const addEdge = (edge: GraphEdge, ev: AnalysisEvidence) => { outputMeter.addEdge(edge); outputMeter.addEvidence(ev); graphEdges.push(edge); evidence.push(ev); };
+        const addEdge = (edge: GraphEdge, ev: AnalysisEvidence) => {
+          const existing = graphEdgesById.get(edge.id);
+          if (existing) {
+            const oldOccurrences = Array.isArray(existing.properties.occurrences) ? existing.properties.occurrences : [];
+            const newOccurrences = Array.isArray(edge.properties.occurrences) ? edge.properties.occurrences : [];
+            existing.properties = { ...existing.properties, occurrences: [...oldOccurrences, ...newOccurrences] };
+            existing.evidence = [...(existing.evidence ?? []), ...(edge.evidence ?? [])];
+            if (edge.level === 'DIRECT' || (edge.level === 'DERIVED' && existing.level === 'INFERRED')) existing.level = edge.level;
+          } else {
+            outputMeter.addEdge(edge);
+            graphEdgesById.set(edge.id, edge);
+            graphEdges.push(edge);
+          }
+          outputMeter.addEvidence(ev); evidence.push(ev);
+        };
         const workspaceNodeId = identity.node(workspace.id, `workspace://${workspace.id}`, 'workspace');
         addNode({ id: workspaceNodeId, workspaceId: workspace.id, kind: 'workspace', label: workspace.name.normalize('NFC'), properties: { workspacePath: workspace.path.normalize('NFC') }, level: 'DIRECT' }, evidenceFor('codegraph.workspace', 'node', workspaceNodeId, 'DIRECT', workspace.path));
         const repositoryKey = 'root';
@@ -144,8 +159,10 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
           const kind = normalizeEdgeKind(edge.kind);
           const level = edgeLevel(edge);
           const id = identity.relationship(workspace.id, sourceId, targetId, normalizeEdgeKind(edge.kind));
-          const ev = evidenceFor('codegraph.relationship', 'edge', id, level, nodeFilePaths.get(edge.source), edge.line, { codegraphId: edge.id, upstreamProvenance: edge.provenance });
-          addEdge({ id, workspaceId: workspace.id, sourceId, targetId, kind, properties: jsonRecord({ codegraphId: edge.id, upstreamKind: isKnownEdgeKind(edge.kind) ? undefined : edge.kind, metadata: parseJsonObject(edge.metadata, `metadata for edge ${edge.id}`), line: edge.line, column: edge.col, provenance: edge.provenance }), evidence: [{ type: ev.type, ...(ev.uri ? { uri: ev.uri } : {}), ...(ev.line ? { line: ev.line } : {}), level: ev.level }], level }, ev);
+          const occurrence = jsonRecord({ codegraphId: String(edge.id), upstreamKind: isKnownEdgeKind(edge.kind) ? undefined : edge.kind, metadata: parseJsonObject(edge.metadata, `metadata for edge ${edge.id}`), line: edge.line, column: edge.col, provenance: edge.provenance });
+          const ev = evidenceFor('codegraph.relationship', 'edge', id, level, nodeFilePaths.get(edge.source), edge.line, { codegraphId: String(edge.id), upstreamProvenance: edge.provenance }, String(edge.id));
+          if (edge.col !== undefined && edge.col >= 0) ev.column = edge.col + 1;
+          addEdge({ id, workspaceId: workspace.id, sourceId, targetId, kind, properties: { ...occurrence, occurrences: [occurrence] }, evidence: [{ type: ev.type, ...(ev.uri ? { uri: ev.uri } : {}), ...(ev.line ? { line: ev.line } : {}), level: ev.level }], level }, ev);
         }
         for (const file of normalizedFiles) {
           const segments = file.normalizedPath.split('/');
@@ -167,7 +184,9 @@ export function createCodeGraphSnapshotAnalyzer(sdkPackageRoot: string): Analyze
         for (const node of graphNodes.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`n\0${JSON.stringify(node)}\n`);
         for (const edge of graphEdges.sort((a, b) => a.id.localeCompare(b.id))) sourceHash.update(`e\0${JSON.stringify(edge)}\n`);
         db.exec('COMMIT'); inTransaction = false;
-        return { sourceRevision: sourceHash.digest('hex'), nodes: graphNodes, edges: graphEdges, evidence, diagnostics };
+        const result = { sourceRevision: sourceHash.digest('hex'), nodes: graphNodes, edges: graphEdges, evidence, diagnostics } satisfies AnalysisResult;
+        if (Buffer.byteLength(JSON.stringify(result), 'utf8') > MAX_TOTAL_BYTES) throw new Error(`Serialized CodeGraph analyzer result exceeds ${MAX_TOTAL_BYTES} bytes.`);
+        return result;
 
         function addDerivedContains(sourceId: string, targetId: string, path: string): void {
           const id = identity.relationship(workspace.id, sourceId, targetId, 'contains');
@@ -265,8 +284,8 @@ function edgeLevel(edge: EdgeRecord): EvidenceLevel {
   return 'DIRECT';
 }
 function bool(value: number | undefined): boolean | undefined { return value === undefined ? undefined : value !== 0; }
-function evidenceFor(type: string, subjectKind: 'node' | 'edge', subjectId: string, level: EvidenceLevel, uri?: string, line?: number, provenance?: Record<string, unknown>): AnalysisEvidence {
-  return { id: identity.node(subjectId, `evidence:${subjectKind}`, type), subjectKind, subjectId, level, type, ...(uri ? { uri } : {}), ...(line && line > 0 ? { line } : {}), ...(provenance ? { provenance: jsonRecord(provenance) } : {}) };
+function evidenceFor(type: string, subjectKind: 'node' | 'edge', subjectId: string, level: EvidenceLevel, uri?: string, line?: number, provenance?: Record<string, unknown>, occurrenceId?: string): AnalysisEvidence {
+  return { id: identity.node(subjectId, `evidence:${subjectKind}`, occurrenceId ? `${type}:${occurrenceId}` : type), subjectKind, subjectId, level, type, ...(uri ? { uri } : {}), ...(line && line > 0 ? { line } : {}), ...(provenance ? { provenance: jsonRecord(provenance) } : {}) };
 }
 function loadCodeGraphSdk(packageRoot: string): CodeGraphSdk {
   const root = resolve(packageRoot);
