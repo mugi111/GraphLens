@@ -56,7 +56,7 @@ export class DatabaseSchemaService {
     const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
     if (closure.nodes.length > 250 || closure.edges.length > 200) throw new DatabaseSchemaError('DATABASE_QUERY_TOO_LARGE', 'Schema closure exceeds the bounded response size.', 422);
     const projection = { nodes: closure.nodes, edges: closure.edges };
-    const evidence = snapshot.evidence;
+    const evidence = snapshot.evidence as unknown as AnalysisEvidence[];
     const nextOffset = offset + pageRoots.length;
     const nextCursor = nextOffset < page.totalRootCount ? this.encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.sqlalchemy', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const diagnostics = snapshot.diagnostics;
