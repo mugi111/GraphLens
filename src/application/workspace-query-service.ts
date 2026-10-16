@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { GraphStore } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type WorkspaceGraphMode = 'roots' | 'children' | 'neighbors' | 'search';
 export type WorkspaceGraphQuery = { workspaces: string[]; mode: WorkspaceGraphMode; node?: string; q?: string; kind?: string; direction: 'outgoing' | 'incoming' | 'both'; limit: number; cursor?: string; snapshot?: string; includeEvidence: boolean };
 type Cursor = { v: 1; workspaces: string[]; query: string; snapshot: string; offset: number };
 export class WorkspaceGraphError extends Error {
-  constructor(public readonly code: 'INVALID_WORKSPACE_GRAPH_QUERY' | 'INVALID_CURSOR' | 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_GRAPH_NODE_NOT_FOUND' | 'WORKSPACE_GRAPH_SNAPSHOT_CHANGED' | 'WORKSPACE_GRAPH_LIMIT_EXCEEDED', message: string, public readonly status: 400 | 404 | 409 | 422 = 400) { super(message); }
+  constructor(public readonly code: 'INVALID_WORKSPACE_GRAPH_QUERY' | 'INVALID_CURSOR' | 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_GRAPH_NODE_NOT_FOUND' | 'WORKSPACE_GRAPH_SNAPSHOT_CHANGED' | 'WORKSPACE_GRAPH_LIMIT_EXCEEDED' | 'WORKSPACE_GRAPH_DANGLING_EDGE' | 'UNIFIED_GRAPH_LIMIT_EXCEEDED', message: string, public readonly status: 400 | 404 | 409 | 422 = 400) { super(message); }
 }
 
 export function parseWorkspaceGraphQuery(params: URLSearchParams): { query: WorkspaceGraphQuery } | { error: string; code: 'INVALID_WORKSPACE_GRAPH_QUERY' } {
@@ -46,10 +47,12 @@ export class WorkspaceQueryService {
     let result: ReturnType<GraphStore['workspaceGraphPage']>;
     try { result = this.store.workspaceGraphPage(query, cursor); }
     catch (error) {
+      if (error instanceof GraphProjectionError) throw new WorkspaceGraphError('WORKSPACE_GRAPH_LIMIT_EXCEEDED', error.message, 422);
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith('WORKSPACE_NOT_FOUND:')) throw new WorkspaceGraphError('WORKSPACE_NOT_FOUND', `Workspace not found: ${message.slice('WORKSPACE_NOT_FOUND:'.length)}.`, 404);
       if (message === 'WORKSPACE_GRAPH_NODE_NOT_FOUND') throw new WorkspaceGraphError('WORKSPACE_GRAPH_NODE_NOT_FOUND', 'The requested node is not present in the selected workspaces.', 404);
-      if (message === 'WORKSPACE_GRAPH_LIMIT_EXCEEDED') throw new WorkspaceGraphError('WORKSPACE_GRAPH_LIMIT_EXCEEDED', 'The selected graph page exceeds the bounded response budget.', 422);
+      if (message === 'WORKSPACE_GRAPH_LIMIT_EXCEEDED' || message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED') throw new WorkspaceGraphError('WORKSPACE_GRAPH_LIMIT_EXCEEDED', 'The selected graph page exceeds the bounded response budget.', 422);
+      if (message === 'WORKSPACE_GRAPH_DANGLING_EDGE') throw new WorkspaceGraphError('WORKSPACE_GRAPH_DANGLING_EDGE', 'A selected relationship refers to a node missing from the active workspace generations.', 422);
       if (message === 'WORKSPACE_GRAPH_SNAPSHOT_CHANGED') throw new WorkspaceGraphError('WORKSPACE_GRAPH_SNAPSHOT_CHANGED', 'The active workspace graph changed while paging. Reload the workspace view.', 409);
       if (message === 'INVALID_CURSOR') throw new WorkspaceGraphError('INVALID_CURSOR', 'Cursor is outside the result set.');
       throw error;
@@ -57,7 +60,9 @@ export class WorkspaceQueryService {
     if ((query.snapshot !== undefined && query.snapshot !== result.snapshotId) || (cursor && cursor.snapshot !== result.snapshotId)) throw new WorkspaceGraphError('WORKSPACE_GRAPH_SNAPSHOT_CHANGED', 'The active workspace graph changed while paging. Reload the workspace view.', 409);
     if (cursor && !result.cursorValid) throw new WorkspaceGraphError('INVALID_CURSOR', 'Cursor is outside the result set.');
     const nextCursor = result.hasMore ? this.encodeCursor({ v: 1, workspaces: query.workspaces, query: queryHash, snapshot: result.snapshotId, offset: result.nextOffset! }) : undefined;
-    return { snapshotId: result.snapshotId, workspaces: result.workspaces, generations: result.generations, query: { workspaces: query.workspaces, mode: query.mode, ...(query.node ? { node: query.node } : {}), ...(query.q !== undefined ? { q: query.q } : {}), ...(query.kind ? { kind: query.kind } : {}), ...(query.mode === 'neighbors' ? { direction: query.direction } : {}), limit: query.limit, ...(query.includeEvidence ? { include: ['evidence'] } : {}) }, page: { limit: query.limit, ...(nextCursor ? { nextCursor } : {}) }, rootIds: result.rootIds, nodes: result.nodes, edges: result.edges };
+    const response = { snapshotId: result.snapshotId, workspaces: result.workspaces, generations: result.generations, query: { workspaces: query.workspaces, mode: query.mode, ...(query.node ? { node: query.node } : {}), ...(query.q !== undefined ? { q: query.q } : {}), ...(query.kind ? { kind: query.kind } : {}), ...(query.mode === 'neighbors' ? { direction: query.direction } : {}), limit: query.limit, ...(query.includeEvidence ? { include: ['evidence'] } : {}) }, page: { limit: query.limit, ...(nextCursor ? { nextCursor } : {}) }, rootIds: result.rootIds, nodes: result.nodes, edges: result.edges };
+    if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 3 * 1_048_576) throw new WorkspaceGraphError('WORKSPACE_GRAPH_LIMIT_EXCEEDED', 'The complete workspace graph response exceeds the 3 MiB limit.', 422);
+    return response;
   }
   private encodeCursor(payload: Cursor) { return Buffer.from(JSON.stringify(payload)).toString('base64url'); }
   private decodeCursor(value: string): Cursor {

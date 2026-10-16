@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import type { AnalysisDiagnostic, AnalysisEvidence } from '../domain/analyzer.js';
 import type { GraphEdge, GraphNode } from '../domain/graph.js';
 import type { DatabaseSchemaSnapshot, GraphStore, StoredAnalysisDiagnostic } from '../infrastructure/sqlite/graph-store.js';
+import { GraphProjectionError } from './unified-graph-projection.js';
 
 export type ArchitectureRoot = 'endpoint' | 'handler' | 'model' | 'table' | 'finding';
 export type ArchitectureQuery = { workspace: string; root: ArchitectureRoot; node?: string; namespace?: string; method?: string; path?: string; finding?: 'gap' | 'ambiguous' | 'unresolved' | 'mismatch'; limit: number; depth: number; cursor?: string; includeEvidence: boolean; includeDiagnostics: boolean };
-type Cursor = { v: 1; workspace: string; analyzerId: 'builtin.architecture'; generationId: number; filters: string; offset: number };
+type Cursor = { v: 1; workspace: string; analyzerId: 'builtin.architecture'; generationId: number; projectionSnapshotId: string; filters: string; offset: number };
 type Snapshot = DatabaseSchemaSnapshot & { inputGenerations?: Array<{ analyzerId: string; generationId: number }> };
 const EDGE_ALLOWLIST = new Set(['implements_contract', 'architecture_contract_finding', 'exposes', 'handled_by', 'depends_on', 'calls', 'references', 'accepts', 'returns', 'uses_schema', 'secured_by', 'uses_scheme', 'maps_to', 'contains', 'accesses_model', 'http_request']);
 
@@ -21,40 +22,49 @@ export class ArchitectureQueryService {
     const filterHash = createHash('sha256').update(filters).digest('base64url');
     const cursor = query.cursor === undefined ? undefined : decodeCursor(query.cursor);
     if (cursor && (cursor.workspace !== query.workspace || cursor.analyzerId !== 'builtin.architecture' || cursor.filters !== filterHash)) throw new ArchitectureQueryError('CURSOR_QUERY_MISMATCH', 'Cursor does not belong to this workspace and query.', 400);
-    const snapshot = this.store.architectureSnapshot(query.workspace) as Snapshot | undefined;
-    if (!snapshot) {
+    let page: ReturnType<GraphStore['architectureQueryPage']>;
+    try { page = this.store.architectureQueryPage({ ...query, includeEvidence: query.includeEvidence || query.includeDiagnostics }, cursor?.offset ?? 0, cursor?.projectionSnapshotId) as ReturnType<GraphStore['architectureQueryPage']>; } catch (error) {
+      if (error instanceof Error && error.message === 'ARCHITECTURE_SNAPSHOT_CHANGED') throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
+      if (error instanceof GraphProjectionError || (error instanceof Error && error.message === 'UNIFIED_GRAPH_LIMIT_EXCEEDED')) throw tooLarge();
+      throw error;
+    }
+    if (!page) {
       if (cursor) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
       throw new ArchitectureQueryError('ARCHITECTURE_ANALYSIS_NOT_FOUND', 'No active architecture analysis exists for this workspace.');
     }
-    if (cursor && cursor.generationId !== snapshot.analysis.generationId) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
-    const allRoots = selectRoots(snapshot, query);
-    if (query.node !== undefined && allRoots.length === 0) throw new ArchitectureQueryError('ARCHITECTURE_NODE_NOT_FOUND', `Node '${query.node}' was not found in the active architecture snapshot.`);
+    const snapshot = page.snapshot as Snapshot;
+    if (cursor && (cursor.generationId !== snapshot.analysis.generationId || cursor.projectionSnapshotId !== snapshot.projectionSnapshotId)) throw new ArchitectureQueryError('ARCHITECTURE_SNAPSHOT_CHANGED', 'The active architecture snapshot changed while paging.', 409);
     const offset = cursor?.offset ?? 0;
-    if (offset >= allRoots.length && cursor) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
-    const roots = allRoots.slice(offset, offset + query.limit);
-    const closure = buildClosure(snapshot, roots, query.depth);
-    if (closure.nodes.length > 2000 || closure.edges.length > 4000) throw tooLarge();
+    if (offset >= page.totalRootCount && cursor) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor offset is outside the result set.', 400);
+    if (query.node !== undefined && page.rootIds.length === 0) throw new ArchitectureQueryError('ARCHITECTURE_NODE_NOT_FOUND', `Node '${query.node}' was not found in the active architecture snapshot.`);
+    const roots = page.rootIds;
+    const closure = { nodes: snapshot.nodes, edges: snapshot.edges };
+    if (closure.nodes.length > 250 || closure.edges.length > 200) throw tooLarge();
+    const projection = { nodes: closure.nodes, edges: closure.edges };
+    const projectionEvidence = snapshot.evidence;
     const nodeEvidence = new Map<string, AnalysisEvidence[]>(), edgeEvidence = new Map<string, AnalysisEvidence[]>();
-    for (const item of snapshot.evidence) {
+    for (const item of projectionEvidence) {
       const target = item.subjectKind === 'node' ? nodeEvidence : edgeEvidence;
       target.set(item.subjectId, [...(target.get(item.subjectId) ?? []), item]);
     }
     const includedCount = query.includeEvidence ? closure.nodes.reduce((n, item) => n + (nodeEvidence.get(item.id)?.length ?? 0), 0) + closure.edges.reduce((n, item) => n + (edgeEvidence.get(item.id)?.length ?? 0), 0) : 0;
     if (includedCount > 5000) throw tooLarge();
-    const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, closure.nodes, closure.edges, snapshot.evidence) : undefined;
+    const diagnostics = query.includeDiagnostics ? relevantDiagnostics(snapshot.diagnostics, projection.nodes, projection.edges, projectionEvidence) : undefined;
     if (diagnostics && diagnostics.length > 1000) throw tooLarge();
     const nextOffset = offset + roots.length;
-    const nextCursor = nextOffset < allRoots.length ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, filters: filterHash, offset: nextOffset }) : undefined;
-    return {
+    const nextCursor = nextOffset < page.totalRootCount ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
+    const result = {
       workspace: snapshot.workspace,
       analysis: { ...snapshot.analysis, inputGenerations: snapshot.inputGenerations ?? [], diagnostics: diagnosticCounts(snapshot.diagnostics) },
       query: { root: query.root, ...(query.node !== undefined ? { node: query.node } : {}), ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.finding !== undefined ? { finding: query.finding } : {}), depth: query.depth },
-      page: { limit: query.limit, rootCount: roots.length, totalRootCount: allRoots.length, ...(nextCursor ? { nextCursor } : {}) },
-      rootIds: roots.map((node) => node.id),
-      nodes: closure.nodes.map((node) => projectNode(node, nodeEvidence.get(node.id) ?? [], query.includeEvidence)),
-      edges: closure.edges.map((edge) => projectEdge(edge, edgeEvidence.get(edge.id) ?? [], query.includeEvidence)),
+      page: { limit: query.limit, rootCount: roots.length, totalRootCount: page.totalRootCount, ...(nextCursor ? { nextCursor } : {}) },
+      rootIds: roots,
+      nodes: projection.nodes.map((node) => projectNode(node, nodeEvidence.get(node.id) ?? [], query.includeEvidence)),
+      edges: projection.edges.map((edge) => projectEdge(edge, edgeEvidence.get(edge.id) ?? [], query.includeEvidence)),
       ...(diagnostics ? { diagnostics } : {}),
     };
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 3 * 1_048_576) throw tooLarge();
+    return result;
   }
 }
 
@@ -111,14 +121,14 @@ function buildClosure(snapshot: Snapshot, roots: GraphNode[], depth: number) {
   for (let cursor = 0; cursor < queue.length; cursor++) {
     const id = queue[cursor]!, d = distance.get(id)!;
     if (d >= depth) continue;
-    for (const item of adjacency.get(id) ?? []) if (!distance.has(item.id)) { distance.set(item.id, d + 1); queue.push(item.id); if (queue.length > 2000) throw tooLarge(); }
+    for (const item of adjacency.get(id) ?? []) if (!distance.has(item.id)) { distance.set(item.id, d + 1); queue.push(item.id); if (queue.length > 250) throw tooLarge(); }
   }
   const selectedEdges = snapshot.edges.filter((edge) => EDGE_ALLOWLIST.has(edge.kind) && distance.has(edge.sourceId) && distance.has(edge.targetId));
-  if (selectedEdges.length > 4000) throw tooLarge();
+  if (selectedEdges.length > 200) throw tooLarge();
   return { nodes: [...distance.keys()].map((id) => byId.get(id)!).sort((a, b) => cmp([a.kind, a.id], [b.kind, b.id])), edges: selectedEdges.sort((a, b) => cmp([a.kind, a.sourceId, a.targetId, a.id], [b.kind, b.sourceId, b.targetId, b.id])) };
 }
-function projectNode(node: GraphNode, evidence: AnalysisEvidence[], include: boolean) { const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...node, level: dominant(sorted), evidenceCount: sorted.length, ...(include ? { evidence: sorted } : {}) }; }
-function projectEdge(edge: GraphEdge, evidence: AnalysisEvidence[], include: boolean) { const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...edge, level: dominant(sorted), evidenceCount: sorted.length, ...(include ? { evidence: sorted } : {}) }; }
+function projectNode(node: GraphNode, evidence: AnalysisEvidence[], include: boolean) { const { evidence: _evidence, ...base } = node; const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...base, level: node.level ?? dominant(sorted), evidenceCount: node.evidenceCount ?? sorted.length, ...(include ? { evidence: sorted } : {}) }; }
+function projectEdge(edge: GraphEdge, evidence: AnalysisEvidence[], include: boolean) { const { evidence: _evidence, ...base } = edge; const sorted = evidence.slice().sort((a, b) => cmp([a.id ?? ''], [b.id ?? ''])); return { ...base, level: edge.level ?? dominant(sorted), evidenceCount: edge.evidenceCount ?? sorted.length, ...(include ? { evidence: sorted } : {}) }; }
 function dominant(items: AnalysisEvidence[]): 'DIRECT' | 'DERIVED' | 'INFERRED' { return items.some((x) => x.level === 'DIRECT') ? 'DIRECT' : items.some((x) => x.level === 'DERIVED') ? 'DERIVED' : 'INFERRED'; }
 function relevantDiagnostics(items: StoredAnalysisDiagnostic[], nodes: GraphNode[], edges: GraphEdge[], evidence: AnalysisEvidence[]): AnalysisDiagnostic[] {
   const ids = new Set([...nodes.map((n) => n.id), ...edges.map((e) => e.id)]);
@@ -126,12 +136,12 @@ function relevantDiagnostics(items: StoredAnalysisDiagnostic[], nodes: GraphNode
   return items.filter((item) => { const detail = item.detail && typeof item.detail === 'object' ? item.detail as Record<string, unknown> : {}; const related = [detail.endpointId, detail.fastApiEndpointId, detail.openApiEndpointId].some((id) => typeof id === 'string' && ids.has(id)); const hasSubject = [detail.endpointId, detail.fastApiEndpointId, detail.openApiEndpointId].some((id) => typeof id === 'string'); return related || (!item.uri && !hasSubject) || (!!item.uri && uris.has(item.uri)); }).map(({ sequence: _sequence, generationId: _generationId, ...item }) => item);
 }
 function diagnosticCounts(items: StoredAnalysisDiagnostic[]) { return { total: items.length, info: items.filter((i) => i.severity === 'info').length, warning: items.filter((i) => i.severity === 'warning').length, error: items.filter((i) => i.severity === 'error').length }; }
-function filterKey(query: ArchitectureQuery) { return JSON.stringify({ root: query.root, node: query.node ?? null, namespace: query.namespace ?? null, method: query.method ?? null, path: query.path ?? null, finding: query.finding ?? null, depth: query.depth, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics }); }
+function filterKey(query: ArchitectureQuery) { return JSON.stringify({ root: query.root, node: query.node ?? null, namespace: query.namespace ?? null, method: query.method ?? null, path: query.path ?? null, finding: query.finding ?? null, limit: query.limit, depth: query.depth, includeEvidence: query.includeEvidence, includeDiagnostics: query.includeDiagnostics }); }
 function encodeCursor(cursor: Cursor) { return Buffer.from(JSON.stringify(cursor)).toString('base64url'); }
 function decodeCursor(raw: string): Cursor {
   if (!raw || raw.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(raw)) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
   let value: unknown; try { const bytes = Buffer.from(raw, 'base64url'); if (bytes.toString('base64url') !== raw) throw new Error(); value = JSON.parse(bytes.toString('utf8')); } catch { throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400); }
-  if (!record(value) || Object.keys(value).sort().join(',') !== 'analyzerId,filters,generationId,offset,v,workspace' || value.v !== 1 || value.analyzerId !== 'builtin.architecture' || typeof value.workspace !== 'string' || value.workspace.length < 1 || value.workspace.length > 256 || typeof value.filters !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.filters) || !Number.isSafeInteger(value.generationId) || Number(value.generationId) < 1 || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
+  if (!record(value) || Object.keys(value).sort().join(',') !== 'analyzerId,filters,generationId,offset,projectionSnapshotId,v,workspace' || value.v !== 1 || value.analyzerId !== 'builtin.architecture' || typeof value.workspace !== 'string' || value.workspace.length < 1 || value.workspace.length > 256 || typeof value.filters !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.filters) || typeof value.projectionSnapshotId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.projectionSnapshotId) || !Number.isSafeInteger(value.generationId) || Number(value.generationId) < 1 || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) throw new ArchitectureQueryError('INVALID_CURSOR', 'Cursor is invalid.', 400);
   return value as Cursor;
 }
 function tooLarge() { return new ArchitectureQueryError('ARCHITECTURE_QUERY_TOO_LARGE', 'Architecture query exceeds a hard response limit; no partial result was returned.', 422); }
