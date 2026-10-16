@@ -7,6 +7,7 @@ import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence, Analyzer, A
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { apiEndpointUri } from '../../core/api-identity.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
+import { requireSourceCatalog } from './source-catalog-adoption.js';
 
 const ids = new GraphIdentityFactory();
 const extensions = new Set(['.js', '.jsx', '.ts', '.tsx']);
@@ -21,16 +22,24 @@ export const frontendHttpAnalyzer: Analyzer = {
     const root = await realpath(context.workspace.path);
     const files = await inventory(root, config.frontendPaths);
     const before = signature(files);
+    const decodedSources = files.map((file) => {
+      let source: string;
+      try { source = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes); }
+      catch { throw new Error(`Frontend source '${file.path}' is not valid UTF-8.`); }
+      return { file, source };
+    });
+    const sourceCatalog = requireSourceCatalog(context, decodedSources.map(({ file, source }) => ({ path: file.path, source, hash: file.hash })));
+    const catalogFiles = new Map(sourceCatalog.files.map((file) => [file.relativePath, file]));
     const nodes: GraphNode[] = [], edges: GraphEdge[] = [], evidence: AnalysisEvidence[] = [], diagnostics: AnalysisDiagnostic[] = [];
     const nodeMap = new Map<string, GraphNode>();
     const addNode = (kind: string, key: string, label: string, properties: Record<string, unknown>) => {
-      const id = ids.node(context.workspace.id, key, kind);
+      const id = kind === 'frontend_file' ? catalogFiles.get(key)?.fileId ?? ids.node(context.workspace.id, key, kind) : ids.node(context.workspace.id, key, kind);
       let node = nodeMap.get(id);
-      if (!node) { node = { id, workspaceId: context.workspace.id, kind, label, properties }; nodeMap.set(id, node); nodes.push(node); }
+      if (!node) { node = { id, workspaceId: context.workspace.id, kind: kind === 'frontend_file' ? 'file' : kind, label, properties }; nodeMap.set(id, node); nodes.push(node); }
       return node;
     };
     const addEdge = (from: GraphNode, to: GraphNode, kind: string, key: string) => {
-      const id = ids.edge(context.workspace.id, from.id, to.id, kind);
+      const id = ids.relationship(context.workspace.id, from.id, to.id, kind);
       if (!edges.some((edge) => edge.id === id)) edges.push({ id, workspaceId: context.workspace.id, sourceId: from.id, targetId: to.id, kind, properties: {} });
       return id;
     };
@@ -39,10 +48,7 @@ export const frontendHttpAnalyzer: Analyzer = {
       evidence.push({ id, subjectKind, subjectId, level, type, uri: file, line, ...(provenance ? { provenance } : {}) });
     };
     let requests = 0;
-    for (const file of files) {
-      let source: string;
-      try { source = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes); }
-      catch { throw new Error(`Frontend source '${file.path}' is not valid UTF-8.`); }
+    for (const { file, source } of decodedSources) {
       const scriptKind = file.path.endsWith('.tsx') ? ts.ScriptKind.TSX : file.path.endsWith('.jsx') ? ts.ScriptKind.JSX : file.path.endsWith('.js') ? ts.ScriptKind.JS : ts.ScriptKind.TS;
       const ast = ts.createSourceFile(file.path, source, ts.ScriptTarget.Latest, true, scriptKind);
       if (ast.parseDiagnostics.length) {
@@ -88,7 +94,7 @@ export const frontendHttpAnalyzer: Analyzer = {
     if (signature(after) !== before) throw new Error('Frontend source inventory or content changed during analysis.');
     const sourceRevision = `frontend-http-v1:${createHash('sha256').update(JSON.stringify(config)).update(before).digest('hex')}`;
     if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new Error('Computed frontend HTTP source revision does not match the requested revision.');
-    return { sourceRevision, nodes, edges, evidence, diagnostics };
+    return { sourceRevision, inputGenerations: [sourceCatalog.input], nodes, edges, evidence, diagnostics };
 
     function diag(code: string, message: string, uri: string, line: number) {
       if (diagnostics.length >= MAX_DIAGNOSTICS) throw new Error(`Frontend HTTP diagnostics exceed ${MAX_DIAGNOSTICS}.`);

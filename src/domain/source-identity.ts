@@ -4,7 +4,7 @@ export type SourceCatalogFile = {
   fileId: string;
   repositoryKey: string;
   relativePath: string;
-  contentDigest: { algorithm: 'sha256'; encoding: 'utf8-text'; value: string; providerVersion: string };
+  contentDigest: { algorithm: 'sha256'; encoding: 'provider-defined'; value: string; providerVersion: string };
 };
 
 export type SourceCatalogSymbol = {
@@ -20,6 +20,13 @@ export type SourceCatalogSymbol = {
 };
 
 export type SourceCatalogSnapshot = {
+  identityVersion: 2;
+  provider: 'codegraph';
+  providerVersion: '1.6.2';
+  /** Raw values exposed by the pinned provider; consumers must not normalize or infer semantics. */
+  coordinateConvention: 'provider-raw';
+  /** A source identity is adopted only when its complete raw range matches an independently parsed declaration. */
+  declarationAnchorConvention: 'exact-tuple-runtime-validation-only';
   workspaceId: string;
   input: AnalysisInputGeneration & { analyzerId: 'builtin.codegraph' };
   repositoryKey: string;

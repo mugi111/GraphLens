@@ -16,7 +16,7 @@ export const sqlAlchemyAnalyzer: Analyzer = {
       const files = collectSqlAlchemyFiles(snapshot);
       const diagnostics = [...snapshot.diagnostics];
       const collected = collectModels(files, diagnostics);
-      return projectModels(context, config.databaseNamespace, snapshot.sourceRevision, files, collected.models, diagnostics, collected.ambiguousClasses);
+      return projectModels(context, config.databaseNamespace, snapshot.sourceRevision, snapshot.sourceCatalog.input, files, collected.models, diagnostics, collected.ambiguousClasses);
     } catch (error) {
       if (error instanceof AnalysisError) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -192,7 +192,7 @@ function inheritedAssignments(model: SqlAlchemyModelFact, owningFile: SqlAlchemy
   return result;
 }
 
-function projectModels(context: AnalysisContext, databaseNamespace: string, sourceRevision: string, files: SqlAlchemyCollectedFile[], models: SqlAlchemyModelFact[], diagnostics: AnalysisDiagnostic[], ambiguousClasses: Array<Array<{ file: SqlAlchemyCollectedFile; node: GraphNode; path: string; module: string; qualifiedName: string; label: string }>>): AnalysisResult {
+function projectModels(context: AnalysisContext, databaseNamespace: string, sourceRevision: string, codeGraphInput: { analyzerId: 'builtin.codegraph'; generationId: number }, files: SqlAlchemyCollectedFile[], models: SqlAlchemyModelFact[], diagnostics: AnalysisDiagnostic[], ambiguousClasses: Array<Array<{ file: SqlAlchemyCollectedFile; node: GraphNode; path: string; module: string; qualifiedName: string; label: string }>>): AnalysisResult {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const evidence: AnalysisEvidence[] = [];
@@ -212,7 +212,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     return nodes.at(-1)!;
   };
   const addEdge = (from: GraphNode, to: GraphNode, kind: string, source?: AnalysisEvidence, key = kind, level: 'DIRECT' | 'DERIVED' = 'DERIVED', properties: Record<string, unknown> = {}) => {
-    const id = identity.edge(context.workspace.id, from.id, to.id, kind);
+    const id = identity.relationship(context.workspace.id, from.id, to.id, kind);
     if (edgesById.has(id)) return;
     edgesById.add(id);
     edges.push({ id, workspaceId: context.workspace.id, sourceId: from.id, targetId: to.id, kind, properties });
@@ -223,7 +223,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
     for (const item of group) {
       const sourceClass = item.node;
       candidateIds.push(sourceClass.id);
-      if (!nodesById.has(sourceClass.id)) { nodesById.set(sourceClass.id, sourceClass); nodes.push(sourceClass); }
+      if (!nodesById.has(sourceClass.id)) { const sourceNode={...sourceClass,kind:String(sourceClass.properties.codegraphKind??sourceClass.kind)};nodesById.set(sourceClass.id, sourceNode); nodes.push(sourceNode); }
       const source = item.file.evidenceBySubject.get(sourceClass.id);
       if (source) evidence.push(projectEvidence('node', sourceClass.id, source, 'sqlalchemy.class-candidate', `candidate/${item.path}/${item.qualifiedName}`));
     }
@@ -232,11 +232,11 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
   for (const model of models) {
     const sourceClass = files.flatMap((file) => file.classes).find((node) => node.id === model.classId);
     if (!sourceClass) continue;
-    if (!nodesById.has(sourceClass.id)) { nodesById.set(sourceClass.id, sourceClass); nodes.push(sourceClass); }
+    if (!nodesById.has(sourceClass.id)) { const sourceNode={...sourceClass,kind:String(sourceClass.properties.codegraphKind??sourceClass.kind)};nodesById.set(sourceClass.id, sourceNode); nodes.push(sourceNode); }
     if (model.sourceEvidence) evidence.push({ ...model.sourceEvidence, id: identity.node(sourceClass.id, 'evidence:node', 'sqlalchemy.source-class'), subjectId: sourceClass.id, type: 'sqlalchemy.source-class' });
     const modelNode = addNode(model.path, 'sqlalchemy_model', model.label, `model/${model.module}.${model.qualifiedName}`, { module: model.module, qualifiedName: model.qualifiedName, databaseNamespace, tableName: model.tableName, schema: model.schema ?? null, tableResolved: model.tableResolved ?? !!model.tableName }, model.sourceEvidence, 'sqlalchemy.mapping', 'DERIVED');
     projectedModels.set(`${model.module}.${model.qualifiedName}`, modelNode);
-    addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
+    if (sourceClass.properties.sourceMapping !== 'unverified') addEdge(sourceClass, modelNode, 'maps_to', model.sourceEvidence, `model/${model.qualifiedName}`, 'DERIVED');
     if (!model.tableName || model.tableResolved === false) continue;
     const tableKey = `table/${model.schema ? `${model.schema}.` : ''}${model.tableName}`;
     const table = addNode(databaseNamespace, 'sqlalchemy_table', `${model.schema ? `${model.schema}.` : ''}${model.tableName}`, tableKey, { databaseNamespace, schema: model.schema ?? null, tableName: model.tableName }, model.tableEvidence ?? model.sourceEvidence, 'sqlalchemy.table');
@@ -312,7 +312,7 @@ function projectModels(context: AnalysisContext, databaseNamespace: string, sour
   if (evidence.length > 10_000) throw new Error('SQLAlchemy evidence exceeds the result limit (10000).');
   if (diagnostics.length > 10_000) throw new Error('SQLAlchemy diagnostics exceed the result limit (10000).');
   const uniqueDiagnostics = [...new Map(diagnostics.map((item) => [`${item.code ?? ''}\u0000${item.uri ?? ''}\u0000${item.line ?? ''}\u0000${item.message}`, item])).values()];
-  return { sourceRevision, nodes, edges, evidence, diagnostics: uniqueDiagnostics };
+  return { sourceRevision, inputGenerations: [codeGraphInput], nodes, edges, evidence, diagnostics: uniqueDiagnostics };
 }
 
 function classBases(node: GraphNode): string[] { return Array.isArray(node.properties.bases) ? node.properties.bases.map(expressionName).filter((name): name is string => !!name) : []; }
