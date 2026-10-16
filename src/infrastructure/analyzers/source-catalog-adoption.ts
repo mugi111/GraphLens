@@ -18,10 +18,22 @@ export function requireSourceCatalog(context: AnalysisContext, files: Array<{ pa
     const providerTextDigest = createHash('sha256').update(Buffer.from(file.source, 'utf8')).digest('hex');
     const rawByteDigest = createHash('sha256').update(file.bytes).digest('hex');
     const providerDigest = entry.contentDigest.value.toLowerCase();
-    if (file.hash !== rawByteDigest || entry.repositoryKey !== catalog.repositoryKey || (providerDigest !== providerTextDigest && providerDigest !== rawByteDigest)) throw new Error(`CodeGraph source catalog is stale or uses an unsupported digest for '${file.path}'.`);
+    if (file.hash !== rawByteDigest || entry.repositoryKey !== catalog.repositoryKey || entry.contentDigest.algorithm !== 'sha256' || entry.contentDigest.encoding !== 'utf8-text' || providerDigest !== providerTextDigest) throw new Error(`CodeGraph source catalog is stale or does not use the required UTF-8 text digest for '${file.path}'.`);
     if (!/^[a-f0-9]{64}$/.test(file.hash)) throw new Error(`Raw-byte digest is invalid for '${file.path}'.`);
   }
   return catalog;
+}
+
+/** Binds semantic output revisions to effective options, raw/text digests, and one exact CodeGraph generation. */
+export function semanticSourceRevision(analyzerId: string, contractVersion: string, config: unknown, files: Array<{ path: string; source: string; bytes: Buffer; hash: string }>, catalog: SourceCatalogSnapshot, scanRevision?: string): string {
+  const catalogFiles = new Map(catalog.files.map((file) => [file.relativePath, file]));
+  const inputs = [...files].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map((file) => {
+    const entry = catalogFiles.get(file.path);
+    if (!entry) throw new Error(`CodeGraph source catalog is missing scanned file '${file.path}'.`);
+    return { path: file.path, rawByteSha256: file.hash, utf8TextSha256: createHash('sha256').update(Buffer.from(file.source, 'utf8')).digest('hex'), providerTextSha256: entry.contentDigest.value.toLowerCase() };
+  });
+  const identity = { analyzerId, contractVersion, config: canonical(config), scanRevision: scanRevision ?? null, codeGraph: { generationId: catalog.input.generationId, sourceRevision: catalog.input.sourceRevision ?? null }, files: inputs };
+  return `${analyzerId}-v2:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
 }
 /** Remaps only exact declaration anchors; ambiguous or absent declarations remain semantic-only facts. */
 export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceCatalogSnapshot, nodes: GraphNode[], edges: GraphEdge[], evidence: AnalysisEvidence[], diagnostics: AnalysisDiagnostic[]) {
@@ -30,6 +42,7 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
   const fileByPath = new Map(catalog.files.map((file) => [file.relativePath, file]));
   for (const node of nodes) {
     if (node.kind !== 'python_class' && node.kind !== 'python_function' && node.kind !== 'python_async_function') continue;
+    node.properties.sourceMapping = 'unverified';
     const source = evidenceByNode.get(node.id);
     const path = node.properties.path;
     if (!source || typeof path !== 'string' || !fileByPath.has(path)) continue;
@@ -44,6 +57,7 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
     }
     replacements.set(node.id, matches[0]!.nodeId);
     node.properties.codegraphKind = matches[0]!.kind;
+    node.properties.sourceMapping = 'mapped';
   }
   for (const node of nodes) if (replacements.has(node.id)) node.id = replacements.get(node.id)!;
   const edgeIds = new Map<string, string>();
@@ -59,4 +73,10 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
     if (oldSubject !== item.subjectId) item.id = ids.node(item.subjectId, `evidence:${item.subjectKind}`, item.type);
   }
   return replacements;
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => [key, canonical(item)]));
+  return value;
 }

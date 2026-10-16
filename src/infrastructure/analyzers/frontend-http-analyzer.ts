@@ -7,7 +7,7 @@ import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence, Analyzer, A
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { apiEndpointUri } from '../../core/api-identity.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
-import { requireSourceCatalog } from './source-catalog-adoption.js';
+import { requireSourceCatalog, semanticSourceRevision } from './source-catalog-adoption.js';
 
 const ids = new GraphIdentityFactory();
 const extensions = new Set(['.js', '.jsx', '.ts', '.tsx']);
@@ -92,9 +92,9 @@ export const frontendHttpAnalyzer: Analyzer = {
     }
     const after = await inventory(root, config.frontendPaths);
     if (signature(after) !== before) throw new Error('Frontend source inventory or content changed during analysis.');
-    const sourceRevision = `frontend-http-v1:${createHash('sha256').update(JSON.stringify(config)).update(before).digest('hex')}`;
+    const sourceRevision = semanticSourceRevision('builtin.frontend-http', 'frontend-http-codegraph-v2+typescript-scan-v1+identity-map-v1', config, decodedSources.map(({ file, source }) => ({ ...file, source })), sourceCatalog);
     if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new Error('Computed frontend HTTP source revision does not match the requested revision.');
-    return { sourceRevision, inputGenerations: [sourceCatalog.input], nodes, edges, evidence, diagnostics };
+    return { sourceRevision, inputGenerations: [{ analyzerId: 'builtin.codegraph', generationId: sourceCatalog.input.generationId }], nodes, edges, evidence, diagnostics };
 
     function diag(code: string, message: string, uri: string, line: number) {
       if (diagnostics.length >= MAX_DIAGNOSTICS) throw new Error(`Frontend HTTP diagnostics exceed ${MAX_DIAGNOSTICS}.`);

@@ -4,7 +4,7 @@ export type SourceCatalogFile = {
   fileId: string;
   repositoryKey: string;
   relativePath: string;
-  contentDigest: { algorithm: 'sha256'; encoding: 'provider-defined'; value: string; providerVersion: string };
+  contentDigest: { algorithm: 'sha256'; encoding: 'utf8-text'; value: string; providerVersion: string };
 };
 
 export type SourceCatalogSymbol = {
