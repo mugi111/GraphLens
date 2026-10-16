@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ImpactGraph } from './impact-graph.js';
 import { ImpactInspector } from './impact-inspector.js';
+import { SourceStatePanel } from './source-state.js';
 import type { ImpactEdge, ImpactNode, ImpactResult, RootPage } from './impact-types.js';
 import './impact.css';
 
@@ -151,6 +152,7 @@ export function ImpactView({ workspaces }: { workspaces: Workspace[] }) {
       <label className="impact-check"><input type="checkbox" checked={filters.includeEvidence} onChange={(event) => update({ includeEvidence: event.target.checked })}/>Include evidence</label>
       <label className="impact-check"><input type="checkbox" checked={filters.includeDiagnostics} onChange={(event) => update({ includeDiagnostics: event.target.checked })}/>Include diagnostics</label>
     </section>
+    {filters.workspaces[0] && <SourceStatePanel workspaceId={filters.workspaces[0]} mode="summary"/>}
     {workspaces.length > 0 && filters.workspaces.length < 2 && <p className="impact-message" role="status">Choose at least two workspaces to load cross-workspace targets.</p>}
     {filters.workspaces.length > 16 && <p className="impact-message" role="alert">Select no more than 16 workspaces.</p>}
     {targetLoading && <p className="impact-message" role="status" aria-live="polite">Loading target choices…</p>}
