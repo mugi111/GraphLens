@@ -4,7 +4,12 @@ import type { ImpactEdge, ImpactNode, ImpactPath } from './impact-types.js';
 import { useI18n } from './i18n.js';
 
 function cssToken(name: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const probe = document.createElement('span');
+  probe.style.color = `var(${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
 }
 
 export function ImpactGraph({ nodes, edges, paths, workspaceNames, selectedId, pathId, onSelect }: { nodes: ImpactNode[]; edges: ImpactEdge[]; paths: ImpactPath[]; workspaceNames: Map<string, string>; selectedId?: string; pathId?: string; onSelect: (item: ImpactNode | ImpactEdge) => void }) {

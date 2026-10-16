@@ -11,7 +11,12 @@ type Graph = { nodes: Node[]; edges: { id: string; sourceId: string; targetId: s
 type Workspace = { id: string; name: string; path: string };
 
 function cssToken(name: string) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const probe = document.createElement('span');
+  probe.style.color = `var(${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
 }
 
 function OverviewView({ status, refreshKey }: { status: any; refreshKey: number }) {
@@ -34,12 +39,12 @@ function OverviewView({ status, refreshKey }: { status: any; refreshKey: number 
       container: graphElement.current,
       elements: [
         ...graph.nodes.map(node => ({ data: { id: node.id, label: node.label, kind: node.kind } })),
-        ...graph.edges.map(edge => ({ data: { id: edge.id, source: edge.sourceId, target: edge.targetId, label: edge.kind } })),
+        ...graph.edges.map(edge => ({ data: { id: edge.id, source: edge.sourceId, target: edge.targetId } })),
       ],
       style: [
         { selector: 'node', style: { shape: 'round-rectangle', 'background-color': cssToken('--color-graph-node'), 'border-width': 1, 'border-color': cssToken('--color-rule'), label: 'data(label)', color: cssToken('--color-ink'), 'font-size': 12, 'text-wrap': 'wrap', 'text-max-width': 150, width: 'label', height: 38, padding: '10px', 'text-valign': 'center', 'text-halign': 'center' } },
         { selector: 'node:selected', style: { 'border-width': 3, 'border-color': cssToken('--color-accent'), 'underlay-color': cssToken('--color-accent'), 'underlay-opacity': 0.12, 'underlay-padding': 5 } },
-        { selector: 'edge', style: { width: 1.5, 'line-color': cssToken('--color-graph-edge'), 'target-arrow-color': cssToken('--color-graph-edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', label: 'data(label)', color: cssToken('--color-muted'), 'font-size': 10, 'text-background-color': cssToken('--color-paper'), 'text-background-opacity': 1, 'text-background-padding': '2px' } },
+        { selector: 'edge', style: { width: 1.5, 'line-color': cssToken('--color-graph-edge'), 'target-arrow-color': cssToken('--color-graph-edge'), 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' } },
       ],
       minZoom: 0.45,
       maxZoom: 2,
