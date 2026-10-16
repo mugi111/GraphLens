@@ -103,6 +103,7 @@ export type Analyzer = {
 /** Machine-readable failures returned by the analyzer host. */
 export type AnalysisErrorCode =
   | 'ANALYZER_NOT_FOUND'
+  | 'ANALYZER_RETIRED'
   | 'API_VERSION_UNSUPPORTED'
   | 'DUPLICATE_ANALYZER'
   | 'INVALID_DESCRIPTOR'

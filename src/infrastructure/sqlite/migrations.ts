@@ -275,3 +275,66 @@ export const analysisGenerationInputsMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Persists the identity-v2 source contract and workspace-specific analyzer reanalysis requirements. */
+export const frameworkSourceIntegrationMigration: SchemaMigration = {
+  version: 7,
+  name: 'framework-source-integration-v2',
+  up(db) {
+    db.exec(`
+      ALTER TABLE analysis_generations ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 1;
+      CREATE TABLE workspace_source_contracts (
+        workspace_id TEXT PRIMARY KEY,
+        identity_version INTEGER NOT NULL CHECK(identity_version=2),
+        provider TEXT NOT NULL CHECK(provider='codegraph'),
+        provider_version TEXT NOT NULL CHECK(provider_version='1.6.2'),
+        codegraph_generation_id INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+        FOREIGN KEY(codegraph_generation_id) REFERENCES analysis_generations(id)
+      );
+      CREATE TABLE workspace_reanalysis_requirements (
+        workspace_id TEXT NOT NULL,
+        analyzer_id TEXT NOT NULL,
+        required_codegraph_generation_id INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(workspace_id, analyzer_id),
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
+        FOREIGN KEY(required_codegraph_generation_id) REFERENCES analysis_generations(id)
+      );
+      CREATE TRIGGER identity_v2_legacy_activation_insert
+      BEFORE INSERT ON active_analysis_generations
+      WHEN NEW.analyzer_id IN ('builtin.python-source','builtin.sqlalchemy','builtin.fastapi','builtin.frontend-http','builtin.architecture')
+       AND EXISTS (SELECT 1 FROM workspace_source_contracts c WHERE c.workspace_id=NEW.workspace_id AND c.identity_version=2)
+      BEGIN SELECT RAISE(ABORT, 'legacy analyzer activation fenced by identity-v2 source contract'); END;
+      CREATE TRIGGER identity_v2_legacy_activation_update
+      BEFORE UPDATE OF generation_id ON active_analysis_generations
+      WHEN NEW.analyzer_id IN ('builtin.python-source','builtin.sqlalchemy','builtin.fastapi','builtin.frontend-http','builtin.architecture')
+       AND EXISTS (SELECT 1 FROM workspace_source_contracts c WHERE c.workspace_id=NEW.workspace_id AND c.identity_version=2)
+      BEGIN SELECT RAISE(ABORT, 'legacy analyzer activation fenced by identity-v2 source contract'); END;
+      CREATE TRIGGER identity_v2_codegraph_version_insert
+      BEFORE INSERT ON active_analysis_generations
+      WHEN NEW.analyzer_id='builtin.codegraph' AND EXISTS (
+        SELECT 1 FROM analysis_generations g JOIN analysis_runs r ON r.id=g.run_id
+        WHERE g.id=NEW.generation_id AND r.analyzer_version<>'1.6.2+identity-v2'
+      )
+      BEGIN SELECT RAISE(ABORT, 'legacy CodeGraph generation cannot be activated'); END;
+      CREATE TRIGGER identity_v2_codegraph_version_update
+      BEFORE UPDATE OF generation_id ON active_analysis_generations
+      WHEN NEW.analyzer_id='builtin.codegraph' AND EXISTS (
+        SELECT 1 FROM analysis_generations g JOIN analysis_runs r ON r.id=g.run_id
+        WHERE g.id=NEW.generation_id AND r.analyzer_version<>'1.6.2+identity-v2'
+      )
+      BEGIN SELECT RAISE(ABORT, 'legacy CodeGraph generation cannot be activated'); END;
+      CREATE TRIGGER identity_v2_codegraph_contract_insert
+      BEFORE INSERT ON active_analysis_generations
+      WHEN NEW.analyzer_id='builtin.codegraph' AND EXISTS (SELECT 1 FROM analysis_generations g WHERE g.id=NEW.generation_id AND g.identity_version<>2)
+      BEGIN SELECT RAISE(ABORT, 'CodeGraph generation is missing identity-v2 contract'); END;
+      CREATE TRIGGER identity_v2_codegraph_contract_update
+      BEFORE UPDATE OF generation_id ON active_analysis_generations
+      WHEN NEW.analyzer_id='builtin.codegraph' AND EXISTS (SELECT 1 FROM analysis_generations g WHERE g.id=NEW.generation_id AND g.identity_version<>2)
+      BEGIN SELECT RAISE(ABORT, 'CodeGraph generation is missing identity-v2 contract'); END;
+    `);
+  },
+};
