@@ -10,7 +10,7 @@ import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 import { normalizeRelativeSourcePath } from '../../core/source-path.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 import { projectEdgeContributions, projectNodeContributions } from '../../application/unified-graph-projection.js';
-import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
+import { analysisGenerationInputsMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration, legacySchemaMigration, pluginInstallationIdentityMigration, pluginPackageOwnershipMigration, runMigrations } from './migrations.js';
 export type SyncRun = { id: string; workspaceId?: string; status: 'running' | 'succeeded' | 'failed'; message: string; startedAt: string; completedAt?: string };
 export type AnalysisRun = { id: string; workspaceId: string; analyzerId: string; analyzerVersion: string; apiVersion: string; status: 'running' | 'succeeded' | 'failed'; sourceRevision?: string; config: Record<string, unknown>; startedAt: string; completedAt?: string; errorCode?: string; errorMessage?: string; diagnosticCount: number };
 export type StoredAnalysisDiagnostic = AnalysisDiagnostic & { sequence: number; generationId?: number };
@@ -38,7 +38,7 @@ export class GraphStore implements ArchitectureInputProvider {
       this.db = new Database(file);
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('journal_mode = WAL');
-      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration]);
+      runMigrations(this.db, [legacySchemaMigration, analyzerOwnedGenerationsMigration, analyzerRunLifecycleMigration, pluginPackageOwnershipMigration, pluginInstallationIdentityMigration, analysisGenerationInputsMigration, frameworkSourceIntegrationMigration, identityV2ActivationFenceMigration]);
       if (options.recoverInterruptedRuns !== false) this.interruptResidualAnalysisRuns();
     }
     this.db.function('valid_contract_namespace', (value: unknown) => typeof value === 'string' && value.length > 0 && value.length <= 256 && value !== 'default' && !value.includes('\0') ? 1 : 0);
@@ -48,7 +48,7 @@ export class GraphStore implements ArchitectureInputProvider {
   private assertReadOnlySchema(): void {
     const versions = this.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>;
     const applied = new Set(versions.map(({ version }) => version));
-    if (versions.some(({ version }) => version > 7) || [1, 2, 3, 4, 5, 6, 7].some((version) => !applied.has(version))) {
+    if (versions.some(({ version }) => version > 8) || [1, 2, 3, 4, 5, 6, 7, 8].some((version) => !applied.has(version))) {
       throw new Error('Database schema is not initialized or is incompatible with this GraphLens version.');
     }
     const required: Record<string, string[]> = {
@@ -346,7 +346,7 @@ export class GraphStore implements ArchitectureInputProvider {
       const active = this.db.prepare(`SELECT w.id workspace_id,w.name,g.id generation_id,g.run_id,r.analyzer_id,r.analyzer_version,r.source_revision,r.completed_at FROM active_analysis_generations a JOIN workspaces w ON w.id=a.workspace_id JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.architecture'`).get(input.workspace) as any;
       if (!active) return undefined;
       const generationId = Number(active.generation_id);
-      const kinds: Record<typeof input.root, string[]> = { endpoint: ['api_endpoint'], handler: ['python_function','python_async_function'], model: ['sqlalchemy_model'], table: ['sqlalchemy_table'], finding: ['architecture_contract_gap','architecture_contract_ambiguous','architecture_contract_unresolved','architecture_contract_mismatch'] };
+      const kinds: Record<typeof input.root, string[]> = { endpoint: ['api_endpoint'], handler: ['python_function','python_async_function','code.function'], model: ['sqlalchemy_model'], table: ['sqlalchemy_table'], finding: ['architecture_contract_gap','architecture_contract_ambiguous','architecture_contract_unresolved','architecture_contract_mismatch'] };
       const nodeProjection=projectedNodesSql('WHERE a.workspace_id=?',false);const edgeProjection=projectedEdgesSql('WHERE a.workspace_id=?',false);
       const where=['p.id IN (SELECT id FROM node_contributions WHERE generation_id=?)'];const filterArgs:unknown[]=[generationId];
       if(input.node!==undefined){where.push('p.id=?');filterArgs.push(input.node);}else{where.push(`p.kind IN (${kinds[input.root].map(()=>'?').join(',')})`);filterArgs.push(...kinds[input.root]);if(input.root==='handler')where.push("EXISTS(SELECT 1 FROM e h WHERE h.kind='handled_by' AND h.target_id=p.id)");}
@@ -622,21 +622,22 @@ export class GraphStore implements ArchitectureInputProvider {
       if (!this.getWorkspace(workspace)) throw new Error(`Workspace '${workspace}' was not found.`);
       if (!requested.length) return { workspaceId: workspace, generations: [], missingAnalyzerIds: [] } satisfies ArchitectureInputSnapshot;
       const placeholders = requested.map(() => '?').join(',');
-      const active = this.db.prepare(`SELECT a.analyzer_id,g.id AS generation_id,r.source_revision
+      const active = this.db.prepare(`SELECT a.analyzer_id,g.id AS generation_id,g.identity_version,r.source_revision
         FROM active_analysis_generations a
         JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id
         JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded'
         WHERE a.workspace_id=? AND a.analyzer_id IN (${placeholders})
-        ORDER BY a.analyzer_id`).all(workspace, ...requested) as Array<{ analyzer_id: string; generation_id: number; source_revision: string | null }>;
+        ORDER BY a.analyzer_id`).all(workspace, ...requested) as Array<{ analyzer_id: string; generation_id: number; identity_version: number; source_revision: string | null }>;
       const byAnalyzer = new Map(active.map((item) => [item.analyzer_id, item]));
       const missing = requested.filter((id) => !byAnalyzer.has(id));
       const generations = active.map((item) => {
         const generationId = Number(item.generation_id);
+        const inputGenerations = this.db.prepare('SELECT input_analyzer_id AS analyzerId,input_generation_id AS generationId FROM analysis_generation_inputs WHERE generation_id=? ORDER BY input_analyzer_id').all(generationId) as Array<{ analyzerId: string; generationId: number }>;
         const nodes = (this.db.prepare('SELECT id,workspace_id,kind,label,properties_json FROM node_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, kind: row.kind, label: row.label, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphNode));
         const edges = (this.db.prepare('SELECT id,workspace_id,source_id,target_id,kind,properties_json FROM edge_contributions WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ id: row.id, workspaceId: row.workspace_id, sourceId: row.source_id, targetId: row.target_id, kind: row.kind, properties: JSON.parse(row.properties_json), analyzerId: item.analyzer_id, generationId } satisfies GraphEdge));
         const evidence = (this.db.prepare('SELECT id,subject_kind,subject_id,level,payload_json FROM evidence WHERE generation_id=? ORDER BY id').all(generationId) as any[]).map((row) => ({ ...JSON.parse(row.payload_json), id: row.id, subjectKind: row.subject_kind, subjectId: row.subject_id, level: row.level, analyzerId: item.analyzer_id, generationId } as AnalysisEvidence));
         const diagnostics = (this.db.prepare('SELECT sequence,code,severity,message,uri,line,detail_json FROM diagnostics WHERE generation_id=? ORDER BY sequence').all(generationId) as any[]).map((row) => ({ sequence: row.sequence, generationId, code: row.code, severity: row.severity, message: row.message, uri: row.uri ?? undefined, line: row.line ?? undefined, detail: row.detail_json ? JSON.parse(row.detail_json) : undefined } as StoredAnalysisDiagnostic));
-        return { analyzerId: item.analyzer_id, generationId, sourceRevision: item.source_revision ?? undefined, nodes, edges, evidence, diagnostics };
+        return { analyzerId: item.analyzer_id, generationId, identityVersion: Number(item.identity_version), inputGenerations: inputGenerations.map(({ analyzerId, generationId: inputGenerationId }) => ({ analyzerId, generationId: Number(inputGenerationId) })), sourceRevision: item.source_revision ?? undefined, nodes, edges, evidence, diagnostics };
       });
       return deepFreeze({ workspaceId: workspace, generations, missingAnalyzerIds: missing });
     }).deferred;
@@ -668,7 +669,7 @@ export class GraphStore implements ArchitectureInputProvider {
         const relativePath = normalizeRelativeSourcePath(String(properties.path ?? row.label));
         const contentHash = properties.contentHash;
         if (row.id !== identity.file(workspace, 'root', relativePath) || typeof contentHash !== 'string' || !/^[a-f0-9]{64}$/i.test(contentHash)) throw new Error('CodeGraph source catalog contains an unsupported file identity or digest.');
-        return { fileId: row.id, repositoryKey: 'root', relativePath, contentDigest: { algorithm: 'sha256' as const, encoding: 'provider-defined' as const, value: contentHash, providerVersion: active.analyzer_version } };
+        return { fileId: row.id, repositoryKey: 'root', relativePath, contentDigest: { algorithm: 'sha256' as const, encoding: 'utf8-text' as const, value: contentHash.toLowerCase(), providerVersion: active.analyzer_version } };
       });
       const symbols = symbolRows.map((row) => {
         const properties = JSON.parse(row.properties_json) as Record<string, unknown>;
@@ -817,7 +818,8 @@ export class GraphStore implements ArchitectureInputProvider {
     const now = new Date().toISOString();
     this.db.prepare(`INSERT INTO workspace_source_contracts(workspace_id,identity_version,provider,provider_version,codegraph_generation_id,updated_at) VALUES(?,2,'codegraph','1.6.2',?,?) ON CONFLICT(workspace_id) DO UPDATE SET identity_version=2,provider='codegraph',provider_version='1.6.2',codegraph_generation_id=excluded.codegraph_generation_id,updated_at=excluded.updated_at`).run(workspaceId, generationId, now);
     const requirement = this.db.prepare(`INSERT INTO workspace_reanalysis_requirements(workspace_id,analyzer_id,required_codegraph_generation_id,reason,created_at) VALUES(?,?,?,'CodeGraph identity-v2 source generation changed; rebuild this semantic projection.',?) ON CONFLICT(workspace_id,analyzer_id) DO UPDATE SET required_codegraph_generation_id=excluded.required_codegraph_generation_id,reason=excluded.reason,created_at=excluded.created_at`);
-    for (const item of prior) requirement.run(workspaceId, item.analyzer_id, generationId, now);
+    for (const item of prior) if (item.analyzer_id !== 'builtin.python-source') requirement.run(workspaceId, item.analyzer_id, generationId, now);
+    this.db.prepare("DELETE FROM workspace_reanalysis_requirements WHERE workspace_id=? AND analyzer_id='builtin.python-source'").run(workspaceId);
     this.db.prepare(`UPDATE workspace_reanalysis_requirements SET required_codegraph_generation_id=?,reason='CodeGraph identity-v2 source generation changed; rebuild this semantic projection.',created_at=? WHERE workspace_id=?`).run(generationId, now, workspaceId);
     for (const item of prior) this.invalidateDependents(workspaceId, Number(item.generation_id));
     this.db.prepare(`DELETE FROM active_analysis_generations WHERE workspace_id=? AND analyzer_id IN (${retired.map(() => '?').join(',')})`).run(workspaceId, ...retired);

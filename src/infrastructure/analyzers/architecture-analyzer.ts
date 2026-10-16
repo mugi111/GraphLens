@@ -15,23 +15,37 @@ export const architectureAnalyzer: Analyzer = {
       if (error instanceof AnalysisError) throw error;
       throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', error instanceof Error ? error.message : String(error));
     }
-    if (!snapshot.generations.some(({ analyzerId }) => analyzerId === 'builtin.codegraph')) throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', 'Architecture analysis requires an active CodeGraph identity-v2 generation.');
-    if (!snapshot.generations.some(({ analyzerId }) => ['builtin.fastapi', 'builtin.openapi', 'builtin.frontend-http'].includes(analyzerId))) {
+    const codeGraph = snapshot.generations.find(({ analyzerId }) => analyzerId === 'builtin.codegraph');
+    const catalog = context.sourceCatalogReader?.snapshot();
+    const diagnostics: AnalysisDiagnostic[] = snapshot.missingAnalyzerIds.map((analyzerId) => ({ code: 'ARCHITECTURE_INPUT_MISSING', severity: 'info', message: `No active generation is available for optional input '${analyzerId}'.`, detail: { analyzerId } }));
+    const codeGraphIsCurrent = !!codeGraph && codeGraph.identityVersion === 2 && catalog?.identityVersion === 2 && catalog.input.generationId === codeGraph.generationId;
+    if ((codeGraph?.identityVersion === 2 && !codeGraphIsCurrent) || (!codeGraph && catalog?.identityVersion === 2)) {
+      throw new AnalysisError('INPUT_GENERATION_CHANGED', 'CodeGraph source catalog changed while Architecture inputs were being read. Retry the analysis.');
+    }
+    const accepted = snapshot.generations.filter((generation) => {
+      if (generation.analyzerId === 'builtin.openapi') return true;
+      if (generation.analyzerId === 'builtin.codegraph') return codeGraphIsCurrent;
+      if (['builtin.fastapi', 'builtin.sqlalchemy', 'builtin.frontend-http'].includes(generation.analyzerId)) {
+        return codeGraphIsCurrent && generation.identityVersion === 2 && generation.inputGenerations?.some((input) => input.analyzerId === 'builtin.codegraph' && input.generationId === codeGraph!.generationId) === true;
+      }
+      return false;
+    });
+    if (!codeGraphIsCurrent) diagnostics.push({ code: 'ARCHITECTURE_CODEGRAPH_SOURCE_UNAVAILABLE', severity: 'info', message: 'CodeGraph identity-v2 source data is unavailable or stale; source-dependent symbol traversal is omitted.' });
+    if (!accepted.some(({ analyzerId }) => ['builtin.fastapi', 'builtin.openapi', 'builtin.frontend-http'].includes(analyzerId))) {
       throw new AnalysisError('INPUT_GENERATION_UNAVAILABLE', 'Architecture analysis requires an active FastAPI, OpenAPI, or frontend HTTP generation.');
     }
-    const byId = new Map(snapshot.generations.map((generation) => [generation.analyzerId, generation]));
-    const diagnostics: AnalysisDiagnostic[] = snapshot.missingAnalyzerIds.map((analyzerId) => ({ code: 'ARCHITECTURE_INPUT_MISSING', severity: 'info', message: `No active generation is available for optional input '${analyzerId}'.`, detail: { analyzerId } }));
+    const byId = new Map(accepted.map((generation) => [generation.analyzerId, generation]));
     const result = resolveArchitecture({
       workspaceId: context.workspace.id,
-      codeGraph: byId.get('builtin.codegraph') as ArchitectureInputGeneration,
+      codeGraph: byId.get('builtin.codegraph'),
       fastApi: byId.get('builtin.fastapi') as ArchitectureInputGeneration | undefined,
       openApi: byId.get('builtin.openapi') as ArchitectureInputGeneration | undefined,
       sqlAlchemy: byId.get('builtin.sqlalchemy') as ArchitectureInputGeneration | undefined,
       frontendHttp: byId.get('builtin.frontend-http') as ArchitectureInputGeneration | undefined,
     }, context.config);
-    const sourceRevision = revision(architectureConfig(context.config), snapshot.generations);
+    const sourceRevision = revision(architectureConfig(context.config), accepted);
     if (context.sourceRevision !== undefined && context.sourceRevision !== sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed architecture source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed architecture source revision does not match the requested revision.' }]);
-    return { ...result, inputGenerations: snapshot.generations.map(({ analyzerId, generationId }) => ({ analyzerId, generationId })), diagnostics: [...diagnostics, ...result.diagnostics], sourceRevision };
+    return { ...result, inputGenerations: accepted.map(({ analyzerId, generationId }) => ({ analyzerId, generationId })), diagnostics: [...diagnostics, ...result.diagnostics], sourceRevision };
   },
 };
 

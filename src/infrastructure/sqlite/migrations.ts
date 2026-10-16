@@ -338,3 +338,28 @@ export const frameworkSourceIntegrationMigration: SchemaMigration = {
     `);
   },
 };
+
+/** Allows compatible v2 consumers while retaining the database fence against legacy process activations. */
+export const identityV2ActivationFenceMigration: SchemaMigration = {
+  version: 8,
+  name: 'identity-v2-consumer-activation-fence',
+  up(db) {
+    db.exec(`
+      DROP TRIGGER identity_v2_legacy_activation_insert;
+      DROP TRIGGER identity_v2_legacy_activation_update;
+      CREATE TRIGGER identity_v2_legacy_activation_insert
+      BEFORE INSERT ON active_analysis_generations
+      WHEN NEW.analyzer_id IN ('builtin.python-source','builtin.sqlalchemy','builtin.fastapi','builtin.frontend-http','builtin.architecture')
+       AND EXISTS (SELECT 1 FROM workspace_source_contracts c WHERE c.workspace_id=NEW.workspace_id AND c.identity_version=2)
+       AND (NEW.analyzer_id='builtin.python-source' OR NOT EXISTS (SELECT 1 FROM analysis_generations g WHERE g.id=NEW.generation_id AND g.identity_version=2))
+      BEGIN SELECT RAISE(ABORT, 'legacy analyzer activation fenced by identity-v2 source contract'); END;
+      CREATE TRIGGER identity_v2_legacy_activation_update
+      BEFORE UPDATE OF generation_id ON active_analysis_generations
+      WHEN NEW.analyzer_id IN ('builtin.python-source','builtin.sqlalchemy','builtin.fastapi','builtin.frontend-http','builtin.architecture')
+       AND EXISTS (SELECT 1 FROM workspace_source_contracts c WHERE c.workspace_id=NEW.workspace_id AND c.identity_version=2)
+       AND (NEW.analyzer_id='builtin.python-source' OR NOT EXISTS (SELECT 1 FROM analysis_generations g WHERE g.id=NEW.generation_id AND g.identity_version=2))
+      BEGIN SELECT RAISE(ABORT, 'legacy analyzer activation fenced by identity-v2 source contract'); END;
+      DELETE FROM workspace_reanalysis_requirements WHERE analyzer_id='builtin.python-source';
+    `);
+  },
+};

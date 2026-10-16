@@ -34,6 +34,8 @@ export type AnalysisContext = {
 export type AnalysisInputGeneration = { analyzerId: string; generationId: number };
 export type ArchitectureInputGeneration = AnalysisInputGeneration & {
   sourceRevision?: string;
+  identityVersion?: number;
+  inputGenerations?: readonly AnalysisInputGeneration[];
   nodes: readonly GraphNode[];
   edges: readonly GraphEdge[];
   evidence: readonly AnalysisEvidence[];
