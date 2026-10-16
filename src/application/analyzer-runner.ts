@@ -37,18 +37,37 @@ export class AnalyzerRunner {
         architectureInputProvider: { snapshot: (analyzerIds) => this.store.snapshot(workspace.id, analyzerIds) },
         sourceCatalogReader: new CodeGraphSourceCatalogReader(this.store, workspace.id),
       });
+      const completedResult = withSourceMappingSummary(result);
       if (sourceRevision !== undefined && result.sourceRevision !== undefined && sourceRevision !== result.sourceRevision) throw new AnalysisError('INVALID_RESULT', 'Computed source revision does not match the requested revision.', [{ code: 'SOURCE_REVISION_MISMATCH', severity: 'error', message: 'Computed source revision does not match the requested revision.' }]);
-      const endpointIds = result.inputGenerations === undefined
+      const endpointIds = completedResult.inputGenerations === undefined
         ? this.store.activeGraphIds(workspace.id, descriptor.id)
-        : this.store.inputGraphIds(workspace.id, result.inputGenerations);
-      validateAnalysisResult(result, descriptor, workspace.id, endpointIds);
-      this.store.completeAnalysisRun(runId, descriptor, result);
+        : this.store.inputGraphIds(workspace.id, completedResult.inputGenerations);
+      validateAnalysisResult(completedResult, descriptor, workspace.id, endpointIds);
+      this.store.completeAnalysisRun(runId, descriptor, completedResult);
     } catch (error) {
       const known = error instanceof AnalysisError ? error : new AnalysisError('ANALYZER_FAILED', message(error));
       try { this.store.failAnalysisRun(runId, known.code, known.message, known.diagnostics); }
       catch { /* The original failure is durable whenever SQLite remains available. */ }
     }
   }
+}
+function withSourceMappingSummary(result: import('../domain/analyzer.js').AnalysisResult) {
+  if (result.sourceMappingSummary || !result.inputGenerations?.some((input) => input.analyzerId === 'builtin.codegraph')) return result;
+  const codeGraph = result.inputGenerations.find((input) => input.analyzerId === 'builtin.codegraph')!;
+  const seen = new Set<string>();
+  const counts = { mapped: 0, unresolved: 0, unverified: 0, ambiguous: 0, unsupported: 0 };
+  for (const node of result.nodes) {
+    const properties = node.properties as Record<string, unknown>;
+    const status = properties.sourceMapping;
+    const anchor = properties.declarationAnchor;
+    let category: keyof typeof counts | undefined;
+    if (status === 'ambiguous' || properties.ambiguous === true) category = 'ambiguous';
+    else if (status === 'unsupported' || anchor && typeof anchor === 'object' && (anchor as Record<string, unknown>).supported === false) category = 'unsupported';
+    else if (status === 'mapped' || status === 'unresolved' || status === 'unverified') category = status;
+    if (category && !seen.has(node.id)) { seen.add(node.id); counts[category]++; }
+  }
+  if (seen.size === 0) return result;
+  return { ...result, sourceMappingSummary: { contractVersion: 'source-mapping-summary-v1' as const, input: { analyzerId: 'builtin.codegraph' as const, generationId: codeGraph.generationId }, counts } };
 }
 function sqliteConstraint(error: unknown) { return error instanceof Error && /constraint/i.test(error.message); }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }

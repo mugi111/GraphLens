@@ -55,6 +55,7 @@ export class ArchitectureQueryService {
     const nextCursor = nextOffset < page.totalRootCount ? encodeCursor({ v: 1, workspace: query.workspace, analyzerId: 'builtin.architecture', generationId: snapshot.analysis.generationId, projectionSnapshotId: snapshot.projectionSnapshotId!, filters: filterHash, offset: nextOffset }) : undefined;
     const result = {
       workspace: snapshot.workspace,
+      activeSnapshotId: snapshot.projectionSnapshotId,
       analysis: { ...snapshot.analysis, inputGenerations: snapshot.inputGenerations ?? [], diagnostics: diagnosticCounts(snapshot.diagnostics) },
       query: { root: query.root, ...(query.node !== undefined ? { node: query.node } : {}), ...(query.namespace !== undefined ? { namespace: query.namespace } : {}), ...(query.method !== undefined ? { method: query.method } : {}), ...(query.path !== undefined ? { path: query.path } : {}), ...(query.finding !== undefined ? { finding: query.finding } : {}), depth: query.depth },
       page: { limit: query.limit, rootCount: roots.length, totalRootCount: page.totalRootCount, ...(nextCursor ? { nextCursor } : {}) },
