@@ -82,7 +82,7 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
     const matches = catalog.symbols.filter((symbol) => symbol.relativePath === path && compatible.has(symbol.kind) && symbol.startLine === line && symbol.startColumn === column);
     if (matches.length !== 1 || matches[0]!.name !== node.label) {
       diagnostics.push({ code: matches.length > 1 ? 'CODEGRAPH_SOURCE_ANCHOR_AMBIGUOUS' : 'CODEGRAPH_SOURCE_ANCHOR_UNVERIFIED', severity: 'warning', message: `Source declaration '${node.label}' in '${path}' has no unique exact CodeGraph declaration anchor.`, uri: path, line: source.line });
-      node.properties.sourceMapping = 'unverified';
+      node.properties.sourceMapping = matches.length > 1 ? 'ambiguous' : 'unverified';
       continue;
     }
     replacements.set(node.id, matches[0]!.nodeId);

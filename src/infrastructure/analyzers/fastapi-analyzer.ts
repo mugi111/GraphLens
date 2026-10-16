@@ -373,8 +373,9 @@ function addRouteFacts(context: AnalysisContext, namespace: string, route: Route
     if (resolveSecurityScheme(targetExpr, keywordArgs(argsOf(dep)).get('scopes'), files, fact.file, fact.scope, fact.offset, endpoint, routeKey, fact.source ?? source, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
     const targetName = directReferenceName(targetExpr);
     const symbol = targetName ? resolveFastApiSymbol(files, fact.file, targetName, fact.scope, fact.offset) : undefined;
-    const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source) : undefined;
-    if (!fn) { if (targetName) sourceMappingUsage.record(`dependency:${fact.file.path}:${fact.scope}:${symbol ?? targetName}`, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
+    const bindingId = `dependency-use:${fact.file.path}:${fact.scope}:${fact.offset}:${fact.ordinal ?? ''}:${depIndex}:${symbol ?? targetName ?? '<dynamic>'}`;
+    const fn = symbol ? uniqueFunction(files, symbol, addDiagnostic, fact.source ?? source, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
+    if (!fn) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', 'Could not resolve router-level dependency.', source); continue; }
     sourceMappingUsage.record(`declaration:${fn.id}`, sourceMappingCategory(fn) ?? 'unverified');
     if (fn.properties.sourceMapping !== 'mapped') { addDiagnostic('FASTAPI_UNVERIFIED_DEPENDENCY_ANCHOR', `Router dependency '${symbol}' has no verified CodeGraph source anchor; its source relationship was omitted.`, fact.source ?? source); continue; }
     countDependency(symbol!, dependencyBudget, config, source);
@@ -477,9 +478,10 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       if (resolveSecurityScheme(target, keywordArgs(argsOf(dependency)).get('scopes'), files, currentFile, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, current, key, currentEvidence, addNode, addEdge, addDiagnostic, canonical === 'fastapi.Security')) continue;
       const targetName = directReferenceName(target);
       const symbol = targetName ? resolveFastApiSymbol(files, currentFile, targetName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0) : undefined;
-      const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence) : undefined;
+      const bindingId = `dependency-use:${currentFile.path}:${currentKey}:${parameter.name}:${dependencyIndex}:${symbol ?? targetName ?? '<dynamic>'}`;
+      const next = symbol ? uniqueFunction(files, symbol, addDiagnostic, currentEvidence, () => sourceMappingUsage.record(bindingId, 'ambiguous')) : undefined;
       const nextFile = next ? files.find((item) => item.functions.includes(next)) : undefined;
-      if (!next || !nextFile) { if (targetName) sourceMappingUsage.record(`dependency:${currentFile.path}:${currentKey}:${symbol ?? targetName}`, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
+      if (!next || !nextFile) { sourceMappingUsage.record(bindingId, 'unresolved'); addDiagnostic('FASTAPI_UNRESOLVED_DEPENDENCY', `Could not resolve dependency '${targetName ?? '<dynamic>'}'.`, currentEvidence); continue; }
       sourceMappingUsage.record(`declaration:${next.id}`, sourceMappingCategory(next) ?? 'unverified');
       if (next.properties.sourceMapping !== 'mapped') { addDiagnostic('FASTAPI_UNVERIFIED_DEPENDENCY_ANCHOR', `Dependency '${targetName ?? next.label}' has no verified CodeGraph source anchor; its source relationship was omitted.`, currentEvidence); continue; }
       countDependency(symbol!, budget, config, currentEvidence);
@@ -495,9 +497,9 @@ function countDependency(symbol: string, budget: DependencyBudget, config: FastA
   budget.resolved.add(symbol);
   if (budget.resolved.size > config.maxResolvedFunctionsPerRoute) throw fatalLimit('FASTAPI_DEPENDENCY_FUNCTION_LIMIT', `Dependency traversal exceeded maxResolvedFunctionsPerRoute (${config.maxResolvedFunctionsPerRoute}).`, source);
 }
-function uniqueFunction(files: FastApiFile[], symbol: string, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, source?: AnalysisEvidence) {
+function uniqueFunction(files: FastApiFile[], symbol: string, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void, source?: AnalysisEvidence, onAmbiguous?: () => void) {
   const candidates = files.flatMap((item) => item.functions.filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol).map((node) => ({ file: item, node })));
-  if (candidates.length > 1) { addDiagnostic('FASTAPI_AMBIGUOUS_DEPENDENCY', `Function '${symbol}' has multiple source declarations.`, source); return undefined; }
+  if (candidates.length > 1) { onAmbiguous?.(); addDiagnostic('FASTAPI_AMBIGUOUS_DEPENDENCY', `Function '${symbol}' has multiple source declarations.`, source); return undefined; }
   return candidates[0]?.node;
 }
 
