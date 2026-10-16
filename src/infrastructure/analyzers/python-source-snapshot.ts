@@ -5,6 +5,8 @@ import { parsePythonSourceFile, type ParsedPythonFile } from './python-source-pa
 import { readStablePythonSources, pythonSourceConfig } from './python-source-scanner.js';
 import { resolvePythonImports } from './python-source-resolver.js';
 import { PYTHON_SOURCE_LIMITS, type PythonSourceFile } from './python-source-types.js';
+import { adoptDeclarationIdentities, requireSourceCatalog } from './source-catalog-adoption.js';
+import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 
 export type PythonSourceSnapshot = {
   sourceRevision: string;
@@ -14,6 +16,7 @@ export type PythonSourceSnapshot = {
   edges: GraphEdge[];
   evidence: AnalysisEvidence[];
   diagnostics: AnalysisDiagnostic[];
+  sourceCatalog: SourceCatalogSnapshot;
 };
 
 /** Read and parse one bounded Python snapshot for static analyzers. This does not run a generation. */
@@ -53,7 +56,13 @@ export async function collectPythonSourceSnapshot(context: AnalysisContext): Pro
   evidence.push(...resolution.evidence);
   assertCapacity(nodes.length, edges.length, diagnostics.length);
   if (evidence.length > 10_000) throw new Error('Python source evidence exceeds the result limit (10000).');
-  return { sourceRevision, files, parsedFiles, nodes, edges, evidence, diagnostics };
+  const sourceCatalog = requireSourceCatalog(context, files);
+  const replacements = adoptDeclarationIdentities(context.workspace.id, sourceCatalog, nodes, edges, evidence, diagnostics);
+  for (const imported of imports) imported.ownerId = replacements.get(imported.ownerId) ?? imported.ownerId;
+  for (const item of parsedFiles) {
+    for (const imported of item.parsed.imports) imported.ownerId = replacements.get(imported.ownerId) ?? imported.ownerId;
+  }
+  return { sourceRevision, files, parsedFiles, nodes, edges, evidence, diagnostics, sourceCatalog };
 }
 
 function assertCapacity(nodes: number, edges: number, diagnostics: number) {

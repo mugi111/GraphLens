@@ -76,7 +76,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     if (!nodesById.has(source.id)) {
       const safeProperties: Record<string, unknown> = {};
       for (const key of ['module', 'qualifiedName', 'async', 'declarationOrdinal']) if (source.properties[key] !== undefined) safeProperties[key] = source.properties[key];
-      const safeNode: GraphNode = { id: source.id, workspaceId: source.workspaceId, kind: source.kind, label: source.label, properties: safeProperties };
+      const safeNode: GraphNode = { id: source.id, workspaceId: source.workspaceId, kind: String(source.properties.codegraphKind ?? source.kind), label: source.label, properties: safeProperties };
       nodesById.set(safeNode.id, safeNode); nodes.push(safeNode);
     }
     const sourceEvidence = file.evidenceBySubject.get(source.id);
@@ -84,7 +84,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
     return source;
   };
   const addEdge = (source: GraphNode, target: GraphNode, kind: string, key: string, sourceEvidence?: AnalysisEvidence, properties: Record<string, unknown> = {}, level: 'DIRECT' | 'DERIVED' = 'DIRECT') => {
-    const id = identity.edge(context.workspace.id, source.id, target.id, kind);
+    const id = identity.relationship(context.workspace.id, source.id, target.id, kind);
     if (edgesById.has(id)) return;
     if (nodes.length + edges.length >= PYTHON_SOURCE_LIMITS.maxContributions) throw new Error('FastAPI graph exceeds the combined result limit (9000).');
     edgesById.add(id); edges.push({ id, workspaceId: context.workspace.id, sourceId: source.id, targetId: target.id, kind, properties });
@@ -178,7 +178,7 @@ async function analyzeFastApi(context: AnalysisContext): Promise<AnalysisResult>
   if (nodes.length + edges.length > 9000) throw new Error('FastAPI graph exceeds the combined result limit (9000).');
   if (evidence.length > 10_000) throw new Error('FastAPI evidence exceeds the result limit (10000).');
   if (diagnostics.length > 10_000) throw new Error('FastAPI diagnostics exceed the result limit (10000).');
-  return { sourceRevision: snapshot.sourceRevision, nodes, edges, evidence, diagnostics: dedupeDiagnostics(diagnostics) };
+  return { sourceRevision: snapshot.sourceRevision, inputGenerations: [snapshot.sourceCatalog.input], nodes, edges, evidence, diagnostics: dedupeDiagnostics(diagnostics) };
 }
 
 function collectRouterObjects(context: AnalysisContext, files: FastApiFile[], addNode: (...args: any[]) => GraphNode, addDiagnostic: (code: string, message: string, source?: AnalysisEvidence) => void): RouterObject[] {
@@ -303,7 +303,7 @@ function projectRoute(context: AnalysisContext, namespace: string, route: RouteS
   const source = route.source ?? route.handlerFile.evidenceBySubject.get(route.handler.id);
   const routeNode = addNode('fastapi_route', route.handler.label, route.handlerFile.path, routeKey, { namespace, path, pathShape: apiPathShape(path), methods: route.methods, tags, ...route.operation, handlerId: handler.id }, source, 'fastapi.route');
   addEdge(parent, routeNode, 'contains', routeKey, source, { path, methods: route.methods });
-  addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
+  if (route.handler.properties.sourceMapping !== 'unverified') addEdge(routeNode, handler, 'handled_by', routeKey, source, { qualifiedName: handler.properties.qualifiedName ?? handler.label });
   const dependencyBudget: DependencyBudget = { visited: new Set(), resolved: new Set() };
   for (const method of route.methods) {
     const endpoint = addNode('api_endpoint', `${method} ${path}`, apiEndpointUri(namespace, method, path), `${namespace}/${method}/${path}`, { namespace, method, path, pathShape: apiPathShape(path), tags }, source, 'api.endpoint');
@@ -477,27 +477,6 @@ function addCallsAndReferences(owner: GraphNode, fn: GraphNode, file: FastApiFil
       countDependency(symbol!, budget, config, currentEvidence);
       addEdge(current, addSourceNode(nextFile, next), 'depends_on', `${key}:nested-dependency:${symbol}:${parameter.name}:${dependencyIndex}`, currentEvidence, { parameter: parameter.name });
       walk(nextFile, next, depth + 1);
-    }
-    const refs = Array.isArray(current.properties.references) ? current.properties.references as PythonExpressionFact[] : [];
-    for (const ref of refs) {
-      const referenceName = expressionName(ref);
-      if (!referenceName) continue;
-      const symbol = resolveFastApiSymbol(files, currentFile, referenceName, String(current.properties.qualifiedName ?? ''), currentEvidence?.startOffset ?? 0, new Set(), true);
-      const candidates = symbol ? files.flatMap((item) => [...item.functions, ...item.classes].filter((node) => `${node.properties.module}.${node.properties.qualifiedName}` === symbol)) : [];
-      const target = candidates.length === 1 ? candidates[0] : undefined;
-      if (candidates.length > 1) addDiagnostic('FASTAPI_AMBIGUOUS_REFERENCE', `Source reference '${referenceName}' has multiple declarations.`, source);
-      const targetFile = target ? files.find((item) => [...item.functions, ...item.classes].includes(target)) : undefined;
-      if (target && targetFile) addEdge(owner, addSourceNode(targetFile, target), 'references', `${key}:reference:${symbol}`, source, { name: referenceName }, 'DERIVED');
-    }
-    for (const [callIndex, call] of callsOf(current).entries()) {
-      const callOffset = offsetAt(currentFile.source, call.line, call.column);
-      const symbol = resolveFastApiSymbol(files, currentFile, call.callee, String(current.properties.qualifiedName ?? ''), callOffset, new Set(), true);
-      const target = symbol ? uniqueFunction(files, symbol, addDiagnostic, source) : undefined;
-      const targetFile = target ? files.find((item) => item.functions.includes(target)) : undefined;
-      if (!target || !targetFile) continue;
-      countDependency(symbol!, budget, config, currentEvidence);
-      addEdge(current, addSourceNode(targetFile, target), 'calls', `${key}:call:${symbol}:${callIndex}`, callEvidence(currentFile.path, call.line, call.column), { callee: symbol });
-      walk(targetFile, target, depth + 1);
     }
   };
   walk(file, fn, 1, inspectParameters);
