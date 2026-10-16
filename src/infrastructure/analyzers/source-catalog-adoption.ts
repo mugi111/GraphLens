@@ -1,9 +1,35 @@
 import { createHash } from 'node:crypto';
 import type { AnalysisContext, AnalysisDiagnostic, AnalysisEvidence } from '../../domain/analyzer.js';
+import type { SourceMappingSummary } from '../../domain/analyzer.js';
 import type { SourceCatalogSnapshot } from '../../domain/source-identity.js';
 import type { GraphEdge, GraphNode } from '../../domain/graph.js';
 import { GraphIdentityFactory } from '../../core/graph-identity.js';
 const ids = new GraphIdentityFactory();
+export type SourceMappingCategory = keyof SourceMappingSummary['counts'];
+
+/** Collects unique source bindings only where semantic output actually uses or rejects them. */
+export class SourceMappingUsage {
+  private readonly bindings = new Map<string, SourceMappingCategory>();
+  record(bindingId: string, category: SourceMappingCategory) {
+    const priority: Record<SourceMappingCategory, number> = { mapped: 0, unresolved: 1, unverified: 2, ambiguous: 3, unsupported: 4 };
+    const current = this.bindings.get(bindingId);
+    if (!current || priority[category] > priority[current]) this.bindings.set(bindingId, category);
+  }
+  summary(generationId: number): SourceMappingSummary | undefined {
+    if (!this.bindings.size) return undefined;
+    const counts = { mapped: 0, unresolved: 0, unverified: 0, ambiguous: 0, unsupported: 0 };
+    for (const category of this.bindings.values()) counts[category]++;
+    return { contractVersion: 'source-mapping-summary-v1', input: { analyzerId: 'builtin.codegraph', generationId }, counts };
+  }
+}
+
+export function sourceMappingCategory(node: GraphNode): SourceMappingCategory | undefined {
+  if (node.properties.sourceMapping === 'ambiguous' || node.properties.ambiguous === true) return 'ambiguous';
+  const anchor = node.properties.declarationAnchor;
+  if (node.properties.sourceMapping === 'unsupported' || anchor && typeof anchor === 'object' && (anchor as Record<string, unknown>).supported === false) return 'unsupported';
+  if (node.properties.sourceMapping === 'mapped' || node.properties.sourceMapping === 'unresolved' || node.properties.sourceMapping === 'unverified') return node.properties.sourceMapping;
+  return undefined;
+}
 
 /** Enforces the v2 source contract before a semantic analyzer emits cross-analyzer facts. */
 export function requireSourceCatalog(context: AnalysisContext, files: Array<{ path: string; source: string; bytes: Buffer; hash: string }>): SourceCatalogSnapshot {

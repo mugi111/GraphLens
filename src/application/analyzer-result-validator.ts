@@ -55,8 +55,8 @@ function validateSourceMappingSummary(result: AnalysisResult, errors: AnalysisDi
     return;
   }
   const values = Object.values(counts);
-  if (values.some((value) => !Number.isSafeInteger(value) || value < 0 || value > MAX_ITEMS)
-    || values.reduce((total, value) => total + value, 0) > result.nodes.length
+  if (values.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 1_000_000)
+    || values.reduce((total, value) => total + value, 0) > 1_000_000
     || !codeGraphInput || summary.input.generationId !== codeGraphInput.generationId) {
     errors.push(diagnostic('INVALID_SOURCE_MAPPING_SUMMARY', 'Source mapping counts or exact CodeGraph input are invalid.'));
     return;
