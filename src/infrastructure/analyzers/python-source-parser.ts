@@ -80,7 +80,8 @@ export function parsePythonSourceFile(workspace: Workspace, file: PythonSourceFi
       const declarationFacts = structuredFacts(node, file.source, offsets, errorRegions);
       const declared = addNode(`${file.path}#${stableName}`, kind, name, { from: node.from, to: node.to }, { module: moduleName, qualifiedName, declarationOrdinal, async, decorators, bases, classKeywords, parameters, ...(returnTypeNode ? { returnAnnotation: annotationFact(returnTypeNode, file.source) } : {}), references: declarationFacts.references, calls: declarationFacts.calls });
       const declarationPoint = point(node.from, offsets);
-      declared.properties.declarationAnchor = { line: declarationPoint.line, column: declarationPoint.column - 1 };
+      const hasUtf8Bom = file.bytes.length >= 3 && file.bytes[0] === 0xef && file.bytes[1] === 0xbb && file.bytes[2] === 0xbf;
+      declared.properties.declarationAnchor = { line: declarationPoint.line, column: declarationPoint.column - 1, supported: !(hasUtf8Bom && declarationPoint.line === 1) };
       addEdge(parent, declared, 'contains', { from: node.from, to: node.to });
       for (const child of children(node)) visit(child, qualified, declared);
       return;

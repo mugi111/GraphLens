@@ -48,7 +48,7 @@ export function adoptDeclarationIdentities(workspaceId: string, catalog: SourceC
     if (!source || typeof path !== 'string' || !fileByPath.has(path)) continue;
     const compatible = node.kind === 'python_class' ? new Set(['code.class']) : new Set(['code.function']);
     const anchor = node.properties.declarationAnchor;
-    if (!anchor || typeof anchor !== 'object' || !Number.isInteger((anchor as Record<string, unknown>).line) || !Number.isInteger((anchor as Record<string, unknown>).column)) {
+    if (!anchor || typeof anchor !== 'object' || (anchor as Record<string, unknown>).supported !== true || !Number.isInteger((anchor as Record<string, unknown>).line) || !Number.isInteger((anchor as Record<string, unknown>).column)) {
       diagnostics.push({ code: 'CODEGRAPH_SOURCE_ANCHOR_UNVERIFIED', severity: 'warning', message: `Source declaration '${node.label}' in '${path}' has no supported declaration start anchor.`, uri: path, line: source.line });
       continue;
     }
