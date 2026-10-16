@@ -7,10 +7,12 @@ export type CrossWorkspaceResolverOptions = {
   maxInputEndpoints: number;
   maxContracts: number;
   maxSyntheticEdges: number;
+  /** Optional SQL-selected contract candidates for a bounded query page. */
+  contractKeys?: readonly string[];
 };
 
-const defaults: CrossWorkspaceResolverOptions = { maxInputEndpoints: 5000, maxContracts: 2500, maxSyntheticEdges: 10000 };
-const hardLimits: CrossWorkspaceResolverOptions = { maxInputEndpoints: 20000, maxContracts: 10000, maxSyntheticEdges: 40000 };
+const defaults = { maxInputEndpoints: 5000, maxContracts: 2500, maxSyntheticEdges: 10000 };
+const hardLimits = { maxInputEndpoints: 20000, maxContracts: 10000, maxSyntheticEdges: 40000 };
 const allowedMethods = new Set(['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE', 'PATCH']);
 export const MAX_CONTRACT_NAMESPACE_LENGTH = 256;
 export const MAX_CONTRACT_PATH_LENGTH = 2048;
@@ -53,7 +55,7 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
       const role = owner.kind === 'fastapi_route' ? 'provider' : owner.kind === 'openapi_operation' ? 'specification' : undefined;
       if (role) {
         const key = contractKey(endpoint);
-        if (key) participants.push({ workspace, owner, endpoint, exposure: edge, role, key });
+        if (key && (!options.contractKeys || options.contractKeys.includes(contractKeyString(key)))) participants.push({ workspace, owner, endpoint, exposure: edge, role, key });
       }
     }
     // Frontend HTTP requests are consumers. OpenAPI operations remain specifications.
@@ -63,7 +65,7 @@ export function resolveCrossWorkspace(snapshot: CrossWorkspaceSnapshot, rawOptio
       const endpoint = nodesById.get(edge.targetId);
       if (owner?.kind !== 'frontend.http_request' || endpoint?.kind !== 'api_endpoint') continue;
       const key = contractKey(endpoint);
-      if (key) participants.push({ workspace, owner, endpoint, exposure: edge, role: 'consumer', key });
+      if (key && (!options.contractKeys || options.contractKeys.includes(contractKeyString(key)))) participants.push({ workspace, owner, endpoint, exposure: edge, role: 'consumer', key });
     }
   }
 
@@ -243,14 +245,16 @@ function sourceReferences(snapshot: CrossWorkspaceSnapshot, sources: CrossWorksp
 }
 
 function resolverOptions(input: Partial<CrossWorkspaceResolverOptions>): CrossWorkspaceResolverOptions {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !Object.hasOwn(defaults, key))) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'Cross-workspace resolver options contain unsupported fields.');
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !Object.hasOwn({ ...defaults, contractKeys: true }, key))) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'Cross-workspace resolver options contain unsupported fields.');
   const output = { ...defaults };
-  for (const key of Object.keys(input) as Array<keyof CrossWorkspaceResolverOptions>) {
+  for (const key of Object.keys(defaults) as Array<keyof typeof defaults>) {
     const value = input[key];
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > hardLimits[key]) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', `${key} must be an integer between 1 and ${hardLimits[key]}.`);
     output[key] = value;
   }
-  return output;
+  const contractKeys = input.contractKeys;
+  if (contractKeys !== undefined && (!Array.isArray(contractKeys) || contractKeys.length > hardLimits.maxContracts || contractKeys.some((key) => typeof key !== 'string' || key.length > 4096) || new Set(contractKeys).size !== contractKeys.length)) throw new CrossWorkspaceResolutionError('INVALID_OPTIONS', 'contractKeys must be a unique bounded list of contract identities.');
+  return { ...output, ...(contractKeys !== undefined ? { contractKeys } : {}) };
 }
 
 function participantSources(items: readonly Participant[], maxEvidenceSourceCost: number): CrossWorkspaceEvidence['sources'] {
