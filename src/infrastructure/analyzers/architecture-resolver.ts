@@ -417,6 +417,13 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const incoming = (id: string, kind: string) => mergeIndexedEdges(indexed!.incoming.get(id), codeGraphIncoming.get(id)).filter((edge) => edge.kind === kind && allowedEdges.has(edge.kind));
     const callsQueue: Array<{ id: string; depth: number }> = [];
     const reachedClasses = new Set<string>();
+    const symbolKinds = new Set(['python_function', 'python_async_function', 'code.function', 'python_class', 'code.class']);
+    let traversalLimitReported = false;
+    const reportTraversalLimit = () => {
+      if (traversalLimitReported || diagnostics.length >= 10000) return;
+      traversalLimitReported = true;
+      diagnostics.push({ code: 'ARCHITECTURE_TRAVERSAL_LIMIT', severity: 'info', message: 'Bounded handler traversal reached a configured limit; remaining symbols were skipped.', detail: { endpointId: endpoint.id } });
+    };
     for (const edge of outgoing(endpoint.id)) {
       addEdge(edge);
       if (edge.kind === 'depends_on' && ['python_function','code.function'].includes(byId.get(edge.targetId)?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: 0 });
@@ -446,16 +453,20 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const current = callsQueue.shift()!;
       if (visited.has(current.id)) continue;
       if (current.depth > config.maxTraversalDepth || visited.size >= config.maxVisitedSymbolsPerEndpoint || totalVisits >= config.maxTotalTraversalVisits) {
-        if (diagnostics.length < 10000) diagnostics.push({ code: 'ARCHITECTURE_TRAVERSAL_LIMIT', severity: 'info', message: 'Bounded handler traversal reached a configured limit; remaining symbols were skipped.', detail: { endpointId: endpoint.id } });
+        reportTraversalLimit();
         break;
       }
       visited.add(current.id); totalVisits++;
       const currentNode = byId.get(current.id); addNode(currentNode);
-      for (const edge of outgoing(current.id)) {
-        if (!['calls', 'references', 'depends_on'].includes(edge.kind)) continue;
+      const dependencyEdges = outgoing(current.id).filter((edge) => ['calls', 'references', 'depends_on'].includes(edge.kind));
+      if (current.depth >= config.maxTraversalDepth) {
+        if (dependencyEdges.some((edge) => symbolKinds.has(byId.get(edge.targetId)?.kind ?? ''))) reportTraversalLimit();
+        continue;
+      }
+      for (const edge of dependencyEdges) {
         addEdge(edge);
         const target = byId.get(edge.targetId);
-        if (['python_function','code.function'].includes(target?.kind ?? '') && current.depth < config.maxTraversalDepth) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
+        if (symbolKinds.has(target?.kind ?? '')) callsQueue.push({ id: edge.targetId, depth: current.depth + 1 });
         if (['python_class','code.class'].includes(target?.kind ?? '')) reachedClasses.add(target!.id);
       }
     }
