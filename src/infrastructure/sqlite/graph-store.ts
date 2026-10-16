@@ -649,6 +649,7 @@ export class GraphStore implements ArchitectureInputProvider {
       if (!this.getWorkspace(workspace)) throw new Error(`Workspace '${workspace}' was not found.`);
       const active = this.db.prepare(`SELECT g.id AS generation_id,g.identity_version,r.analyzer_version,r.source_revision FROM active_analysis_generations a JOIN analysis_generations g ON g.id=a.generation_id AND g.workspace_id=a.workspace_id AND g.analyzer_id=a.analyzer_id JOIN analysis_runs r ON r.id=g.run_id AND r.status='succeeded' WHERE a.workspace_id=? AND a.analyzer_id='builtin.codegraph'`).get(workspace) as { generation_id: number; identity_version: number; analyzer_version: string; source_revision: string | null } | undefined;
       if (!active || Number(active.identity_version) !== 2 || active.analyzer_version !== '1.6.2+identity-v2') return undefined;
+      if (!active.source_revision) throw new Error('Active CodeGraph identity-v2 generation has no source revision.');
       const generationId = Number(active.generation_id);
       const identity = new GraphIdentityFactory();
       const repository = this.db.prepare("SELECT id,properties_json FROM node_contributions WHERE generation_id=? AND workspace_id=? AND kind='repository'").get(generationId, workspace) as { id: string; properties_json: string } | undefined;
@@ -681,7 +682,7 @@ export class GraphStore implements ArchitectureInputProvider {
         if (startLine < 1 || endLine < startLine || (endLine === startLine && endColumn < startColumn)) throw new Error('CodeGraph source catalog has an invalid source range.');
         return { nodeId: row.id, upstreamId, kind: row.kind, relativePath, name: row.label, startLine, startColumn, endLine, endColumn };
       });
-      return deepFreeze({ identityVersion: 2 as const, provider: 'codegraph' as const, providerVersion: '1.6.2' as const, coordinateConvention: 'provider-raw' as const, declarationAnchorConvention: 'exact-tuple-runtime-validation-only' as const, workspaceId: workspace, input: { analyzerId: 'builtin.codegraph' as const, generationId, ...(active.source_revision ? { sourceRevision: active.source_revision } : {}) }, repositoryKey: 'root', files, symbols });
+      return deepFreeze({ identityVersion: 2 as const, provider: 'codegraph' as const, providerVersion: '1.6.2' as const, coordinateConvention: 'provider-raw' as const, declarationAnchorConvention: 'provider-raw-start-kind-name-unique' as const, workspaceId: workspace, input: { analyzerId: 'builtin.codegraph' as const, generationId }, sourceRevision: active.source_revision, repositoryKey: 'root', files, symbols });
     }).deferred;
     return read(workspaceId, maxItems);
   }
