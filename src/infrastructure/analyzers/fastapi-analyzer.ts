@@ -456,7 +456,8 @@ function addSchemaReference(name: string, file: FastApiFile, scopeNode: GraphNod
       addEdge(owner, addSourceNode(declarationFile, matches[0]!), 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: true }, 'DERIVED');
     } else {
       const unverified = matches.length === 1;
-      const category: 'ambiguous' | 'unverified' | 'unresolved' | 'unsupported' = matches.length > 1 ? 'ambiguous' : matches.length === 1 ? sourceMappingCategory(matches[0]!) ?? 'unverified' : 'unresolved';
+      const mappedCategory = matches.length === 1 ? sourceMappingCategory(matches[0]!) : undefined;
+      const category: 'ambiguous' | 'unverified' | 'unresolved' | 'unsupported' = matches.length > 1 ? 'ambiguous' : matches.length === 1 ? mappedCategory === 'mapped' ? 'unverified' : mappedCategory ?? 'unverified' : 'unresolved';
       sourceMappingUsage.record(matches.length === 1 ? `declaration:${matches[0]!.id}` : `schema:${file.path}:${scope}:${symbol ?? typeName}`, category);
       const schema = addNode('api_schema_reference', typeName, file.path, `${key}/schema/${typeName}`, { qualifiedName: symbol ?? typeName, type: name, resolved: false, ambiguous: matches.length > 1, sourceMapping: unverified ? 'unverified' : 'unresolved' }, source, 'api.schema_reference', 'DERIVED');
       addEdge(owner, schema, 'uses_schema', `${key}:schema:${typeName}`, source, { type: name, resolved: false, ambiguous: matches.length > 1, sourceMapping: unverified ? 'unverified' : 'unresolved' }, 'DERIVED');

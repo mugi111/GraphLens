@@ -395,7 +395,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       addNode(endpoints[0]); addNode(endpoints[1]);
       if (!projectedNodesById.has(edge.sourceId) || !projectedNodesById.has(edge.targetId)) return;
       if (!projectedEdgesById.has(edge.id)) {
-        const projectedEdge = { ...edge, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, level: 'DERIVED' };
+        const projectedEdge = { ...edge, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, level: 'DERIVED' as const };
         projectedEdgesById.set(edge.id, projectedEdge);
         edges.push(projectedEdge);
       }

@@ -268,14 +268,14 @@ function participantSources(items: readonly Participant[], maxEvidenceSourceCost
     ] as const;
     for (const [nodeId, subjectKind, subjectId] of subjects) {
       const evidence = item.workspace.evidence.filter((entry) => entry.subjectKind === subjectKind && entry.subjectId === subjectId);
-      const owners = evidence.length ? evidence : [{ analyzerId: item.workspace.generation.analyzerId, generationId: item.workspace.generation.generationId, id: undefined } as AnalysisEvidence];
+      const owners: Array<AnalysisEvidence | undefined> = evidence.length ? evidence : [undefined];
       for (const entry of owners) {
-        const analyzerId = entry.analyzerId ?? item.workspace.generation.analyzerId;
-        const generationId = entry.generationId ?? item.workspace.generation.generationId;
+        const analyzerId = entry?.analyzerId ?? item.workspace.generation.analyzerId;
+        const generationId = entry?.generationId ?? item.workspace.generation.generationId;
         const key = `${item.workspace.workspace.id}\0${analyzerId}\0${generationId}\0${nodeId}`;
         const current = grouped.get(key) ?? { workspaceId: item.workspace.workspace.id, analyzerId, generationId, nodeId, evidenceIds: new Set<string>() };
         if (!grouped.has(key)) sourceCost++;
-        if (entry.id && !current.evidenceIds.has(entry.id)) { current.evidenceIds.add(entry.id); sourceCost++; }
+        if (entry?.id && !current.evidenceIds.has(entry.id)) { current.evidenceIds.add(entry.id); sourceCost++; }
         if (sourceCost > maxEvidenceSourceCost) throw exceeded('synthetic evidence source', maxEvidenceSourceCost);
         grouped.set(key, current);
       }
