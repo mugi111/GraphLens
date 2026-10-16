@@ -6,7 +6,7 @@ export type Owner = { analyzerId: string; generationId: number };
 export type ProvenanceEvidence = {
   id?: string; type: string; level?: string; uri?: string; line?: number; column?: number;
   endLine?: number; endColumn?: number; startOffset?: number; endOffset?: number;
-  analyzerId?: string; generationId?: number; provenance?: Record<string, unknown>; detail?: string;
+  workspaceId?: string; analyzerId?: string; generationId?: number; provenance?: Record<string, unknown>; detail?: string;
 };
 export type ProvenanceItem = {
   workspaceId?: string; analyzerId?: string; generationId?: number; level?: string;
@@ -16,23 +16,50 @@ export type ProvenanceItem = {
   evidenceCount?: number; evidence?: ProvenanceEvidence[];
 };
 
-function sourceReference(evidence: ProvenanceEvidence, item: ProvenanceItem, owners: Owner[]): { owner: Owner; evidenceId: string } | undefined {
-  if (evidence.analyzerId && Number.isSafeInteger(evidence.generationId)) return { owner: { analyzerId: evidence.analyzerId, generationId: evidence.generationId! }, evidenceId: evidence.id ?? '' };
+type SourceReference = { workspaceId: string; analyzerId: string; generationId: number; evidenceId: string };
+type SourceReferences = { references: SourceReference[]; incomplete: boolean };
+function sourceReferences(evidence: ProvenanceEvidence, item: ProvenanceItem, inputGenerations: Owner[]): SourceReferences {
   const provenance = evidence.provenance;
-  if (provenance && typeof provenance.analyzerId === 'string' && Number.isSafeInteger(provenance.generationId)) return { owner: { analyzerId: provenance.analyzerId, generationId: provenance.generationId as number }, evidenceId: typeof provenance.sourceEvidenceId === 'string' ? provenance.sourceEvidenceId : evidence.id ?? '' };
+  const workspaceId = evidence.workspaceId ?? item.workspaceId;
   if (provenance && Array.isArray(provenance.sources)) {
-    const first = provenance.sources.find(value => value && typeof value === 'object' && typeof (value as Record<string, unknown>).analyzerId === 'string') as Record<string, unknown> | undefined;
-    if (first && typeof first.analyzerId === 'string') {
-      const owner = typeof first.generationId === 'number' ? { analyzerId: first.analyzerId, generationId: first.generationId } : owners.find(candidate => candidate.analyzerId === first.analyzerId);
-      if (owner) return { owner, evidenceId: typeof first.evidenceId === 'string' ? first.evidenceId : evidence.id ?? '' };
+    const references: SourceReference[] = [];
+    let incomplete = false;
+    for (const value of provenance.sources) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) { incomplete = true; continue; }
+      const source = value as Record<string, unknown>;
+      if (typeof source.analyzerId !== 'string' || !source.analyzerId || typeof source.evidenceId !== 'string' || !source.evidenceId) { incomplete = true; continue; }
+      const matches = inputGenerations.filter(input => input.analyzerId === source.analyzerId);
+      const hasGeneration = Object.hasOwn(source, 'generationId') && source.generationId !== null && source.generationId !== undefined;
+      const generationId = hasGeneration ? Number.isSafeInteger(source.generationId) && Number(source.generationId) > 0 ? Number(source.generationId) : undefined : matches.length === 1 ? matches[0]!.generationId : undefined;
+      const sourceWorkspaceId = typeof source.workspaceId === 'string' && source.workspaceId ? source.workspaceId : undefined;
+      if (typeof sourceWorkspaceId !== 'string' || !sourceWorkspaceId || generationId === undefined) { incomplete = true; continue; }
+      references.push({ workspaceId: sourceWorkspaceId, analyzerId: source.analyzerId, generationId, evidenceId: source.evidenceId });
     }
+    return { references: dedupeReferences(references), incomplete: incomplete || references.length === 0 };
   }
-  if (item.analyzerId && Number.isSafeInteger(item.generationId)) return { owner: { analyzerId: item.analyzerId, generationId: item.generationId! }, evidenceId: evidence.id ?? '' };
-  return undefined;
+  if (provenance && ['analyzerId', 'generationId', 'sourceEvidenceId', 'sources'].some(key => Object.hasOwn(provenance, key))) {
+    if (typeof provenance.analyzerId !== 'string' || !provenance.analyzerId || !Number.isSafeInteger(provenance.generationId) || Number(provenance.generationId) < 1 || typeof provenance.sourceEvidenceId !== 'string' || !provenance.sourceEvidenceId) return { references: [], incomplete: true };
+    const sourceWorkspaceId = Object.hasOwn(provenance, 'workspaceId') ? typeof provenance.workspaceId === 'string' && provenance.workspaceId ? provenance.workspaceId : undefined : workspaceId;
+    return typeof sourceWorkspaceId === 'string' && sourceWorkspaceId ? { references: [{ workspaceId: sourceWorkspaceId, analyzerId: provenance.analyzerId, generationId: provenance.generationId as number, evidenceId: provenance.sourceEvidenceId }], incomplete: false } : { references: [], incomplete: true };
+  }
+  if (evidence.analyzerId && Number.isSafeInteger(evidence.generationId) && Number(evidence.generationId) > 0 && evidence.id) {
+    return workspaceId ? { references: [{ workspaceId, analyzerId: evidence.analyzerId, generationId: evidence.generationId!, evidenceId: evidence.id }], incomplete: false } : { references: [], incomplete: true };
+  }
+  return { references: [], incomplete: true };
+}
+
+function dedupeReferences(references: SourceReference[]): SourceReference[] {
+  const seen = new Set<string>();
+  return references.filter(reference => {
+    const key = JSON.stringify([reference.workspaceId, reference.analyzerId, reference.generationId, reference.evidenceId]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** Common evidence and contribution view used by all graph inspectors. */
-export function ProvenanceInspector({ item, compact = false }: { item: ProvenanceItem; compact?: boolean }) {
+export function ProvenanceInspector({ item, compact = false, inputGenerations = [] }: { item: ProvenanceItem; compact?: boolean; inputGenerations?: Owner[] }) {
   const contributors = item.contributors?.length ? item.contributors : item.analyzerId && Number.isSafeInteger(item.generationId) ? [{ analyzerId: item.analyzerId, generationId: item.generationId! }] : [];
   const evidence = item.evidence ?? [];
   const conflicts = item.propertyConflicts ?? [];
@@ -50,13 +77,12 @@ export function ProvenanceInspector({ item, compact = false }: { item: Provenanc
     })}</ul> : <p>Properties were not included.</p>}
     <h4>Property conflicts ({conflicts.length})</h4>{conflicts.length ? <ul>{conflicts.map(conflict => <li key={conflict.property}><strong>{conflict.property}</strong><ul>{conflict.values.map((entry, index) => <li key={`${entry.owner.analyzerId}:${entry.owner.generationId}:${index}`}><code>{JSON.stringify(entry.value)}</code> · {entry.owner.analyzerId} #{entry.owner.generationId}</li>)}</ul></li>)}</ul> : <p>No property conflicts were recorded.</p>}
     <h4>Evidence ({item.evidenceCount ?? evidence.length})</h4>{evidence.length ? <ul>{evidence.map((entry, index) => {
-      const reference = sourceReference(entry, item, contributors);
-      const owner = reference?.owner;
+      const refs = sourceReferences(entry, item, inputGenerations);
       const location = entry.uri ? `${entry.uri}${entry.line ? `:${entry.line}` : ''}${entry.column !== undefined ? `:${entry.column}` : ''}` : 'Source location not recorded';
       const exact = [entry.line !== undefined && `line ${entry.line}`, entry.column !== undefined && `column ${entry.column}`, entry.endLine !== undefined && `end line ${entry.endLine}`, entry.endColumn !== undefined && `end column ${entry.endColumn}`, entry.startOffset !== undefined && `start offset ${entry.startOffset}`, entry.endOffset !== undefined && `end offset ${entry.endOffset}`].filter(Boolean).join(' · ');
       const provenanceId = entry.id ?? `${entry.type}-${index}`;
-      return <li key={provenanceId}><strong>{entry.level ?? 'Unknown'} · {entry.type}</strong><p><code>{location}</code></p>{exact && <p>{exact}</p>}{reference?.evidenceId && <p>Evidence ID: <code>{reference.evidenceId}</code>{owner ? ` · ${owner.analyzerId} #${owner.generationId}` : ''}</p>}{entry.detail && <p>{entry.detail}</p>}
-        {owner && item.workspaceId && reference?.evidenceId && entry.uri ? <SourceEvidenceButton source={{ workspaceId: item.workspaceId, analyzerId: owner.analyzerId, generationId: owner.generationId, evidenceId: reference.evidenceId }}/> : <span>Original evidence owner or navigable source reference was not recorded.</span>}
+      return <li key={provenanceId}><strong>{entry.level ?? 'Unknown'} · {entry.type}</strong><p><code>{location}</code></p>{exact && <p>{exact}</p>}{refs.references.length > 0 && <ul aria-label="Exact source references">{refs.references.map(reference => <li key={`${reference.workspaceId}:${reference.analyzerId}:${reference.generationId}:${reference.evidenceId}`}><code>{reference.workspaceId} · {reference.analyzerId} #{reference.generationId} · {reference.evidenceId}</code><SourceEvidenceButton source={reference}/></li>)}</ul>}{refs.incomplete && <p role="note">Some original source references are incomplete or unavailable; no owner was inferred.</p>}{entry.detail && <p>{entry.detail}</p>}
+        {refs.references.length === 0 && !refs.incomplete && <span>Original evidence reference was not recorded.</span>}
       </li>;
     })}</ul> : <p>{item.evidenceCount ? 'Evidence details were not included.' : 'No evidence was recorded.'}</p>}
   </section>;

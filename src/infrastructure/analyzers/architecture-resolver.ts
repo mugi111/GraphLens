@@ -102,7 +102,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       id: evidenceId(id, `architecture.${method}`), subjectKind: 'edge', subjectId: id, level,
       type: `architecture.${method}`,
       ...(level === 'INFERRED' ? { confidence } : {}),
-      provenance: { sources: [sourceProvenance(sources.fastApi, fastSource), sourceProvenance(sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
+      provenance: { sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastSource), sourceProvenance(sources.workspaceId, sources.openApi, specSource)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`),
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
@@ -217,7 +217,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
     const source = evidenceFor(input, endpoint.id);
     const item: AnalysisEvidence = {
       id: evidenceId(id, `architecture.${kind}`), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: `architecture.${kind}`,
-      provenance: { sources: [sourceProvenance(input, source)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
+      provenance: { sources: [sourceProvenance(sources.workspaceId, input, source)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) },
       inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`), detail: message,
     };
     if (!evidenceIds.has(item.id)) { evidenceIds.add(item.id); evidence.push(item); }
@@ -242,8 +242,8 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
       const edgeId = ids.edge(sources.workspaceId, fast.id, id, 'architecture_contract_finding');
       edges.push({ id: edgeId, workspaceId: sources.workspaceId, sourceId: fast.id, targetId: id, kind: 'architecture_contract_finding', properties: { code: 'ARCHITECTURE_CONTRACT_MISMATCH', dimension } });
       const fastEvidence = evidenceFor(sources.fastApi, fast.id); const specEvidence = evidenceFor(sources.openApi, spec.id);
-      evidence.push({ id: evidenceId(id, 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
-      if (evidence.length < 10000) evidence.push({ id: evidenceId(edgeId, 'architecture.contract_mismatch.finding'), subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: 'architecture.contract_mismatch.finding', provenance: { sources: [sourceProvenance(sources.fastApi, fastEvidence), sourceProvenance(sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      evidence.push({ id: evidenceId(id, 'architecture.mismatch'), subjectKind: 'node', subjectId: id, level: 'DERIVED', type: 'architecture.contract_mismatch', provenance: { match, sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastEvidence), sourceProvenance(sources.workspaceId, sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
+      if (evidence.length < 10000) evidence.push({ id: evidenceId(edgeId, 'architecture.contract_mismatch.finding'), subjectKind: 'edge', subjectId: edgeId, level: 'DERIVED', type: 'architecture.contract_mismatch.finding', provenance: { sources: [sourceProvenance(sources.workspaceId, sources.fastApi, fastEvidence), sourceProvenance(sources.workspaceId, sources.openApi, specEvidence)], inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) }, inputGenerations: inputGenerations.map(({ analyzerId, generationId }) => `${analyzerId}:${generationId}`) });
       diagnostics.push({ code: 'ARCHITECTURE_CONTRACT_MISMATCH', severity: 'warning', message: `Provable ${dimension} contract mismatch for '${fast.label}'.`, detail: { dimension, fastApiEndpointId: fast.id, openApiEndpointId: spec.id } });
     };
     const fastParams = relations(sources.fastApi, fast, 'accepts').map(({ targetId }) => nodeById(sources.fastApi!, targetId)).filter((node): node is GraphNode => node?.kind === 'api_parameter');
@@ -409,7 +409,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
         if (evidenceIds.has(derivedId)) continue;
         if (evidence.length >= 10000) { markOutputLimit(); return; }
         evidenceIds.add(derivedId);
-        evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: source.id, sourceLevel: source.level, sourceProvenance: source.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
+        evidence.push({ ...source, id: derivedId, level: source.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', provenance: { workspaceId: sources.workspaceId, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: source.id, sourceLevel: source.level, sourceProvenance: source.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
       }
     }
     addNode(endpoint);
@@ -502,7 +502,7 @@ export function resolveArchitecture(sources: ArchitectureSources, rawConfig: Rec
             const derivedId = evidenceId(id, `architecture.accesses_model:${sourceGeneration.analyzerId}:${sourceGeneration.generationId}:${item.id}`);
             if (evidenceIds.has(derivedId)) continue;
             evidenceIds.add(derivedId);
-            evidence.push({ ...item, id: derivedId, subjectKind: 'edge', subjectId: id, level: item.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', type: 'architecture.accesses_model', provenance: { analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: item.id, sourceType: item.type, sourceLevel: item.level, sourceProvenance: item.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
+            evidence.push({ ...item, id: derivedId, subjectKind: 'edge', subjectId: id, level: item.level === 'INFERRED' ? 'INFERRED' : 'DERIVED', type: 'architecture.accesses_model', provenance: { workspaceId: sources.workspaceId, analyzerId: sourceGeneration.analyzerId, generationId: sourceGeneration.generationId, sourceEvidenceId: item.id, sourceType: item.type, sourceLevel: item.level, sourceProvenance: item.provenance ?? null }, inputGenerations: [`${sourceGeneration.analyzerId}:${sourceGeneration.generationId}`] });
           }
           if (sourceFacts.length === 0) {
             const fallbackId = evidenceId(id, 'architecture.accesses_model:identity-facts');
@@ -550,8 +550,8 @@ function mergeIndexedEdges(first: readonly GraphEdge[] = [], second: readonly Gr
 
 function stringProperty(node: GraphNode, key: string): string | undefined { const value = node.properties[key]; return typeof value === 'string' && value.length ? value : undefined; }
 function evidenceFor(generation: ArchitectureInputGeneration | undefined, subjectId: string): AnalysisEvidence | undefined { return generation?.evidence.find((item) => item.subjectKind === 'node' && item.subjectId === subjectId); }
-function sourceProvenance(generation: ArchitectureInputGeneration | undefined, evidence: AnalysisEvidence | undefined) {
-  return evidence ? { analyzerId: generation?.analyzerId ?? null, evidenceId: evidence.id, type: evidence.type, level: evidence.level, uri: evidence.uri ?? null, line: evidence.line ?? null } : null;
+function sourceProvenance(workspaceId: string, generation: ArchitectureInputGeneration | undefined, evidence: AnalysisEvidence | undefined) {
+  return evidence && generation ? { workspaceId, analyzerId: generation.analyzerId, generationId: generation.generationId, evidenceId: evidence.id, type: evidence.type, level: evidence.level, uri: evidence.uri ?? null, line: evidence.line ?? null } : null;
 }
 
 function normalizeScheme(node: GraphNode): string | undefined {
